@@ -1,0 +1,60 @@
+# AI 技术范式雷达：GitHub 云端自动化上线清单
+
+## 运行结果
+
+- 每周五 09:15（Asia/Shanghai）由 GitHub 云端运行，本机无需开机。
+- GitHub Actions 页面提供“Run workflow”按钮，可以随时手动执行，并选择 7 天或 30 天窗口。
+- 自动与手动触发都执行 `python main.py`，报告生成后都会发送邮件。
+- SMTP 发送失败会让任务失败，不会把该报告登记成已成功交付。
+- 去重数据库会在成功运行后保存为私有 Actions artifact；下一次运行先恢复，防止跨周重复。
+
+## 1. 建立私有 GitHub 仓库
+
+当前目录还不是 Git 仓库。先在 GitHub 新建一个 **Private** 仓库，再将本目录初始化并推送到默认分支。务必确认 `.env` 和 `*.db` 没有进入提交；它们已在 `.gitignore` 中排除。
+
+工作流必须位于默认分支，GitHub 的定时与手动触发才会生效。
+
+## 2. 配置 Actions Secrets
+
+进入 GitHub 仓库：`Settings → Secrets and variables → Actions → Secrets`，添加：
+
+| Secret | 是否必需 | 填写内容 |
+|---|---:|---|
+| `DASHSCOPE_API_KEY` | 是 | 阿里云百炼 API Key |
+| `SMTP_USERNAME` | 是 | 完整 QQ 邮箱，例如 `123456789@qq.com` |
+| `SMTP_PASSWORD` | 是 | QQ 邮箱生成的 SMTP 授权码，不是 QQ 密码 |
+| `SMTP_TO` | 是 | 收件邮箱；多个地址用英文逗号分隔 |
+| `OPENALEX_API_KEY` | 建议 | OpenAlex 免费 Key |
+| `SEMANTIC_SCHOLAR_API_KEY` | 否 | 没有学术邮箱时不创建此 Secret |
+
+不要创建名为 `GITHUB_TOKEN` 的 Secret。GitHub 会为每次运行自动提供权限受限的临时 token，工作流已直接使用。
+
+## 3. 配置 Actions Variables
+
+同一页面切换到 `Variables`，按需添加：
+
+| Variable | 填写内容 |
+|---|---|
+| `OPENREVIEW_VENUES` | 逗号分隔的 venue id |
+| `RESEARCH_FEED_URLS` | 已验证的官方 RSS/Atom 地址，逗号分隔 |
+
+不配置变量时，对应信源可能为空或使用项目默认值，不影响工作流语法。
+
+## 4. 首次手动验收
+
+1. 打开仓库的 `Actions`。
+2. 选择 `AI 技术范式雷达`。
+3. 点击 `Run workflow`，第一次选择 `7` 天。
+4. 确认“配置体检”“抓取、分析并发送邮件”“保存跨周去重状态”全部为绿色。
+5. 确认收件箱收到邮件，并在该次运行的 Artifacts 中看到报告与 `paradigm-radar-state`。
+
+首次成功后不需要再保持电脑开机。以后每周五由 GitHub 执行；网页手动运行和定时运行共享同一份去重状态。
+
+## 5. 运维注意事项
+
+- 不要同时长期运行本机 `python main.py --schedule` 或重复的 Codex 自动任务，否则可能在同一天收到两封邮件。
+- GitHub 定时任务可能因平台负载稍有延迟，所以安排在 09:15 而不是整点。
+- 状态和报告 artifact 当前保留 90 天；只要任务每周持续成功，下一周就能恢复最近状态。
+- 如果连续超过 90 天没有成功运行，artifact 可能过期，下一次会被视为新的首跑。
+- GitHub 公共仓库连续 60 天无活动可能停用 scheduled workflow，因此本项目建议使用私有仓库。
+- 修改工作流后，确保更改已经进入默认分支。

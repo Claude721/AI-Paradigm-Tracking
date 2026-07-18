@@ -1,0 +1,109 @@
+name: AI 技术范式雷达
+
+on:
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: 扫描最近多少天
+        required: true
+        default: "7"
+        type: choice
+        options:
+          - "7"
+          - "30"
+  schedule:
+    # 避开整点的 Actions 高峰；使用上海时区，无需手算 UTC。
+    - cron: "15 9 * * 5"
+      timezone: "Asia/Shanghai"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: paradigm-radar-delivery
+  cancel-in-progress: false
+
+jobs:
+  source-and-email:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PIPELINE_MODE: paradigm
+      LLM_PROVIDER: dashscope
+      LLM_MODEL: qwen3.7-plus
+      LLM_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+      LLM_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      SUB_AGENT_PROVIDER: dashscope
+      SUB_AGENT_MODEL: qwen3.7-plus
+      SUB_AGENT_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      MAIN_AGENT_PROVIDER: dashscope
+      MAIN_AGENT_MODEL: qwen3.7-plus
+      MAIN_AGENT_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+      SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+      OPENREVIEW_VENUES: ${{ vars.OPENREVIEW_VENUES }}
+      RESEARCH_FEED_URLS: ${{ vars.RESEARCH_FEED_URLS }}
+      SOURCING_LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '7' }}
+      EMAIL_PUSH_ENABLED: "true"
+      EMAIL_PUSH_REQUIRED: "true"
+      SMTP_HOST: smtp.qq.com
+      SMTP_PORT: "465"
+      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      SMTP_FROM: ${{ secrets.SMTP_USERNAME }}
+      SMTP_TO: ${{ secrets.SMTP_TO }}
+      SMTP_USE_SSL: "true"
+      SMTP_USE_STARTTLS: "false"
+
+    steps:
+      - name: 获取代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 恢复上一次去重状态
+        id: restore-state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifact_url="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=paradigm-radar-state&per_page=100" --jq '.artifacts | map(select(.expired == false)) | sort_by(.created_at) | last | .archive_download_url // empty')"
+          if [ -n "$artifact_url" ]; then
+            gh api "$artifact_url" > /tmp/paradigm-radar-state.zip
+            unzip -o /tmp/paradigm-radar-state.zip
+            echo "restored=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 配置体检
+        run: python main.py --doctor
+
+      - name: 抓取、分析并发送邮件
+        run: python main.py
+
+      - name: 保存跨周去重状态
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paradigm-radar-state
+          path: database/paradigm_radar.db
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: 保存本期报告
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paradigm-radar-report-${{ github.run_id }}
+          path: reports/output/*.md
+          retention-days: 90
+          if-no-files-found: error
