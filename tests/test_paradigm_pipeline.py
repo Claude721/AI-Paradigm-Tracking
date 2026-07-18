@@ -4,7 +4,9 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 import config
 from database.paradigm_store import ParadigmStore
@@ -17,8 +19,10 @@ from paradigms.models import (
     TechnicalEvidence,
 )
 from paradigms.scoring import is_reportable, score_candidate
-from reports.paradigm_generator import ParadigmReportGenerator
+from reports.paradigm_generator import ParadigmReportGenerator, _valid_editorial_report
 from skills.loader import SkillLoader
+from sources.paradigm_evidence_source import _is_relevant_repository
+from sources.researcher_profile_source import ResearcherProfileClient
 
 
 def paper(suffix: str = "1") -> TechnicalEvidence:
@@ -38,9 +42,14 @@ def candidate(evidence: list[TechnicalEvidence] | None = None) -> ParadigmCandid
     return ParadigmCandidate(
         key="latent-action-world-models",
         name="Latent-action world models",
+        route_family="World models for embodied control",
         thesis="从像素生成转向可行动的状态演变预测。",
+        background="逐帧像素生成很难直接为行动规划提供紧凑状态。",
         problem_shift="从生成下一帧转向学习可供行动规划使用的状态动力学。",
+        design_philosophy="先学习可行动的状态变化，再决定动作。",
         mechanism="从无标注视频中学习离散潜在动作并预测未来状态。",
+        technical_explanation="把视频变化压缩成离散潜在动作，并在该空间预测未来状态。",
+        application_value="让机器人从互联网视频中获得可迁移的动态先验。",
         lineage_parent="video prediction world models",
         lineage_path=["video prediction", "latent-action world models"],
         keywords=["latent action", "world model", "video prediction"],
@@ -113,6 +122,12 @@ class ParadigmPipelineTests(unittest.TestCase):
             store.mark_reported(first_delivery, Path(directory) / "week1.md")
             self.assertEqual(store.prepare_report([item]), [])
 
+            # 主观评分的轻微波动不是新事实，不能导致下一周重复发送。
+            signature = item.report_signature
+            item.total_score += 4.9
+            self.assertEqual(item.report_signature, signature)
+            self.assertEqual(store.prepare_report([item]), [])
+
             item.evidence.append(paper("3"))
             score_candidate(item)
             updated = store.prepare_report([item])
@@ -130,17 +145,42 @@ class ParadigmPipelineTests(unittest.TestCase):
             ResearcherProfile(
                 name="A. Researcher",
                 role="第一作者",
+                current_affiliation="Example Lab",
+                background_summary="长期研究视频世界模型与机器人策略。",
                 profile_urls={"orcid": "https://orcid.org/0000-0000-0000-0001"},
+                contact_search_notes=["已检索 OpenAlex", "已检索 ORCID"],
             )
         ]
         score_candidate(item)
         with tempfile.TemporaryDirectory() as directory:
             path = asyncio.run(
-                ParadigmReportGenerator(directory).generate([item], {"origin_count": 1})
+                ParadigmReportGenerator(directory, client=False).generate(
+                    [item], {"origin_count": 1}
+                )
             )
             content = path.read_text(encoding="utf-8")
         self.assertIn("https://orcid.org/0000-0000-0000-0001", content)
         self.assertNotIn("@example", content)
+        self.assertIn("## 本期研究 Memo", content)
+        self.assertNotIn("评分拆解", content)
+        self.assertNotIn("| 新颖性 |", content)
+
+    def test_editorial_gate_rejects_scores_and_tables(self) -> None:
+        item = candidate()
+        item.researchers = [ResearcherProfile(name="A. Researcher")]
+        memo = "本期技术路线从旧方法的边界出发，解释设计思想如何落到训练与推理。" * 18
+        body = "技术部分继续分析问题、机制、证据和应用价值。" * 25
+        report = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
+            f"{memo}\n\n## **技术路线**开始改变能力边界\n\n"
+            f"{body} **关键机制**值得继续验证。A. Researcher 是本期关键作者。\n\n"
+            "## 接下来真正值得盯的信号\n\n观察独立复现与有内容的二次讨论。"
+        )
+        self.assertTrue(_valid_editorial_report(report, [item]))
+        self.assertFalse(_valid_editorial_report(report + "\n\n总分：92", [item]))
+        self.assertFalse(
+            _valid_editorial_report(report + "\n\n| 项目 | 数据 |\n|---|---|", [item])
+        )
 
     def test_paradigm_skill_renders_json_contract(self) -> None:
         prompt = SkillLoader().render(
@@ -153,18 +193,87 @@ class ParadigmPipelineTests(unittest.TestCase):
             identifiers={"arxiv": "2607.1"},
         )
         self.assertIn('"canonical_name"', prompt)
+        self.assertIn('"route_family"', prompt)
+        self.assertIn('"design_philosophy"', prompt)
         self.assertIn("2607.1", prompt)
 
         synthesis = SkillLoader().render(
             "paradigm_synthesis",
             provisional_name="World Model",
+            route_family="Embodied world models",
             provisional_thesis="thesis",
+            background="background",
             problem_shift="shift",
+            design_philosophy="philosophy",
             mechanism="mechanism",
+            technical_explanation="explanation",
             lineage_parent="video prediction",
             evidence="[]",
         )
         self.assertIn('"trend_interpretation"', synthesis)
+        self.assertIn('"excluded_evidence_indices"', synthesis)
+        self.assertIn('证据列表：[]', synthesis)
+
+        editorial = SkillLoader().render(
+            "weekly_research_memo",
+            date="2026-07-18",
+            lookback_days=7,
+            stats="{}",
+            candidate_dossiers="[]",
+        )
+        self.assertIn("约 450 到 650 个中文字", editorial)
+        self.assertIn("不展示总分", editorial)
+
+    def test_skill_loader_keeps_embedded_json_valid(self) -> None:
+        prompt = SkillLoader().render(
+            "weekly_research_memo",
+            date="2026-07-18",
+            lookback_days=7,
+            stats='{"origin_count": 3}',
+            candidate_dossiers='[{"name": "route"}]',
+        )
+        self.assertIn('{"origin_count": 3}', prompt)
+        self.assertNotIn('{{"origin_count"', prompt)
+
+    def test_github_paper_aggregator_is_not_implementation(self) -> None:
+        item = candidate()
+        aggregator = {
+            "full_name": "someone/arxiv-daily",
+            "description": "Daily papers including latent action world models",
+        }
+        implementation = {
+            "full_name": "lab/latent-action-world-models",
+            "description": "Official implementation for learning latent actions from video",
+        }
+        self.assertFalse(_is_relevant_repository(item, aggregator))
+        self.assertTrue(_is_relevant_repository(item, implementation))
+
+    def test_researcher_seed_survives_without_semantic_scholar_or_openalex(self) -> None:
+        evidence = paper()
+        evidence.organization = "Example Robotics Lab"
+        with patch.object(config, "OPENALEX_API_KEY", ""):
+            profiles = asyncio.run(
+                ResearcherProfileClient().enrich(evidence, existing=[])
+            )
+        self.assertEqual(profiles[0].name, "A. Researcher")
+        self.assertEqual(profiles[0].current_affiliation, "Example Robotics Lab")
+        self.assertTrue(profiles[0].contact_search_notes)
+
+    def test_researcher_lookup_failure_degrades_to_search_trace(self) -> None:
+        client = ResearcherProfileClient()
+        with (
+            patch.object(config, "OPENALEX_API_KEY", "configured"),
+            patch.object(
+                client,
+                "_openalex",
+                new=AsyncMock(side_effect=httpx.ConnectError("offline")),
+            ),
+        ):
+            profiles = asyncio.run(client.enrich(paper(), existing=[]))
+        self.assertEqual(profiles[0].name, "A. Researcher")
+        self.assertTrue(
+            any("OpenAlex 检索失败" in note for note in profiles[0].contact_search_notes)
+        )
 
 
 if __name__ == "__main__":

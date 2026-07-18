@@ -134,7 +134,7 @@ WECHAT_SOURCE_ENABLED: bool = _env_bool("WECHAT_SOURCE_ENABLED", False)
 WECHAT_RSS_BASE_URL: str = os.getenv("WECHAT_RSS_BASE_URL", "http://localhost:8001")
 WECHAT_RSS_TOKEN: str = os.getenv("WECHAT_RSS_TOKEN", "")
 
-# ── Follow Builders 信源（AI Builder 社交媒体追踪）────────
+# ── Follow Builders 二次传播信源（KOL / Podcast / Blog）─
 # 方案 A（默认）：读取原作者 GitHub 仓库的 JSON Feed，零成本
 # 方案 B（自建）：本地运行抓取脚本，需配置 API Key
 FOLLOW_BUILDERS_ENABLED: bool = _env_bool("FOLLOW_BUILDERS_ENABLED", True)

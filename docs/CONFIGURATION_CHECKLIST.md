@@ -47,14 +47,15 @@ OPENREVIEW_VENUES=ICLR.cc/2026/Conference,NeurIPS.cc/2026/Conference,NeurIPS.cc/
 
 Venue ID 来自 OpenReview 页面 URL 中 `group?id=` 后面的部分，不能带结尾 `/`。每年会议切换时更新年份。
 
-## B. 强烈建议配置
+## B. 推荐增强项
 
-- [ ] Semantic Scholar API Key
+- [ ] Semantic Scholar API Key（可选；没有学术邮箱就留空）
 - [ ] GitHub Token
 - [ ] 4 个以上官方研究 RSS/Atom Feed
+- [ ] Follow Builders 二次传播 Feed 已启用
 - [ ] SMTP 邮件推送
 
-Semantic Scholar：
+Semantic Scholar（可选）：
 
 1. 打开 https://www.semanticscholar.org/product/api 。
 2. 选择 “Request an API Key”，Key 会通过邮件发送。
@@ -64,7 +65,7 @@ Semantic Scholar：
 SEMANTIC_SCHOLAR_API_KEY=你的Semantic-Scholar-Key
 ```
 
-项目已经按照官方默认额度限制为每秒最多一个请求。Key 未获批前可以留空运行，但作者履历和引用增强更容易被限流。
+项目已经按照官方默认额度限制为每秒最多一个请求。Key 未获批时直接留空；引用增强可能更容易被限流，但人物身份仍会通过 OpenAlex、ORCID 与已核验个人主页补齐。
 
 GitHub：
 
@@ -83,6 +84,13 @@ RESEARCH_FEED_URLS=https://research.google/blog/rss/,https://deepmind.google/dis
 ```
 
 只填写 RSS/Atom XML 地址，不能填写普通博客首页。单个 Feed 失效时系统会跳过，不影响其他 Feed。
+
+KOL、播客与技术博客二次传播候选：
+
+```env
+FOLLOW_BUILDERS_ENABLED=true
+FOLLOW_BUILDERS_FEED_URL=https://raw.githubusercontent.com/zarazhangrui/follow-builders/main
+```
 
 ## C. 邮件推送（选择一个邮箱）
 
@@ -205,16 +213,11 @@ python main.py
 - [ ] 邮件附件可以正常打开
 - [ ] 日志中没有持续的 401、403 或 429
 - [ ] 报告没有把普通 GitHub 项目当成独立范式
+- [ ] 报告开头有约 500 字“本期研究 Memo”
+- [ ] 最终报告不展示评分表或证据堆叠表
+- [ ] 多篇同 background 工作被组织成技术路线，而不是一篇一节机械展开
+- [ ] 关键人物至少有机构/背景与身份检索记录；有公开主页或邮箱时已附链接
 
-## G. 当前已知配置状态
+## G. GitHub Actions 配置位置
 
-截至最近一次静态体检：
-
-- [x] 主模型：`dashscope/qwen3.7-plus`
-- [x] 子模型：`dashscope/qwen3.7-plus`
-- [x] GitHub Token 已配置
-- [x] Codex 每周五自动任务已创建
-- [ ] OpenAlex Key 尚未配置
-- [ ] Semantic Scholar Key 尚未配置
-- [ ] 官方研究 Feed 尚未配置
-- [ ] SMTP 尚未启用/配置完整
+API Key、QQ 邮箱与 SMTP 授权码放在 **Repository secrets**；OpenReview venue 与研究 Feed 放在 **Repository variables**。不要使用 Environment secrets，除非工作流同时显式绑定对应 environment。详见 [`CLOUD_AUTOMATION.md`](CLOUD_AUTOMATION.md)。

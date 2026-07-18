@@ -6,11 +6,13 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import config
 from sources.arxiv_source import ArxivSource
 from sources.base import RawProject
 from sources.hf_papers_source import HuggingFacePapersSource
+from sources.follow_builders_source import FollowBuildersSource
 from sources.openalex_source import OpenAlexSource
 from sources.openreview_source import OpenReviewSource
 from sources.research_feed_source import ResearchFeedSource
@@ -36,6 +38,7 @@ class ParadigmDiscovery:
             lookback_days=lookback,
         )
         self.hf = HuggingFacePapersSource(lookback_days=lookback)
+        self.follow_builders = FollowBuildersSource()
         self.evidence_sources = [
             OpenAlexSource(lookback_days=lookback),
             OpenReviewSource(lookback_days=lookback),
@@ -43,9 +46,10 @@ class ParadigmDiscovery:
         ]
 
     async def run(self) -> DiscoveryBatch:
-        arxiv_raw, hf_raw, *native_batches = await asyncio.gather(
+        arxiv_raw, hf_raw, follow_raw, *native_batches = await asyncio.gather(
             self.arxiv.safe_fetch(),
             self.hf.safe_fetch(),
+            self.follow_builders.safe_fetch(),
             *(source.safe_fetch() for source in self.evidence_sources),
         )
 
@@ -53,6 +57,16 @@ class ParadigmDiscovery:
         supporting = [_hf_to_support(item) for item in hf_raw]
         # HF Daily Papers 可能覆盖 arXiv 查询词之外的重要论文，因此也作为候补原始论文。
         origins.extend(_raw_to_origin(item) for item in hf_raw)
+        origins.extend(
+            _follow_builder_blog_to_origin(item)
+            for item in follow_raw
+            if item.source == "follow-builders-blog" and _within_lookback(item)
+        )
+        supporting.extend(
+            _follow_builder_to_support(item)
+            for item in follow_raw
+            if item.source != "follow-builders-blog" and _within_lookback(item)
+        )
         for batch in native_batches:
             origins.extend(batch)
 
@@ -114,17 +128,70 @@ def _hf_to_support(item: RawProject) -> TechnicalEvidence:
     )
 
 
+def _follow_builder_blog_to_origin(item: RawProject) -> TechnicalEvidence:
+    return TechnicalEvidence(
+        source=item.source,
+        evidence_type=EvidenceType.TECHNICAL_BLOG,
+        title=item.name,
+        url=item.url,
+        summary=item.readme_summary or item.description,
+        published_at=item.created_at,
+        authors=[item.author] if item.author else [],
+        organization=str(item.extra.get("blog_name", "")),
+        raw=item.extra,
+    )
+
+
+def _follow_builder_to_support(item: RawProject) -> TechnicalEvidence:
+    metrics = {
+        key: item.extra.get(key, 0)
+        for key in ("likes", "retweets", "replies")
+        if item.extra.get(key) is not None
+    }
+    return TechnicalEvidence(
+        source=item.source,
+        evidence_type=EvidenceType.SECONDARY_INTERPRETATION,
+        title=item.name,
+        url=item.url,
+        summary=item.readme_summary or item.description,
+        published_at=item.created_at,
+        authors=[item.author] if item.author else [],
+        metrics=metrics,
+        raw={**item.extra, "relationship": "kol_or_podcast_candidate"},
+    )
+
+
 def _normalize_arxiv_id(value: str) -> str:
     match = re.search(r"(\d{4}\.\d{4,5})(?:v\d+)?", str(value))
     return match.group(1) if match else ""
 
 
+def _within_lookback(item: RawProject) -> bool:
+    if not item.created_at:
+        return True
+    try:
+        published = datetime.fromisoformat(
+            item.created_at.replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except ValueError:
+        return True
+    return published >= datetime.now(timezone.utc) - timedelta(
+        days=config.SOURCING_LOOKBACK_DAYS
+    )
+
+
 def _merge_origins(items: list[TechnicalEvidence]) -> list[TechnicalEvidence]:
     by_key: dict[str, TechnicalEvidence] = {}
+    title_keys: dict[str, str] = {}
     for item in items:
         key = item.identifiers.get("doi") or item.identifiers.get("arxiv") or item.fingerprint
+        title_key = re.sub(r"[^a-z0-9]+", "", item.title.casefold())
+        if title_key and title_key in title_keys:
+            key = title_keys[title_key]
         if key not in by_key:
             by_key[key] = item
+            if title_key:
+                title_keys[title_key] = key
             continue
         current = by_key[key]
         if len(item.summary) > len(current.summary):
@@ -133,6 +200,8 @@ def _merge_origins(items: list[TechnicalEvidence]) -> list[TechnicalEvidence]:
         current.metrics.update(item.metrics)
         current.identifiers.update(item.identifiers)
         current.raw.update(item.raw)
+        if item.organization and not current.organization:
+            current.organization = item.organization
         current.authors = list(dict.fromkeys(current.authors + item.authors))
         current.keywords = list(dict.fromkeys(current.keywords + item.keywords))
         if item.source not in current.raw.setdefault("also_seen_on", []):

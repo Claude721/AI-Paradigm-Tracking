@@ -45,14 +45,14 @@ class SkillLoader:
         return template
 
     def render(self, skill_name: str, **kwargs: object) -> str:
-        """加载 Skill 模板并填充变量（自动转义用户输入中的花括号）"""
+        """加载 Skill 模板并填充变量。
+
+        ``str.format`` 不会递归解析已经插入的参数值，因此 JSON 参数中的
+        花括号无需转义。旧实现会把真实 JSON 变成 ``{{...}}``，削弱 Agent
+        对证据结构的理解。
+        """
         template = self.load(skill_name)
-        safe_kwargs = {
-            k: str(v).replace("{", "{{").replace("}", "}}")
-            if isinstance(v, str) else v
-            for k, v in kwargs.items()
-        }
-        return template.format(**safe_kwargs)
+        return template.format(**kwargs)
 
     def reload(self, name: str | None = None) -> None:
         """清除缓存，强制重新读取文件（支持运行中热更新 Skill）"""
@@ -76,4 +76,3 @@ class SkillLoader:
             if match:
                 return raw[match.end():].strip()
         return raw.strip()
-

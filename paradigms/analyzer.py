@@ -52,7 +52,7 @@ class ParadigmAnalyzer:
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=1800,
+                max_tokens=2600,
                 response_format={"type": "json_object"},
             )
             payload = parse_json_object(response.choices[0].message.content or "{}")
@@ -85,9 +85,16 @@ class ParadigmAnalyzer:
             evidence=evidence,
             is_candidate=is_candidate,
             canonical_name=str(payload.get("canonical_name", "")).strip(),
+            route_family=str(payload.get("route_family", "")).strip(),
             thesis=str(payload.get("thesis", "")).strip(),
+            background=str(payload.get("background", "")).strip(),
             problem_shift=str(payload.get("problem_shift", "")).strip(),
+            design_philosophy=str(payload.get("design_philosophy", "")).strip(),
             mechanism=str(payload.get("mechanism", "")).strip(),
+            technical_explanation=str(
+                payload.get("technical_explanation", "")
+            ).strip(),
+            application_value=str(payload.get("application_value", "")).strip(),
             why_now=str(payload.get("why_now", "")).strip(),
             novelty_type=str(payload.get("novelty_type", "")).strip(),
             lineage_parent=str(payload.get("lineage_parent", "")).strip(),
@@ -153,6 +160,8 @@ class ResearcherTrajectoryAnalyzer:
             researcher_name=profile.name,
             affiliation=profile.current_affiliation,
             works=profile.representative_works,
+            contacts=profile.public_contacts,
+            search_notes=profile.contact_search_notes,
         )
         try:
             client, model = self._get_client()
@@ -160,12 +169,18 @@ class ResearcherTrajectoryAnalyzer:
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=700,
+                max_tokens=1100,
                 response_format={"type": "json_object"},
             )
             payload = parse_json_object(response.choices[0].message.content or "{}")
+            background = str(payload.get("background_summary", "")).strip()
+            if background:
+                profile.background_summary = background
             profile.research_trajectory = str(
                 payload.get("trajectory_summary", "")
+            ).strip()
+            profile.key_person_reason = str(
+                payload.get("key_person_reason", "")
             ).strip()
             try:
                 profile.trajectory_consistency = min(
@@ -213,21 +228,30 @@ class ParadigmSynthesizer:
     async def _synthesize_one(self, candidate: ParadigmCandidate) -> None:
         evidence_payload = [
             {
+                "index": index,
+                "fingerprint": item.fingerprint,
                 "type": item.evidence_type.value,
                 "source": item.source,
                 "title": item.title,
+                "url": item.url,
                 "summary": item.summary[:600],
+                "authors": item.authors,
                 "metrics": item.metrics,
                 "historical": bool(item.raw.get("historical")),
+                "relationship_hint": item.raw.get("relationship", ""),
             }
-            for item in candidate.evidence[:20]
+            for index, item in enumerate(candidate.evidence[:24])
         ]
         prompt = self.skill_loader.render(
             "paradigm_synthesis",
             provisional_name=candidate.name,
+            route_family=candidate.route_family,
             provisional_thesis=candidate.thesis,
+            background=candidate.background,
             problem_shift=candidate.problem_shift,
+            design_philosophy=candidate.design_philosophy,
             mechanism=candidate.mechanism,
+            technical_explanation=candidate.technical_explanation,
             lineage_parent=candidate.lineage_parent,
             evidence=json.dumps(evidence_payload, ensure_ascii=False),
         )
@@ -237,17 +261,23 @@ class ParadigmSynthesizer:
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=1400,
+                max_tokens=2600,
                 response_format={"type": "json_object"},
             )
             payload = parse_json_object(response.choices[0].message.content or "{}")
             for field_name in (
                 "name",
+                "route_family",
                 "thesis",
+                "background",
                 "problem_shift",
+                "design_philosophy",
                 "mechanism",
+                "technical_explanation",
+                "application_value",
                 "why_now",
                 "evidence_assessment",
+                "secondary_discussion_summary",
                 "trend_interpretation",
             ):
                 value = str(payload.get(field_name, "")).strip()
@@ -259,5 +289,19 @@ class ParadigmSynthesizer:
             lineage = _string_list(payload.get("lineage_path"))
             if lineage:
                 candidate.lineage_path = lineage
+            momentum = _string_list(payload.get("objective_momentum_signals"))
+            if momentum:
+                candidate.objective_momentum_signals = momentum
+            excluded = {
+                int(value)
+                for value in payload.get("excluded_evidence_indices", [])
+                if str(value).isdigit()
+            }
+            if excluded:
+                candidate.evidence = [
+                    item
+                    for index, item in enumerate(candidate.evidence)
+                    if index not in excluded
+                ]
         except Exception as exc:
             logger.warning("范式综合失败 [%s]: %s", candidate.name, exc)

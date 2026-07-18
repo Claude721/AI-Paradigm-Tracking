@@ -100,6 +100,7 @@ def _momentum_score(candidate: ParadigmCandidate) -> float:
             EvidenceType.SECONDARY_INTERPRETATION,
             EvidenceType.CITATION,
         }
+        and item.source != "huggingface-papers"
     )
     engagement = 0.0
     for item in candidate.evidence:

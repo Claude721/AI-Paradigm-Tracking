@@ -57,6 +57,8 @@ class CommunityEvidenceClient:
             return []
         results = []
         for repo in response.json().get("items", []):
+            if not _is_relevant_repository(candidate, repo):
+                continue
             results.append(
                 TechnicalEvidence(
                     source="github",
@@ -71,7 +73,10 @@ class CommunityEvidenceClient:
                         "forks": repo.get("forks_count", 0) or 0,
                     },
                     identifiers={"github": repo.get("full_name", "")},
-                    raw={"updated_at": repo.get("updated_at", "")},
+                    raw={
+                        "updated_at": repo.get("updated_at", ""),
+                        "relationship": "name_and_mechanism_match",
+                    },
                 )
             )
         return results
@@ -132,3 +137,47 @@ def _is_related(candidate: ParadigmCandidate, title: str) -> bool:
     }
     required = 1 if len(candidate_tokens) <= 2 else 2
     return len(title_tokens & candidate_tokens) >= required
+
+
+def _is_relevant_repository(candidate: ParadigmCandidate, repo: dict) -> bool:
+    """宁可漏掉弱信号，也不把论文聚合仓库伪装成实现。"""
+    full_name = str(repo.get("full_name", ""))
+    description = str(repo.get("description") or "")
+    text = f"{full_name} {description}".casefold()
+    noise_markers = {
+        "arxiv-daily",
+        "arxiv_daily",
+        "paper-daily",
+        "paper_daily",
+        "research-collection",
+        "research_collection",
+        "awesome-daily",
+        "awesome_papers",
+        "paper-list",
+        "paper_list",
+        "arxiv-radar",
+        "rss-feed",
+        "hfpaper",
+    }
+    if any(marker in text for marker in noise_markers):
+        return False
+
+    compact_repo = "".join(
+        character
+        for character in full_name.rsplit("/", 1)[-1].casefold()
+        if character.isalnum()
+    )
+    compact_name = "".join(character for character in candidate.name.casefold() if character.isalnum())
+    if min(len(compact_repo), len(compact_name)) >= 8 and (
+        compact_name in compact_repo or compact_repo in compact_name
+    ):
+        return True
+
+    candidate_tokens = {
+        token.casefold().strip("-_/.,:()[]")
+        for value in [candidate.name, candidate.route_family, *candidate.keywords]
+        for token in value.split()
+        if len(token.strip("-_/.,:()[]")) >= 5
+    }
+    overlap = {token for token in candidate_tokens if token in text}
+    return len(overlap) >= 2

@@ -13,11 +13,11 @@
           ↓
  新颖性 + 扎实度 + 范式外延硬门槛
           ↓
- GitHub / HF / HN / 引用网络验证扩散与复现
+ GitHub / HF / HN / KOL 二次解读验证扩散与复现
           ↓
- 第一作者与关键作者的研究轨迹、现状、公开专业联系方式
+ OpenAlex / S2 / ORCID / 个人主页核验关键人物
           ↓
- 每周技术范式雷达邮件
+ 研究总编辑合并技术路线并生成每周 Memo
 ```
 
 信源被分成三类，职责不能混用：
@@ -26,7 +26,7 @@
 |---|---|---|
 | 原始发现 | arXiv、OpenAlex、OpenReview、官方研究博客 | 发现论文、机制与技术谱系 |
 | 扎实度验证 | OpenReview 公开评审、Semantic Scholar 引用/作者图谱 | 验证实验、学术承接和人物轨迹 |
-| 扩散验证 | Hugging Face Daily Papers、GitHub、Hacker News | 验证讨论、实现、复现和二次传播 |
+| 扩散验证 | Hugging Face Daily Papers、GitHub、Hacker News、Follow Builders | 验证讨论、实现、复现、KOL/播客二次传播 |
 
 Product Hunt、普通 GitHub Trending 和产品热榜不再决定候选，只在未来需要观察技术落地时作为弱信号。
 
@@ -47,15 +47,9 @@ Product Hunt、普通 GitHub Trending 和产品热榜不再决定候选，只在
 
 ## 每周交付物
 
-报告文件位于 `reports/output/paradigm_radar_YYYY-MM-DD.md`，每个章节对应一个技术范式，包括：
+报告文件位于 `reports/output/paradigm_radar_YYYY-MM-DD.md`。上游评分仍用于筛选，但最终报告不展示分数和证据表。研究总编辑会先写约 500 字的本期 Memo，再按共同 background 把多篇工作组织成少数技术路线，连贯说明旧瓶颈、朴素思想、技术落地、路线分歧、应用价值和客观传播证据。
 
-- 技术谱系：上一代范式 → 当前关键节点
-- 旧问题定义与新问题定义的差异
-- 核心机制和为什么现在可行
-- 论文、评审、引用、实现、讨论的跨平台证据表
-- 扩散势能与当前仍缺失的证据
-- 第一作者/关键作者的代表作、研究连续性和当前机构
-- 已验证的公开专业主页、ORCID 或公开邮箱；没有则明确留空
+每条重要路线都会追踪第一作者或关键作者。人物档案优先核验当前机构、代表作、研究连续性、个人主页、ORCID、GitHub、LinkedIn 与公开邮箱；没有公开联系方式时，报告必须保留检索过的公开来源和能够确认的最低背景，不能只写“尚未验证”。
 
 系统使用独立的 `database/paradigm_radar.db`。同一证据按 DOI、arXiv ID 或稳定 URL 去重；同一范式只有在证据签名发生实质变化时才会以“进展更新”再次出现，因此相邻周不会原样重复。
 
@@ -70,7 +64,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-至少填写 DashScope Key。OpenAlex 免费 Key 和 Semantic Scholar Key 建议一并配置，否则学术覆盖和人物轨迹会变弱。
+至少填写 DashScope Key 与 OpenAlex 免费 Key。Semantic Scholar Key 是可选增强项；没有学术邮箱时留空即可，人物轨迹仍会通过 OpenAlex、ORCID 与已核验个人主页补齐。
 
 ```bash
 python main.py             # 立即执行一次
@@ -132,10 +126,12 @@ sources/
   openalex_source.py
   openreview_source.py
   semantic_scholar_source.py
+  researcher_profile_source.py
   paradigm_evidence_source.py
 database/paradigm_store.py
 reports/paradigm_generator.py
 agents/paradigm_orchestrator.py
+skills/weekly_research_memo/SKILL.md
 ```
 
 旧版项目型流水线仍保留，可通过 `PIPELINE_MODE=legacy` 回退，但默认不再使用。

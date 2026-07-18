@@ -8,8 +8,9 @@ from difflib import SequenceMatcher
 
 from sources.paradigm_evidence_source import CommunityEvidenceClient
 from sources.semantic_scholar_source import SemanticScholarClient
+from sources.researcher_profile_source import ResearcherProfileClient
 
-from .models import ParadigmCandidate, TechnicalEvidence
+from .models import EvidenceType, ParadigmCandidate, TechnicalEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class EvidenceEnricher:
         self.concurrency = max(concurrency, 1)
         self.semantic_scholar = SemanticScholarClient()
         self.community = CommunityEvidenceClient()
+        self.researchers = ResearcherProfileClient()
 
     async def run(
         self,
@@ -59,6 +61,11 @@ class EvidenceEnricher:
         candidate.evidence = list(
             {item.fingerprint: item for item in candidate.evidence}.values()
         )
+        # Semantic Scholar 可匿名但经常受共享限流影响。无论其是否成功，
+        # 都用当前论文作者建立人物种子，并通过 OpenAlex/ORCID 补齐身份。
+        candidate.researchers = await self.researchers.enrich(
+            lead, candidate.researchers
+        )
 
     @staticmethod
     def _attach_support(
@@ -79,6 +86,14 @@ class EvidenceEnricher:
             )
             if candidate_ids & support_ids or title_match >= 0.9:
                 candidate.evidence.append(item)
+                repository = str(item.raw.get("github_repo", "")).strip()
+                if repository:
+                    candidate.evidence.append(
+                        _official_repository_evidence(item, repository)
+                    )
+                continue
+            if _lexically_related(candidate, item):
+                candidate.evidence.append(item)
 
 
 def _merge_profiles(existing, new):
@@ -86,3 +101,43 @@ def _merge_profiles(existing, new):
     for profile in new:
         by_name[profile.name.lower()] = profile
     return list(by_name.values())
+
+
+def _lexically_related(
+    candidate: ParadigmCandidate, evidence: TechnicalEvidence
+) -> bool:
+    """只为后续 LLM 审计提供小规模候选，不直接认定为趋势证据。"""
+    haystack = f"{evidence.title} {evidence.summary}".casefold()
+    phrases = [candidate.name, candidate.route_family, *candidate.keywords]
+    exact = any(
+        len(value.strip()) >= 7 and value.casefold() in haystack
+        for value in phrases
+        if value
+    )
+    tokens = {
+        token.casefold()
+        for value in phrases
+        for token in value.replace("-", " ").split()
+        if len(token) >= 5
+    }
+    overlap = sum(token in haystack for token in tokens)
+    return exact or overlap >= 2
+
+
+def _official_repository_evidence(
+    source: TechnicalEvidence, repository: str
+) -> TechnicalEvidence:
+    url = repository if repository.startswith("http") else f"https://github.com/{repository}"
+    full_name = repository.rstrip("/").removeprefix("https://github.com/")
+    return TechnicalEvidence(
+        source="github",
+        evidence_type=EvidenceType.IMPLEMENTATION,
+        title=full_name,
+        url=url,
+        summary="Hugging Face 论文元数据直接关联的代码仓库",
+        published_at=source.published_at,
+        authors=source.authors,
+        metrics={"stars": source.metrics.get("stars", 0)},
+        identifiers={"github": full_name},
+        raw={"relationship": "paper_linked_repository"},
+    )

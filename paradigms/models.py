@@ -74,6 +74,9 @@ class ResearcherProfile:
     public_email: str = ""
     public_email_source: str = ""
     identifiers: dict[str, str] = field(default_factory=dict)
+    background_summary: str = ""
+    key_person_reason: str = ""
+    contact_search_notes: list[str] = field(default_factory=list)
 
     @property
     def public_contacts(self) -> dict[str, str]:
@@ -92,6 +95,11 @@ class ParadigmExtraction:
     thesis: str
     problem_shift: str
     mechanism: str
+    route_family: str = ""
+    background: str = ""
+    design_philosophy: str = ""
+    technical_explanation: str = ""
+    application_value: str = ""
     why_now: str = ""
     evidence_assessment: str = ""
     trend_interpretation: str = ""
@@ -123,6 +131,13 @@ class ParadigmCandidate:
     evidence_assessment: str = ""
     trend_interpretation: str = ""
     open_questions: list[str] = field(default_factory=list)
+    route_family: str = ""
+    background: str = ""
+    design_philosophy: str = ""
+    technical_explanation: str = ""
+    application_value: str = ""
+    secondary_discussion_summary: str = ""
+    objective_momentum_signals: list[str] = field(default_factory=list)
     novelty_type: str = ""
     lineage_parent: str = ""
     lineage_path: list[str] = field(default_factory=list)
@@ -158,7 +173,6 @@ class ParadigmCandidate:
             "key": self.key,
             "evidence": sorted(item.fingerprint for item in self.evidence),
             "mechanism": self.mechanism.strip(),
-            "score_bucket": int(self.total_score // 5),
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

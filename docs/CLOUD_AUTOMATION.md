@@ -8,9 +8,9 @@
 - SMTP 发送失败会让任务失败，不会把该报告登记成已成功交付。
 - 去重数据库会在成功运行后保存为私有 Actions artifact；下一次运行先恢复，防止跨周重复。
 
-## 1. 建立私有 GitHub 仓库
+## 1. 私有 GitHub 仓库
 
-当前目录还不是 Git 仓库。先在 GitHub 新建一个 **Private** 仓库，再将本目录初始化并推送到默认分支。务必确认 `.env` 和 `*.db` 没有进入提交；它们已在 `.gitignore` 中排除。
+项目应保存在 **Private** GitHub 仓库。推送前务必确认 `.env` 和 `*.db` 没有进入提交；它们已在 `.gitignore` 中排除。
 
 工作流必须位于默认分支，GitHub 的定时与手动触发才会生效。
 
@@ -24,7 +24,7 @@
 | `SMTP_USERNAME` | 是 | 完整 QQ 邮箱，例如 `123456789@qq.com` |
 | `SMTP_PASSWORD` | 是 | QQ 邮箱生成的 SMTP 授权码，不是 QQ 密码 |
 | `SMTP_TO` | 是 | 收件邮箱；多个地址用英文逗号分隔 |
-| `OPENALEX_API_KEY` | 建议 | OpenAlex 免费 Key |
+| `OPENALEX_API_KEY` | 是 | OpenAlex 免费 Key；用于论文检索与作者身份核验 |
 | `SEMANTIC_SCHOLAR_API_KEY` | 否 | 没有学术邮箱时不创建此 Secret |
 
 不要创建名为 `GITHUB_TOKEN` 的 Secret。GitHub 会为每次运行自动提供权限受限的临时 token，工作流已直接使用。
@@ -58,3 +58,4 @@
 - 如果连续超过 90 天没有成功运行，artifact 可能过期，下一次会被视为新的首跑。
 - GitHub 公共仓库连续 60 天无活动可能停用 scheduled workflow，因此本项目建议使用私有仓库。
 - 修改工作流后，确保更改已经进入默认分支。
+- 工作流使用 Node 24 版本的 `checkout@v6`、`setup-python@v6` 与 `upload-artifact@v7`；任务不执行 git push，因此 checkout 不持久化临时凭据。

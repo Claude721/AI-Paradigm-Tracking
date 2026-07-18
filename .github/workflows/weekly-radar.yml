@@ -59,10 +59,14 @@ jobs:
 
     steps:
       - name: 获取代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          # 工作流不执行 git push，无需把临时凭据写进仓库配置；同时避免
+          # post-job 清理凭据时产生非致命的 git exit 128 warning。
+          persist-credentials: false
 
       - name: 准备 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -92,7 +96,7 @@ jobs:
 
       - name: 保存跨周去重状态
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: paradigm-radar-state
           path: database/paradigm_radar.db
@@ -101,7 +105,7 @@ jobs:
 
       - name: 保存本期报告
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: paradigm-radar-report-${{ github.run_id }}
           path: reports/output/*.md
