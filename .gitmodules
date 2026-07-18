@@ -1,0 +1,6 @@
+[submodule "gzh_sourcing/we-mp-rss"]
+	path = gzh_sourcing/we-mp-rss
+	url = https://github.com/rachelos/we-mp-rss.git
+[submodule "social_media_sourcing/follow-builders"]
+	path = social_media_sourcing/follow-builders
+	url = https://github.com/zarazhangrui/follow-builders.git
