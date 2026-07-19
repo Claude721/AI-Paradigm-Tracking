@@ -15,3 +15,6 @@ apscheduler>=3.10,<4.0
 
 # API 与 LLM 调用的指数退避重试
 tenacity>=8.2,<10.0
+
+# 官方研究页直接链接 Technical Report PDF 时提取正文
+pypdf>=5.0,<7.0

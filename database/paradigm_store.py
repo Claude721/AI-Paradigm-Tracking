@@ -194,6 +194,36 @@ class ParadigmStore:
                     candidate.evidence.append(item)
                     existing.add(item.fingerprint)
 
+    def load_refresh_candidates(
+        self,
+        exclude_keys: set[str] | None = None,
+        limit: int | None = None,
+    ) -> list[ParadigmCandidate]:
+        """载入观察中/已报告路线，供本周新增讨论重新触发评估。"""
+        excluded = exclude_keys or set()
+        target_limit = limit or config.PARADIGM_MAX_REFRESH_ITEMS
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload_json FROM paradigms
+                WHERE status != 'rejected'
+                ORDER BY last_seen_at DESC
+                LIMIT ?
+                """,
+                (target_limit + len(excluded),),
+            ).fetchall()
+        candidates = []
+        for row in rows:
+            candidate = candidate_from_dict(json.loads(row[0]))
+            if candidate.key in excluded:
+                continue
+            for evidence in candidate.evidence:
+                evidence.raw = {**evidence.raw, "historical": True}
+            candidates.append(candidate)
+            if len(candidates) >= target_limit:
+                break
+        return candidates
+
     def save_candidates(self, candidates: list[ParadigmCandidate]) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:

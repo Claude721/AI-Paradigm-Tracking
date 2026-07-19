@@ -2,25 +2,68 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from urllib.parse import quote
 
 import httpx
 
 import config
 from paradigms.models import EvidenceType, ParadigmCandidate, TechnicalEvidence
+from sources.reddit_evidence_source import RedditEvidenceClient
+from sources.social_web_search_source import SocialWebSearchClient
 
 logger = logging.getLogger(__name__)
 
 
 class CommunityEvidenceClient:
+    def __init__(self):
+        self.social_web = SocialWebSearchClient()
+        self.reddit = RedditEvidenceClient()
+
     async def search(self, candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            github, hn = await self._github(client, candidate), await self._hackernews(
-                client, candidate
+            batches = await asyncio.gather(
+                self._github(client, candidate),
+                self._hackernews(client, candidate),
+                self.social_web.search(client, candidate),
+                self.reddit.search(client, candidate),
+                self._x_title_search(client, candidate),
+                return_exceptions=True,
             )
-        return github + hn
+        results = []
+        for source_name, batch in zip(
+            ("GitHub", "Hacker News", "Tavily", "Reddit", "X"), batches
+        ):
+            if isinstance(batch, Exception):
+                logger.warning("%s 范式证据搜索失败: %s", source_name, batch)
+                continue
+            results.extend(batch)
+        return results
+
+    def coverage(self) -> dict[str, str]:
+        return {
+            "github": "已尝试官方 API 搜索；单次失败会降级",
+            "hackernews": "已尝试 Algolia 搜索；单次失败会降级",
+            "tavily_social_web": (
+                "已配置并尝试公开网页索引搜索 X、Reddit 与小红书；结果非平台全量"
+                if config.TAVILY_SOCIAL_SEARCH_ENABLED and config.TAVILY_API_KEY
+                else "未配置 Tavily，未执行跨站公开索引搜索"
+            ),
+            "reddit_official": (
+                "已配置获批 OAuth Data API 并尝试搜索；是否命中以 evidence 为准"
+                if self.reddit.configured
+                else "未配置或未确认 Reddit Data API 批准；只保留网页索引覆盖"
+            ),
+            "x_official": (
+                "已配置 X Recent Search 并尝试获取公开帖子和互动量"
+                if config.TWITTER_BEARER_TOKEN
+                else "未配置 X API；不得把未检出解释为零讨论"
+            ),
+        }
 
     async def _github(
         self, client: httpx.AsyncClient, candidate: ParadigmCandidate
@@ -56,8 +99,14 @@ class CommunityEvidenceClient:
             logger.warning("GitHub 范式证据搜索失败: HTTP %s", response.status_code)
             return []
         results = []
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            days=config.SOURCING_LOOKBACK_DAYS
+        )
         for repo in response.json().get("items", []):
             if not _is_relevant_repository(candidate, repo):
+                continue
+            updated_at = str(repo.get("updated_at", ""))
+            if (updated := _parse_datetime(updated_at)) and updated < cutoff:
                 continue
             results.append(
                 TechnicalEvidence(
@@ -66,7 +115,7 @@ class CommunityEvidenceClient:
                     title=repo.get("full_name", ""),
                     url=repo.get("html_url", ""),
                     summary=repo.get("description") or "",
-                    published_at=repo.get("created_at", ""),
+                    published_at=updated_at or repo.get("created_at", ""),
                     authors=[(repo.get("owner") or {}).get("login", "")],
                     metrics={
                         "stars": repo.get("stargazers_count", 0) or 0,
@@ -75,7 +124,9 @@ class CommunityEvidenceClient:
                     identifiers={"github": repo.get("full_name", "")},
                     raw={
                         "updated_at": repo.get("updated_at", ""),
+                        "created_at": repo.get("created_at", ""),
                         "relationship": "name_and_mechanism_match",
+                        "independence": "unverified",
                     },
                 )
             )
@@ -118,6 +169,93 @@ class CommunityEvidenceClient:
                         "comments": hit.get("num_comments", 0) or 0,
                     },
                     identifiers={"hackernews": str(object_id)},
+                    raw={"relationship": "exact_or_mechanism_title_match"},
+                )
+            )
+        return results
+
+    async def _x_title_search(
+        self, client: httpx.AsyncClient, candidate: ParadigmCandidate
+    ) -> list[TechnicalEvidence]:
+        """可选的精确标题搜索；同时提供作者本人公开发布时的身份线索。"""
+        if not config.TWITTER_BEARER_TOKEN:
+            return []
+        lead_title = next(
+            (
+                item.title
+                for item in candidate.evidence
+                if item.evidence_type
+                in {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG}
+            ),
+            candidate.name,
+        )
+        phrase = re.sub(r"[\"\n\r]+", " ", lead_title).strip()[:180]
+        if not phrase:
+            return []
+        response = await client.get(
+            "https://api.x.com/2/tweets/search/recent",
+            headers={"Authorization": f"Bearer {config.TWITTER_BEARER_TOKEN}"},
+            params={
+                "query": f'"{phrase}" -is:retweet',
+                "max_results": 20,
+                "tweet.fields": "created_at,author_id,public_metrics",
+                "expansions": "author_id",
+                "user.fields": "name,username,description,public_metrics,verified",
+            },
+        )
+        if response.status_code >= 400:
+            logger.warning("X 标题搜索失败: HTTP %s", response.status_code)
+            return []
+        payload = response.json()
+        users = {
+            str(user.get("id", "")): user
+            for user in (payload.get("includes") or {}).get("users", [])
+        }
+        results = []
+        for post in payload.get("data", []):
+            user = users.get(str(post.get("author_id", "")), {})
+            username = str(user.get("username", ""))
+            post_id = str(post.get("id", ""))
+            metrics = post.get("public_metrics") or {}
+            user_metrics = user.get("public_metrics") or {}
+            url = f"https://x.com/{username}/status/{post_id}" if username else ""
+            social_name = str(user.get("name") or username)
+            author_self_release = any(
+                _same_person_name(social_name, author)
+                for evidence in candidate.evidence
+                if evidence.evidence_type
+                in {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG}
+                for author in evidence.authors
+            )
+            results.append(
+                TechnicalEvidence(
+                    source="x-title-search",
+                    evidence_type=EvidenceType.SECONDARY_INTERPRETATION,
+                    title=f"{social_name} 讨论 {lead_title}",
+                    url=url,
+                    summary=str(post.get("text", "")),
+                    published_at=str(post.get("created_at", "")),
+                    authors=[str(user.get("name") or username)],
+                    metrics={
+                        "likes": metrics.get("like_count", 0) or 0,
+                        "retweets": metrics.get("retweet_count", 0) or 0,
+                        "replies": metrics.get("reply_count", 0) or 0,
+                        "author_followers": user_metrics.get("followers_count", 0) or 0,
+                        "author_verified": bool(user.get("verified", False)),
+                    },
+                    identifiers={"x": post_id},
+                    raw={
+                        "relationship": (
+                            "author_self_release"
+                            if author_self_release
+                            else "exact_work_title_match"
+                        ),
+                        "social_author_name": str(user.get("name", "")),
+                        "social_bio": str(user.get("description", "")),
+                        "social_profile_url": (
+                            f"https://x.com/{username}" if username else ""
+                        ),
+                    },
                 )
             )
         return results
@@ -181,3 +319,28 @@ def _is_relevant_repository(candidate: ParadigmCandidate, repo: dict) -> bool:
     }
     overlap = {token for token in candidate_tokens if token in text}
     return len(overlap) >= 2
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
+            timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+def _same_person_name(left: str, right: str) -> bool:
+    normalize = lambda value: "".join(
+        character for character in value.casefold() if character.isalnum()
+    )
+    left_value, right_value = normalize(left), normalize(right)
+    if not left_value or not right_value:
+        return False
+    if left_value == right_value:
+        return True
+    if min(len(left_value), len(right_value)) < 6:
+        return False
+    return SequenceMatcher(None, left_value, right_value).ratio() >= 0.9

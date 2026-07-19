@@ -75,6 +75,7 @@ class ResearcherProfile:
     public_email_source: str = ""
     identifiers: dict[str, str] = field(default_factory=dict)
     background_summary: str = ""
+    public_bio_excerpt: str = ""
     key_person_reason: str = ""
     contact_search_notes: list[str] = field(default_factory=list)
 
@@ -138,6 +139,12 @@ class ParadigmCandidate:
     application_value: str = ""
     secondary_discussion_summary: str = ""
     objective_momentum_signals: list[str] = field(default_factory=list)
+    community_coverage: dict[str, str] = field(default_factory=dict)
+    publisher_tier: str = "unknown"
+    publisher_evidence: list[str] = field(default_factory=list)
+    admission_reason: str = ""
+    is_formal_technical_report: bool = False
+    marketing_overclaim_risk: str = ""
     novelty_type: str = ""
     lineage_parent: str = ""
     lineage_path: list[str] = field(default_factory=list)

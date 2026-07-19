@@ -54,12 +54,60 @@ def collect_checks() -> list[Check]:
             f"已配置 {len(config.RESEARCH_FEED_URLS)} 个 Feed" if config.RESEARCH_FEED_URLS else "尚未配置 RESEARCH_FEED_URLS",
         ),
         Check(
+            "高优先级官方研究页面",
+            "Technical Report/官方发布",
+            "ready" if config.PRIORITY_RESEARCH_PAGES else "missing",
+            f"已配置 {len(config.PRIORITY_RESEARCH_PAGES)} 个官方入口",
+        ),
+        Check(
+            "前沿研究组织名单",
+            "发布者势能核验",
+            "ready" if config.ESTABLISHED_RESEARCH_ORGANIZATIONS else "missing",
+            f"已配置 {len(config.ESTABLISHED_RESEARCH_ORGANIZATIONS)} 个组织",
+        ),
+        Check(
             "GitHub",
             "实现/复现证据",
             "ready" if config.GITHUB_TOKEN else "degraded",
             "Token 已配置" if config.GITHUB_TOKEN else "无 Token 时限额较低",
         ),
         Check("Hacker News Algolia", "社区讨论", "ready", "无需 Key；本检查未发请求"),
+        Check(
+            "Tavily 跨站公开索引",
+            "X/Reddit/小红书讨论发现",
+            "ready" if config.TAVILY_API_KEY else "degraded",
+            "已配置；只作为部分索引线索，不代表平台总声量"
+            if config.TAVILY_API_KEY
+            else "未配置 TAVILY_API_KEY，运行时跳过跨站公开索引",
+        ),
+        Check(
+            "Reddit 官方 Data API",
+            "帖子、评论与互动量",
+            "ready"
+            if (
+                config.REDDIT_API_ACCESS_APPROVED
+                and config.REDDIT_CLIENT_ID
+                and config.REDDIT_CLIENT_SECRET
+                and config.REDDIT_USER_AGENT
+            )
+            else "degraded",
+            "已确认批准并完成 OAuth 配置"
+            if (
+                config.REDDIT_API_ACCESS_APPROVED
+                and config.REDDIT_CLIENT_ID
+                and config.REDDIT_CLIENT_SECRET
+                and config.REDDIT_USER_AGENT
+            )
+            else "未确认 Reddit 批准或 OAuth 配置不完整；不会调用官方 API",
+        ),
+        Check(
+            "X 精确标题搜索",
+            "作者身份/KOL 二次解读",
+            "ready" if config.TWITTER_BEARER_TOKEN else "degraded",
+            "Bearer Token 已配置"
+            if config.TWITTER_BEARER_TOKEN
+            else "未配置时自动跳过，不影响主流程",
+        ),
         _email_check(),
         _schedule_check(),
     ]

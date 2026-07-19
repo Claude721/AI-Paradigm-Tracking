@@ -15,6 +15,7 @@ from sources.hf_papers_source import HuggingFacePapersSource
 from sources.follow_builders_source import FollowBuildersSource
 from sources.openalex_source import OpenAlexSource
 from sources.openreview_source import OpenReviewSource
+from sources.priority_research_source import PriorityResearchPageSource
 from sources.research_feed_source import ResearchFeedSource
 
 from .models import EvidenceType, TechnicalEvidence
@@ -43,6 +44,7 @@ class ParadigmDiscovery:
             OpenAlexSource(lookback_days=lookback),
             OpenReviewSource(lookback_days=lookback),
             ResearchFeedSource(lookback_days=lookback),
+            PriorityResearchPageSource(lookback_days=lookback),
         ]
 
     async def run(self) -> DiscoveryBatch:
@@ -73,7 +75,10 @@ class ParadigmDiscovery:
         origins = _merge_origins(origins)
         origins = sorted(
             origins,
-            key=lambda item: item.published_at or "",
+            key=lambda item: (
+                int(item.raw.get("origin_priority", 0) or 0),
+                item.published_at or "",
+            ),
             reverse=True,
         )[: config.PARADIGM_MAX_DISCOVERY_ITEMS]
         logger.info(
@@ -148,6 +153,19 @@ def _follow_builder_to_support(item: RawProject) -> TechnicalEvidence:
         for key in ("likes", "retweets", "replies")
         if item.extra.get(key) is not None
     }
+    raw = {**item.extra, "relationship": "kol_or_podcast_candidate"}
+    if item.source == "follow-builders-x":
+        handle = ""
+        match = re.search(r"@([A-Za-z0-9_]+)", item.author)
+        if match:
+            handle = match.group(1)
+        raw.update(
+            {
+                "social_author_name": item.author.split(" (@", 1)[0].strip(),
+                "social_bio": str(item.extra.get("builder_bio", "")),
+                "social_profile_url": f"https://x.com/{handle}" if handle else "",
+            }
+        )
     return TechnicalEvidence(
         source=item.source,
         evidence_type=EvidenceType.SECONDARY_INTERPRETATION,
@@ -157,7 +175,7 @@ def _follow_builder_to_support(item: RawProject) -> TechnicalEvidence:
         published_at=item.created_at,
         authors=[item.author] if item.author else [],
         metrics=metrics,
-        raw={**item.extra, "relationship": "kol_or_podcast_candidate"},
+        raw=raw,
     )
 
 

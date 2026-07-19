@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -45,15 +44,21 @@ class ParadigmReportGenerator:
         if not ordered:
             content = self._empty_report(date, stats)
         elif self.client is False:
-            content = self._fallback_report(date, ordered, stats)
+            raise RuntimeError("无网络测试客户端不能生成正式研究报告")
         else:
             try:
                 content = await self._editorial_report(date, ordered, stats)
-                if not _valid_editorial_report(content, ordered):
-                    raise ValueError("总编辑输出未通过结构与反模板检查")
-            except Exception:
-                logger.exception("研究总编辑生成失败，使用无评分的路线式降级报告")
-                content = self._fallback_report(date, ordered, stats)
+                violations = _editorial_violations(content, ordered)
+                if violations:
+                    content = await self._revise_editorial_report(
+                        date, ordered, content, violations
+                    )
+                    violations = _editorial_violations(content, ordered)
+                if violations:
+                    raise ValueError("；".join(violations))
+            except Exception as exc:
+                logger.exception("研究总编辑生成失败；拒绝发送字段拼装降级报告")
+                raise RuntimeError("报告未通过编辑质量门槛，任务已停止并可安全重试") from exc
         path.write_text(content.strip() + "\n", encoding="utf-8")
         return path
 
@@ -77,6 +82,33 @@ class ParadigmReportGenerator:
         )
         return _strip_code_fence(response.choices[0].message.content or "")
 
+    async def _revise_editorial_report(
+        self,
+        date: str,
+        candidates: list[ParadigmCandidate],
+        previous_draft: str,
+        violations: list[str],
+    ) -> str:
+        prompt = self.skill_loader.render(
+            "weekly_memo_revision",
+            date=date,
+            lookback_days=config.SOURCING_LOOKBACK_DAYS,
+            violations="；".join(violations),
+            candidate_dossiers=json.dumps(
+                [_candidate_dossier(candidate) for candidate in candidates],
+                ensure_ascii=False,
+            ),
+            previous_draft=previous_draft[:16_000],
+        )
+        client, model = self._get_client()
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=7600,
+        )
+        return _strip_code_fence(response.choices[0].message.content or "")
+
     @staticmethod
     def _empty_report(date: str, stats: dict) -> str:
         return f"""# AI 技术范式雷达
@@ -85,85 +117,12 @@ class ParadigmReportGenerator:
 
 ## 本期研究 Memo
 
-本期共扫描 {stats.get('origin_count', 0)} 篇论文与技术博客，但没有材料同时跨过**问题边界变化、机制可解释性和路线外延**三道门槛。这里不为了维持周报篇幅把局部 benchmark 改进包装成新范式。
+本期共扫描 {stats.get('origin_count', 0)} 篇论文、Technical Report 与官方技术博客，但没有材料同时跨过**技术外延、发布者可信度和外部承接**三道门槛。技术范式不会按周出现，这一期不为了维持篇幅把局部 benchmark 改进或作者的宏大叙事包装成趋势。
 
 ## 接下来真正值得盯的信号
 
 继续观察新的原始机制是否出现独立复现、跨团队承接或有内容的二次讨论。只有当讨论开始围绕设计思想、适用边界和新能力展开，而不只是转发论文标题时，扩散信号才真正成立。
 """
-
-    def _fallback_report(
-        self, date: str, candidates: list[ParadigmCandidate], stats: dict
-    ) -> str:
-        """LLM 不可用时仍输出路线式叙事，不回退到评分表和字段表。"""
-        grouped: dict[str, list[ParadigmCandidate]] = defaultdict(list)
-        for item in candidates:
-            grouped[item.route_family or item.lineage_parent or item.name].append(item)
-        route_names = list(grouped)
-        opening = (
-            f"本期扫描了 {stats.get('origin_count', 0)} 篇论文与技术博客，"
-            f"最后能组织成 {len(route_names)} 条值得继续验证的技术路线。"
-            + "；".join(
-                f"**{name}**关注{items[0].background or items[0].problem_shift}"
-                for name, items in list(grouped.items())[:4]
-            )
-            + "。这些材料目前大多仍是原始团队的单点提出，是否成为趋势，要看后续是否出现真正相关的复现、承接和二次解释。"
-        )
-        sections = [
-            "# AI 技术范式雷达",
-            "",
-            f"> {date} · 最近 {config.SOURCING_LOOKBACK_DAYS} 天",
-            "",
-            "## 本期研究 Memo",
-            "",
-            opening,
-        ]
-        for route, items in grouped.items():
-            sections.extend(["", f"## {route}", ""])
-            lead = items[0]
-            sections.append(
-                f"这条路线面对的是{lead.background or lead.problem_shift}。"
-                f"它背后的**设计思想**是{lead.design_philosophy or lead.thesis}。"
-            )
-            for item in items:
-                papers = [
-                    f"[{evidence.title}]({evidence.url})"
-                    for evidence in item.evidence
-                    if evidence.evidence_type.value in {"primary_paper", "technical_blog"}
-                ][:3]
-                sections.append(
-                    f"{'、'.join(papers) or item.name}给出的具体解法是{item.technical_explanation or item.mechanism}。"
-                    f"如果核心主张成立，直接价值在于{item.application_value or '把旧问题的能力边界向外推进'}。"
-                )
-                if item.objective_momentum_signals:
-                    sections.append(
-                        "目前可以确认的二次信号包括"
-                        + "；".join(item.objective_momentum_signals)
-                        + f"。{item.secondary_discussion_summary}"
-                    )
-            sections.extend(["", "### 谁在推动这条路线", ""])
-            profiles = _unique_profiles(items)[:3]
-            if not profiles:
-                sections.append("本期资料只能确认论文署名，尚未形成可交叉核验的人物档案。")
-            for profile in profiles:
-                contacts = _contact_links(profile)
-                search_note = "；".join(profile.contact_search_notes)
-                sections.append(
-                    f"**{profile.name}**，{profile.background_summary or profile.current_affiliation or '当前机构未公开'}。"
-                    f"{profile.research_trajectory or profile.key_person_reason or '研究连续性仍待更多代表作验证。'}"
-                    f"公开入口：{contacts or '未发现公开主页或邮箱'}。"
-                    f"{('身份检索记录：' + search_note + '。') if search_note else ''}"
-                )
-        sections.extend(
-            [
-                "",
-                "## 接下来真正值得盯的信号",
-                "",
-                "接下来应优先观察**独立复现、异构任务迁移和有内容的二次讨论**。如果新工作只是复述论文名或收录摘要，不算扩散；如果不同团队开始复用同一设计思想，并围绕它的边界和用途形成讨论，才说明路线正在从单点工作变成可持续的技术方向。",
-            ]
-        )
-        return "\n".join(sections)
-
 
 def _candidate_dossier(item: ParadigmCandidate) -> dict:
     return {
@@ -181,9 +140,15 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         "lineage_path": item.lineage_path,
         "evidence_assessment": item.evidence_assessment,
         "objective_momentum_signals": item.objective_momentum_signals,
+        "community_coverage": item.community_coverage,
         "secondary_discussion_summary": item.secondary_discussion_summary,
         "trend_interpretation": item.trend_interpretation,
         "open_questions": item.open_questions,
+        "publisher_tier": item.publisher_tier,
+        "publisher_evidence": item.publisher_evidence,
+        "admission_reason": item.admission_reason,
+        "is_formal_technical_report": item.is_formal_technical_report,
+        "marketing_overclaim_risk": item.marketing_overclaim_risk,
         "evidence": [_evidence_dossier(value) for value in item.evidence[:20]],
         "researchers": [_researcher_dossier(value) for value in item.researchers[:3]],
     }
@@ -211,6 +176,8 @@ def _researcher_dossier(profile: ResearcherProfile) -> dict:
         "role": profile.role,
         "current_affiliation": profile.current_affiliation,
         "background_summary": profile.background_summary,
+        "public_bio_excerpt": profile.public_bio_excerpt,
+        "prior_affiliations": profile.prior_affiliations,
         "research_trajectory": profile.research_trajectory,
         "key_person_reason": profile.key_person_reason,
         "representative_works": profile.representative_works[:6],
@@ -233,6 +200,12 @@ def _public_stats(stats: dict) -> dict:
 def _valid_editorial_report(
     content: str, candidates: list[ParadigmCandidate] | None = None
 ) -> bool:
+    return not _editorial_violations(content, candidates or [])
+
+
+def _editorial_violations(
+    content: str, candidates: list[ParadigmCandidate] | None = None
+) -> list[str]:
     forbidden = (
         "评分拆解",
         "扩散势能评分",
@@ -253,27 +226,47 @@ def _valid_editorial_report(
     )
     inline_emphasis = len(re.findall(r"\*\*[^*\n]+\*\*", content))
     researcher_coverage = _covers_researchers(content, candidates or [])
-    return (
-        len(content.strip()) >= 800
-        and "## 本期研究 Memo" in content
-        and "## 接下来真正值得盯的信号" in content
-        and 350 <= memo_chinese_characters <= 850
-        and inline_emphasis >= 2
-        and researcher_coverage
-        and not contains_table
-        and not has_numeric_score
-        and not any(value in content for value in forbidden)
-    )
+    violations = []
+    if len(content.strip()) < 800:
+        violations.append("正文过短")
+    if "## 本期研究 Memo" not in content:
+        violations.append("缺少本期研究 Memo")
+    if "## 接下来真正值得盯的信号" not in content:
+        violations.append("缺少后续观察信号")
+    if not 350 <= memo_chinese_characters <= 850:
+        violations.append("开篇 Memo 中文长度不在合理范围")
+    if inline_emphasis < 2:
+        violations.append("缺少行内重点强调")
+    if not researcher_coverage:
+        violations.append("关键人物覆盖不足")
+    if contains_table:
+        violations.append("出现表格")
+    if has_numeric_score or any(value in content for value in forbidden):
+        violations.append("出现内部评分")
+    if _has_long_english_excerpt(content):
+        violations.append("出现英文原文长句或成段摘录")
+    return violations
+
+
+def _has_long_english_excerpt(content: str) -> bool:
+    without_links = re.sub(r"\[[^\]]+\]\([^)]+\)", "", content)
+    without_urls = re.sub(r"https?://\S+", "", without_links)
+    for paragraph in re.split(r"\n\s*\n", without_urls):
+        english_words = re.findall(r"\b[A-Za-z][A-Za-z0-9'-]*\b", paragraph)
+        chinese_characters = re.findall(r"[\u4e00-\u9fff]", paragraph)
+        if len(english_words) >= 18 and len(english_words) > len(chinese_characters) / 2:
+            return True
+    return False
 
 
 def _covers_researchers(
     content: str, candidates: list[ParadigmCandidate]
 ) -> bool:
     """验证关键人物没有整体漏写，同时保留总编辑重组路线的自由。"""
-    by_route: dict[str, set[str]] = defaultdict(set)
+    by_route: dict[str, set[str]] = {}
     for candidate in candidates:
         route = candidate.route_family or candidate.lineage_parent or candidate.name
-        by_route[route].update(
+        by_route.setdefault(route, set()).update(
             profile.name for profile in candidate.researchers if profile.name
         )
     searchable_routes = [names for names in by_route.values() if names]
@@ -287,21 +280,3 @@ def _strip_code_fence(content: str) -> str:
     value = content.strip()
     match = re.fullmatch(r"```(?:markdown|md)?\s*(.*?)\s*```", value, re.DOTALL)
     return match.group(1).strip() if match else value
-
-
-def _unique_profiles(items: list[ParadigmCandidate]) -> list[ResearcherProfile]:
-    result: dict[str, ResearcherProfile] = {}
-    for item in items:
-        for profile in item.researchers:
-            result.setdefault(profile.name.casefold(), profile)
-    return list(result.values())
-
-
-def _contact_links(profile: ResearcherProfile) -> str:
-    links = []
-    for label, url in profile.public_contacts.items():
-        if label == "email":
-            links.append(f"[{profile.public_email}](mailto:{profile.public_email})")
-        else:
-            links.append(f"[{label}]({url})")
-    return "、".join(links)

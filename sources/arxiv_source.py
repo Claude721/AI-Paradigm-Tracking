@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -49,22 +50,48 @@ class ArxivSource(BaseSource):
             "OR cat:cs.CV OR cat:cs.RO OR cat:cs.NE OR cat:stat.ML)"
         )
 
+        report_query = (
+            '(ti:"technical report" OR ti:"system report" OR abs:"technical report") AND '
+            "(cat:cs.AI OR cat:cs.CL OR cat:cs.LG OR cat:cs.CV OR cat:cs.RO)"
+        )
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            resp = await client.get(
-                ARXIV_API,
-                params={
-                    "search_query": full_query,
-                    "start": 0,
-                    "max_results": self.max_results,
-                    "sortBy": "submittedDate",
-                    "sortOrder": "descending",
-                },
+            main_response, report_response = await asyncio.gather(
+                self._request(client, full_query, self.max_results),
+                self._request(client, report_query, min(self.max_results, 50)),
+                return_exceptions=True,
             )
-            resp.raise_for_status()
 
-        return self._parse_atom_feed(resp.text)
+        if isinstance(main_response, Exception):
+            raise main_response
+        regular = self._parse_atom_feed(main_response.text)
+        if isinstance(report_response, Exception):
+            logger.warning("arXiv Technical Report 专项查询失败: %s", report_response)
+            reports = []
+        else:
+            reports = self._parse_atom_feed(
+                report_response.text, force_technical_report=True
+            )
+        return list({item.url: item for item in [*regular, *reports]}.values())
 
-    def _parse_atom_feed(self, xml_text: str) -> list[RawProject]:
+    async def _request(
+        self, client: httpx.AsyncClient, query: str, max_results: int
+    ) -> httpx.Response:
+        response = await client.get(
+            ARXIV_API,
+            params={
+                "search_query": query,
+                "start": 0,
+                "max_results": max_results,
+                "sortBy": "submittedDate",
+                "sortOrder": "descending",
+            },
+        )
+        response.raise_for_status()
+        return response
+
+    def _parse_atom_feed(
+        self, xml_text: str, force_technical_report: bool = False
+    ) -> list[RawProject]:
         root = ET.fromstring(xml_text)
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
         results: list[RawProject] = []
@@ -115,6 +142,18 @@ class ArxivSource(BaseSource):
                         "arxiv_id": link.rstrip("/").split("/")[-1],
                         "all_authors": authors,
                         "type": "paper",
+                        "origin_kind": (
+                            "technical_report"
+                            if force_technical_report
+                            or "technical report" in title.casefold()
+                            else "research_paper"
+                        ),
+                        "origin_priority": (
+                            3
+                            if force_technical_report
+                            or "technical report" in title.casefold()
+                            else 0
+                        ),
                     },
                 )
             )

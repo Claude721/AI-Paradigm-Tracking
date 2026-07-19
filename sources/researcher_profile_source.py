@@ -237,6 +237,23 @@ class ResearcherProfileClient:
             if organization:
                 profile.current_affiliation = organization
                 break
+        educations = (
+            ((payload.get("activities-summary") or {}).get("educations") or {}).get(
+                "affiliation-group"
+            )
+            or []
+        )
+        for group in educations:
+            summaries = group.get("summaries") or []
+            if not summaries:
+                continue
+            organization = (
+                ((summaries[0].get("education-summary") or {}).get("organization") or {}).get(
+                    "name", ""
+                )
+            )
+            if organization and organization not in profile.prior_affiliations:
+                profile.prior_affiliations.append(organization)
 
     async def _homepage_contacts(
         self,
@@ -274,6 +291,20 @@ class ResearcherProfileClient:
             match = re.search(pattern, content, re.IGNORECASE)
             if match and _safe_public_url(match.group(0)):
                 profile.profile_urls.setdefault(label, match.group(0).rstrip(".,);"))
+        description = re.search(
+            r"<meta[^>]+(?:name|property)\s*=\s*['\"](?:description|og:description)['\"][^>]+content\s*=\s*['\"]([^'\"]+)",
+            content,
+            re.IGNORECASE,
+        ) or re.search(
+            r"<meta[^>]+content\s*=\s*['\"]([^'\"]+)['\"][^>]+(?:name|property)\s*=\s*['\"](?:description|og:description)['\"]",
+            content,
+            re.IGNORECASE,
+        )
+        if description:
+            bio = re.sub(r"\s+", " ", description.group(1)).strip()[:800]
+            if len(bio) >= 40:
+                profile.public_bio_excerpt = bio
+                _note(profile, "已读取个人主页公开简介，用于核验教育与研究背景")
 
 
 def _seed_profiles(

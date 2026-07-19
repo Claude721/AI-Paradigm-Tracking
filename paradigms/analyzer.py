@@ -30,21 +30,34 @@ class ParadigmAnalyzer:
     async def run(self, evidence: list[TechnicalEvidence]) -> list[ParadigmExtraction]:
         semaphore = asyncio.Semaphore(self.concurrency)
 
-        async def guarded(item: TechnicalEvidence) -> ParadigmExtraction:
+        async def guarded(item: TechnicalEvidence) -> list[ParadigmExtraction]:
             async with semaphore:
                 return await self.extract(item)
 
-        return await asyncio.gather(*(guarded(item) for item in evidence))
+        batches = await asyncio.gather(*(guarded(item) for item in evidence))
+        return [extraction for batch in batches for extraction in batch]
 
-    async def extract(self, evidence: TechnicalEvidence) -> ParadigmExtraction:
+    async def extract(self, evidence: TechnicalEvidence) -> list[ParadigmExtraction]:
         prompt = self.skill_loader.render(
             "paradigm_extraction",
             source=evidence.source,
             title=evidence.title,
-            abstract=evidence.summary[:10000],
+            abstract=evidence.summary[
+                : (
+                    50_000
+                    if evidence.raw.get("origin_kind") == "technical_report"
+                    else 10_000
+                )
+            ],
             authors=", ".join(evidence.authors),
             organization=evidence.organization,
             identifiers=evidence.identifiers,
+            origin_kind=evidence.raw.get("origin_kind", "research_paper"),
+            publisher_context={
+                "organization": evidence.organization,
+                "publisher_tier": evidence.raw.get("publisher_tier", "unknown"),
+                "publisher_evidence": evidence.raw.get("publisher_evidence", ""),
+            },
         )
         try:
             client, model = self._get_client()
@@ -52,22 +65,39 @@ class ParadigmAnalyzer:
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=2600,
+                max_tokens=(
+                    6200
+                    if evidence.raw.get("origin_kind") == "technical_report"
+                    else 3000
+                ),
                 response_format={"type": "json_object"},
             )
             payload = parse_json_object(response.choices[0].message.content or "{}")
-            return self._from_payload(evidence, payload)
+            hypotheses = payload.get("hypotheses")
+            payloads = hypotheses if isinstance(hypotheses, list) else [payload]
+            parsed = [
+                self._from_payload(evidence, item)
+                for item in payloads[:6]
+                if isinstance(item, dict)
+            ]
+            return parsed or [self._failed_extraction(evidence, "抽取失败: 结果为空")]
         except Exception as exc:
             logger.warning("范式抽取失败 [%s]: %s", evidence.title[:60], exc)
-            return ParadigmExtraction(
-                evidence=evidence,
-                is_candidate=False,
-                canonical_name="",
-                thesis="",
-                problem_shift="",
-                mechanism="",
-                rejection_reason=f"抽取失败: {exc}",
-            )
+            return [self._failed_extraction(evidence, f"抽取失败: {exc}")]
+
+    @staticmethod
+    def _failed_extraction(
+        evidence: TechnicalEvidence, reason: str
+    ) -> ParadigmExtraction:
+        return ParadigmExtraction(
+            evidence=evidence,
+            is_candidate=False,
+            canonical_name="",
+            thesis="",
+            problem_shift="",
+            mechanism="",
+            rejection_reason=reason,
+        )
 
     @staticmethod
     def _from_payload(
@@ -149,7 +179,7 @@ class ResearcherTrajectoryAnalyzer:
     async def _analyze_one(
         self, candidate: ParadigmCandidate, profile: ResearcherProfile
     ) -> None:
-        if not profile.representative_works:
+        if not profile.representative_works and not profile.public_bio_excerpt:
             profile.research_trajectory = "公开学术资料不足，暂不判断研究连续性。"
             return
         prompt = self.skill_loader.render(
@@ -162,6 +192,8 @@ class ResearcherTrajectoryAnalyzer:
             works=profile.representative_works,
             contacts=profile.public_contacts,
             search_notes=profile.contact_search_notes,
+            public_bio=profile.public_bio_excerpt,
+            prior_affiliations=profile.prior_affiliations,
         )
         try:
             client, model = self._get_client()
@@ -226,9 +258,13 @@ class ParadigmSynthesizer:
         return candidates
 
     async def _synthesize_one(self, candidate: ParadigmCandidate) -> None:
+        ordered_evidence = sorted(
+            enumerate(candidate.evidence),
+            key=lambda pair: bool(pair[1].raw.get("historical")),
+        )
         evidence_payload = [
             {
-                "index": index,
+                "index": original_index,
                 "fingerprint": item.fingerprint,
                 "type": item.evidence_type.value,
                 "source": item.source,
@@ -240,7 +276,7 @@ class ParadigmSynthesizer:
                 "historical": bool(item.raw.get("historical")),
                 "relationship_hint": item.raw.get("relationship", ""),
             }
-            for index, item in enumerate(candidate.evidence[:24])
+            for original_index, item in ordered_evidence[:24]
         ]
         prompt = self.skill_loader.render(
             "paradigm_synthesis",
@@ -279,6 +315,7 @@ class ParadigmSynthesizer:
                 "evidence_assessment",
                 "secondary_discussion_summary",
                 "trend_interpretation",
+                "marketing_overclaim_risk",
             ):
                 value = str(payload.get(field_name, "")).strip()
                 if value:
@@ -292,6 +329,17 @@ class ParadigmSynthesizer:
             momentum = _string_list(payload.get("objective_momentum_signals"))
             if momentum:
                 candidate.objective_momentum_signals = momentum
+            for payload_name, attribute in (
+                ("scope_reassessment", "scope_score"),
+                ("solidity_reassessment", "solidity_score"),
+            ):
+                try:
+                    reassessed = min(
+                        max(float(payload.get(payload_name)), 0.0), 10.0
+                    )
+                except (TypeError, ValueError):
+                    continue
+                setattr(candidate, attribute, min(getattr(candidate, attribute), reassessed))
             excluded = {
                 int(value)
                 for value in payload.get("excluded_evidence_indices", [])

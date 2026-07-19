@@ -37,6 +37,32 @@ class EvidenceEnricher:
 
         return await asyncio.gather(*(enrich_one(candidate) for candidate in candidates))
 
+    async def refresh(
+        self,
+        candidates: list[ParadigmCandidate],
+        supporting: list[TechnicalEvidence],
+    ) -> list[ParadigmCandidate]:
+        """只保留本周出现新讨论/实现的历史候选，不重复跑学术身份接口。"""
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        async def refresh_one(candidate: ParadigmCandidate) -> ParadigmCandidate | None:
+            async with semaphore:
+                previous = {item.fingerprint for item in candidate.evidence}
+                self._attach_support(candidate, supporting)
+                try:
+                    candidate.evidence.extend(await self.community.search(candidate))
+                    candidate.community_coverage = self.community.coverage()
+                except Exception as exc:
+                    logger.warning("历史范式社区刷新失败 [%s]: %s", candidate.name, exc)
+                candidate.evidence = _dedupe_evidence(candidate.evidence)
+                if not any(item.fingerprint not in previous for item in candidate.evidence):
+                    return None
+                _attach_social_profiles(candidate)
+                return candidate
+
+        refreshed = await asyncio.gather(*(refresh_one(item) for item in candidates))
+        return [item for item in refreshed if item is not None]
+
     async def _external_enrichment(self, candidate: ParadigmCandidate) -> None:
         lead = candidate.evidence[0]
         results = await asyncio.gather(
@@ -56,6 +82,7 @@ class EvidenceEnricher:
             logger.warning("Semantic Scholar 增强失败 [%s]: %s", candidate.name, scholarly)
         if not isinstance(community, Exception):
             candidate.evidence.extend(community)
+            candidate.community_coverage = self.community.coverage()
         else:
             logger.warning("社区证据增强失败 [%s]: %s", candidate.name, community)
         candidate.evidence = list(
@@ -66,6 +93,38 @@ class EvidenceEnricher:
         candidate.researchers = await self.researchers.enrich(
             lead, candidate.researchers
         )
+        _attach_social_profiles(candidate)
+
+    @staticmethod
+    def finalize(candidates: list[ParadigmCandidate]) -> list[ParadigmCandidate]:
+        """分析完成后不持久化社区用户正文，只保留可复核链接和聚合指标。"""
+        for candidate in candidates:
+            for evidence in candidate.evidence:
+                if not evidence.raw.get("ephemeral_content"):
+                    continue
+                platform = str(evidence.raw.get("social_platform") or evidence.source)
+                labels = {
+                    "reddit": "Reddit 公开讨论",
+                    "tavily-reddit": "Reddit 公开索引线索",
+                    "x": "X 公开索引线索",
+                    "tavily-x": "X 公开索引线索",
+                    "xiaohongshu": "小红书公开索引线索",
+                    "tavily-xiaohongshu": "小红书公开索引线索",
+                }
+                stable_id = next(iter(evidence.identifiers.values()), "")
+                evidence.title = labels.get(platform, "社区公开讨论")
+                if stable_id:
+                    evidence.title = f"{evidence.title}（{stable_id}）"
+                evidence.summary = ""
+                evidence.authors = []
+                for key in (
+                    "social_author_name",
+                    "social_bio",
+                    "tavily_request_id",
+                ):
+                    evidence.raw.pop(key, None)
+                evidence.raw["content_scrubbed"] = True
+        return candidates
 
     @staticmethod
     def _attach_support(
@@ -141,3 +200,45 @@ def _official_repository_evidence(
         identifiers={"github": full_name},
         raw={"relationship": "paper_linked_repository"},
     )
+
+
+def _dedupe_evidence(items: list[TechnicalEvidence]) -> list[TechnicalEvidence]:
+    return list({item.fingerprint: item for item in items}.values())
+
+
+def _attach_social_profiles(candidate: ParadigmCandidate) -> None:
+    """只有社交账号显示名与论文作者可靠对齐时，才补入公开身份线索。"""
+    for evidence in candidate.evidence:
+        profile_url = str(evidence.raw.get("social_profile_url", ""))
+        social_name = str(evidence.raw.get("social_author_name", ""))
+        bio = str(evidence.raw.get("social_bio", "")).strip()
+        if not profile_url or not social_name:
+            continue
+        for profile in candidate.researchers:
+            if not _same_person_name(profile.name, social_name):
+                continue
+            platform = str(evidence.raw.get("social_platform") or "x")
+            profile_key = "xiaohongshu" if platform == "xiaohongshu" else "x"
+            profile.profile_urls.setdefault(profile_key, profile_url)
+            if bio and not profile.public_bio_excerpt:
+                profile.public_bio_excerpt = bio
+            platform_label = "小红书" if profile_key == "xiaohongshu" else "X"
+            note = (
+                f"已用工作标题搜索 {platform_label}，并将发布账号显示名与论文作者名核验一致"
+            )
+            if note not in profile.contact_search_notes:
+                profile.contact_search_notes.append(note)
+
+
+def _same_person_name(left: str, right: str) -> bool:
+    normalize = lambda value: "".join(
+        character for character in value.casefold() if character.isalnum()
+    )
+    left_value, right_value = normalize(left), normalize(right)
+    if not left_value or not right_value:
+        return False
+    if left_value == right_value:
+        return True
+    if min(len(left_value), len(right_value)) < 6:
+        return False
+    return SequenceMatcher(None, left_value, right_value).ratio() >= 0.9

@@ -52,7 +52,9 @@ Venue ID 来自 OpenReview 页面 URL 中 `group?id=` 后面的部分，不能�
 - [ ] Semantic Scholar API Key（可选；没有学术邮箱就留空）
 - [ ] GitHub Token
 - [ ] 4 个以上官方研究 RSS/Atom Feed
+- [ ] 高优先级官方研究页面保留默认值或已核验覆盖
 - [ ] Follow Builders 二次传播 Feed 已启用
+- [ ] 如需按工作标题搜索作者/KOL，配置 X API Bearer Token（可选）
 - [ ] SMTP 邮件推送
 
 Semantic Scholar（可选）：
@@ -85,12 +87,59 @@ RESEARCH_FEED_URLS=https://research.google/blog/rss/,https://deepmind.google/dis
 
 只填写 RSS/Atom XML 地址，不能填写普通博客首页。单个 Feed 失效时系统会跳过，不影响其他 Feed。
 
+高优先级官方页面用于补足“重要机构没有 RSS、Technical Report 尚未进入 arXiv”的缺口。默认已经包含 Moonshot、OpenAI、Anthropic、DeepMind、Meta AI 与 Qwen：
+
+```env
+PRIORITY_RESEARCH_PAGES=https://www.moonshot.ai/,https://www.anthropic.com/research,https://openai.com/research/,https://deepmind.google/research/,https://ai.meta.com/research/,https://qwenlm.github.io/
+```
+
+这些地址必须是已经确认归属的官方研究入口，因为配置本身会成为“发布者已核验”的证据。普通大学或泛科技新闻站不要加入。前沿组织名单也可覆盖；空值会自动回到项目默认名单：
+
+```env
+ESTABLISHED_RESEARCH_ORGANIZATIONS=OpenAI,Anthropic,Google DeepMind,DeepMind,Meta AI,FAIR,Microsoft Research,NVIDIA,Moonshot AI,月之暗面,DeepSeek,Alibaba DAMO,Qwen,ByteDance Seed,xAI,Mistral AI,Cohere
+```
+
 KOL、播客与技术博客二次传播候选：
 
 ```env
 FOLLOW_BUILDERS_ENABLED=true
 FOLLOW_BUILDERS_FEED_URL=https://raw.githubusercontent.com/zarazhangrui/follow-builders/main
 ```
+
+可选的 X 精确标题搜索：
+
+```env
+TWITTER_BEARER_TOKEN=你的X-API-Bearer-Token
+```
+
+不配置时自动跳过，不影响论文、GitHub 与 Hacker News。配置后系统会按工作标题搜索最近帖子，并读取公开账号简介与粉丝规模。作者本人发帖只用于身份核验；非作者的高关注账号解读、互动和讨论内容才进入外部势能判断。小红书目前没有稳定的官方公开搜索 API，因此本项目不做不可靠的页面抓取。
+
+推荐先配置 Tavily 免费层，作为 X、Reddit、小红书公开网页的发现兜底：
+
+```env
+TAVILY_API_KEY=tvly-你的Key
+TAVILY_SOCIAL_SEARCH_ENABLED=true
+TAVILY_SOCIAL_SEARCH_DOMAINS=x.com,twitter.com,reddit.com,xiaohongshu.com
+TAVILY_SOCIAL_MAX_RESULTS=12
+```
+
+在 Tavily 创建普通账号即可，不要求学术邮箱，也不要求信用卡。免费计划每月 1,000 credits；项目对每个候选采用一次 `basic` 组合搜索（1 credit），不会分别为三个平台重复消耗。搜索结果只能说明页面被公开索引，不能证明完整覆盖或用相关度替代点赞、评论等声量指标。
+
+Reddit 若要获得帖子分数、评论量和讨论正文，需要先向 Reddit 申请 Data API 访问。获批后配置：
+
+```env
+REDDIT_API_ACCESS_APPROVED=true
+REDDIT_CLIENT_ID=你的OAuth客户端ID
+REDDIT_CLIENT_SECRET=你的OAuth客户端Secret
+REDDIT_USER_AGENT=python:ai-paradigm-radar:v1.0 (by /u/你的Reddit用户名)
+```
+
+- [ ] 已从 Reddit 收到 API 访问批准；尚未获批时保持 `false`
+- [ ] 若项目用于商业、投资或企业研究，申请中已明确用途并取得相应许可
+- [ ] User-Agent 唯一、可识别，包含应用名、版本和 Reddit 用户名
+- [ ] Client Secret 只放 `.env` 或 GitHub Repository secret
+
+项目使用 OAuth 应用身份做低频标题搜索。Reddit 帖子与少量评论正文只在当轮综合时使用，随后清除；数据库和邮件保留原帖链接、互动指标和中文提炼结果。
 
 ## C. 邮件推送（选择一个邮箱）
 
@@ -143,8 +192,13 @@ PARADIGM_MIN_NOVELTY=6
 PARADIGM_MIN_SCOPE=6
 PARADIGM_MAX_DISCOVERY_ITEMS=100
 PARADIGM_MAX_REPORT_ITEMS=12
+PARADIGM_MAX_REFRESH_ITEMS=40
+PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS=2
+PARADIGM_MIN_SECONDARY_ENGAGEMENT=50
 PARADIGM_ALLOW_UPDATES=true
 ```
+
+这里的分数只做内部排序。真正的准入顺序是：技术硬门槛 → 发布者/团队核验 → 独立讨论或承接。`PARADIGM_MAX_REFRESH_ITEMS` 控制每周重新检索新讨论的观察池规模；后两项只约束发布者背景尚不明确的候选，不会把作者本人的宣传帖计入独立讨论。
 
 第一次运行可能产生较多 Qwen 调用。如需先做低成本 smoke test，可临时把 `PARADIGM_MAX_DISCOVERY_ITEMS` 改为 `10`；确认成功后恢复为 `100` 再做正式首跑。
 
@@ -182,6 +236,7 @@ python main.py --doctor
 - [ ] Semantic Scholar 显示就绪或明确接受降级运行
 - [ ] OpenReview venue 数量正确
 - [ ] 研究 Feed 数量大于 0
+- [ ] 高优先级官方研究页面数量大于 0
 - [ ] GitHub Token 就绪
 - [ ] SMTP 显示配置完整
 
@@ -215,9 +270,11 @@ python main.py
 - [ ] 报告没有把普通 GitHub 项目当成独立范式
 - [ ] 报告开头有约 500 字“本期研究 Memo”
 - [ ] 最终报告不展示评分表或证据堆叠表
+- [ ] 正文没有英文摘要、英文长句或上游字段原样摘录
 - [ ] 多篇同 background 工作被组织成技术路线，而不是一篇一节机械展开
 - [ ] 关键人物至少有机构/背景与身份检索记录；有公开主页或邮箱时已附链接
+- [ ] 没有合格新范式时允许发送空雷达，不以周更频率硬凑内容
 
 ## G. GitHub Actions 配置位置
 
-API Key、QQ 邮箱与 SMTP 授权码放在 **Repository secrets**；OpenReview venue 与研究 Feed 放在 **Repository variables**。不要使用 Environment secrets，除非工作流同时显式绑定对应 environment。详见 [`CLOUD_AUTOMATION.md`](CLOUD_AUTOMATION.md)。
+API Key、OAuth Client Secret、QQ 邮箱与 SMTP 授权码放在 **Repository secrets**；非敏感的 Reddit 批准开关、User-Agent、OpenReview venue、研究 Feed、高优先级官方页面与前沿组织名单放在 **Repository variables**。不要使用 Environment secrets，除非工作流同时显式绑定对应 environment。详见 [`CLOUD_AUTOMATION.md`](CLOUD_AUTOMATION.md)。

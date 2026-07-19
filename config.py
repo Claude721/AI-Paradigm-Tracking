@@ -103,8 +103,35 @@ TRIAGE_THRESHOLD: int = _env_int("TRIAGE_THRESHOLD", 5)
 GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
 PRODUCTHUNT_TOKEN: str = os.getenv("PRODUCTHUNT_TOKEN", "")
 TWITTER_BEARER_TOKEN: str = os.getenv("TWITTER_BEARER_TOKEN", "")
+TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 OPENALEX_API_KEY: str = os.getenv("OPENALEX_API_KEY", "")
 SEMANTIC_SCHOLAR_API_KEY: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
+
+# Tavily 免费层作为 X / Reddit / 小红书的公开网页索引兜底。它只能证明
+# “搜索引擎发现了这些页面”，不能替代平台官方的完整互动量。
+TAVILY_SOCIAL_SEARCH_ENABLED: bool = _env_bool(
+    "TAVILY_SOCIAL_SEARCH_ENABLED", True
+)
+TAVILY_SOCIAL_SEARCH_DOMAINS: list[str] = [
+    value.strip().casefold()
+    for value in os.getenv(
+        "TAVILY_SOCIAL_SEARCH_DOMAINS",
+        "x.com,twitter.com,reddit.com,xiaohongshu.com",
+    ).split(",")
+    if value.strip()
+]
+TAVILY_SOCIAL_MAX_RESULTS: int = max(
+    1, min(_env_int("TAVILY_SOCIAL_MAX_RESULTS", 12), 20)
+)
+
+# Reddit 官方 Data API 必须先获得 Reddit 批准并使用 OAuth。商业用途还需
+# 单独获得许可，因此即使填了密钥，也只有显式确认批准后才会调用。
+REDDIT_API_ACCESS_APPROVED: bool = _env_bool(
+    "REDDIT_API_ACCESS_APPROVED", False
+)
+REDDIT_CLIENT_ID: str = os.getenv("REDDIT_CLIENT_ID", "")
+REDDIT_CLIENT_SECRET: str = os.getenv("REDDIT_CLIENT_SECRET", "")
+REDDIT_USER_AGENT: str = os.getenv("REDDIT_USER_AGENT", "")
 
 # OpenReview 的 venue id 可按年份调整；留空时跳过该信源。
 OPENREVIEW_VENUES: list[str] = [
@@ -120,6 +147,41 @@ OPENREVIEW_VENUES: list[str] = [
 RESEARCH_FEED_URLS: list[str] = [
     value.strip()
     for value in os.getenv("RESEARCH_FEED_URLS", "").split(",")
+    if value.strip()
+]
+
+# 人工维护的高优先级官方研究入口。它们用于补足“重要机构只发官网
+# Technical Report / 技术博客、没有 RSS 或尚未进入 arXiv”的召回缺口。
+_DEFAULT_PRIORITY_RESEARCH_PAGES = (
+    "https://www.moonshot.ai/,"
+    "https://www.anthropic.com/research,"
+    "https://openai.com/research/,"
+    "https://deepmind.google/research/,"
+    "https://ai.meta.com/research/,"
+    "https://qwenlm.github.io/"
+)
+PRIORITY_RESEARCH_PAGES: list[str] = [
+    value.strip()
+    for value in (
+        os.getenv("PRIORITY_RESEARCH_PAGES", "")
+        or _DEFAULT_PRIORITY_RESEARCH_PAGES
+    ).split(",")
+    if value.strip()
+]
+
+# 这里只放能够给新技术带来天然验证与传播势能的前沿研究组织，不把普通
+# 大学署名自动当作权威背书。可在 .env 中覆盖或追加。
+_DEFAULT_ESTABLISHED_RESEARCH_ORGANIZATIONS = (
+    "OpenAI,Anthropic,Google DeepMind,DeepMind,Meta AI,FAIR,"
+    "Microsoft Research,NVIDIA,Moonshot AI,月之暗面,DeepSeek,"
+    "Alibaba DAMO,Qwen,ByteDance Seed,xAI,Mistral AI,Cohere"
+)
+ESTABLISHED_RESEARCH_ORGANIZATIONS: list[str] = [
+    value.strip()
+    for value in (
+        os.getenv("ESTABLISHED_RESEARCH_ORGANIZATIONS", "")
+        or _DEFAULT_ESTABLISHED_RESEARCH_ORGANIZATIONS
+    ).split(",")
     if value.strip()
 ]
 
@@ -164,6 +226,13 @@ PARADIGM_MAX_DISCOVERY_ITEMS: int = _env_int(
 )
 PARADIGM_MAX_REPORT_ITEMS: int = _env_int("PARADIGM_MAX_REPORT_ITEMS", 12)
 PARADIGM_ALLOW_UPDATES: bool = _env_bool("PARADIGM_ALLOW_UPDATES", True)
+PARADIGM_MAX_REFRESH_ITEMS: int = _env_int("PARADIGM_MAX_REFRESH_ITEMS", 40)
+PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS: int = _env_int(
+    "PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS", 2
+)
+PARADIGM_MIN_SECONDARY_ENGAGEMENT: int = _env_int(
+    "PARADIGM_MIN_SECONDARY_ENGAGEMENT", 50
+)
 
 # 周报/月度回顾的抓取时间窗口
 SOURCING_LOOKBACK_DAYS: int = max(_env_int("SOURCING_LOOKBACK_DAYS", 7), 1)

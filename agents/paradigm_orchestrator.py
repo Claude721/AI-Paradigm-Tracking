@@ -46,26 +46,42 @@ class ParadigmOrchestrator:
 
         if origins:
             extractions = await self.analyzer.run(origins)
-            successful_origins = [
-                item.evidence
-                for item in extractions
-                if not item.rejection_reason.startswith("抽取失败:")
-            ]
+            successful_origins = list(
+                {
+                    item.evidence.fingerprint: item.evidence
+                    for item in extractions
+                    if not item.rejection_reason.startswith("抽取失败:")
+                }.values()
+            )
             self.store.mark_evidence(successful_origins, analyzed=True)
             stats["candidate_extractions"] = sum(
                 item.is_candidate for item in extractions
             )
-            candidates = cluster_extractions(extractions)
-            if candidates:
-                self.store.attach_history(candidates)
-                candidates = await self.enricher.run(candidates, batch.supporting)
-                candidates = await self.synthesizer.run(candidates)
-                candidates = await self.trajectory.run(candidates)
-            for candidate in candidates:
-                score_candidate(candidate)
+            new_candidates = cluster_extractions(extractions)
+            if new_candidates:
+                self.store.attach_history(new_candidates)
+                new_candidates = await self.enricher.run(
+                    new_candidates, batch.supporting
+                )
+                new_candidates = await self.synthesizer.run(new_candidates)
+                new_candidates = await self.trajectory.run(new_candidates)
         else:
-            candidates = []
+            new_candidates = []
             stats["candidate_extractions"] = 0
+
+        historical = self.store.load_refresh_candidates(
+            exclude_keys={candidate.key for candidate in new_candidates}
+        )
+        refreshed = await self.enricher.refresh(historical, batch.supporting)
+        if refreshed:
+            refreshed = await self.synthesizer.run(refreshed)
+        stats["refreshed_paradigms"] = len(refreshed)
+        candidates = [*new_candidates, *refreshed]
+        # Tavily/Reddit 的用户正文只供本轮综合与人物核验，之后即清除；
+        # 数据库和邮件只保留链接、指标、覆盖状态和已提炼的分析。
+        candidates = self.enricher.finalize(candidates)
+        for candidate in candidates:
+            score_candidate(candidate)
 
         # 支持证据单独去重入库，但绝不独立生成范式。
         self.store.mark_evidence(batch.supporting, analyzed=False)
