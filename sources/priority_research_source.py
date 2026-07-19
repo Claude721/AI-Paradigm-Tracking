@@ -15,6 +15,7 @@ import httpx
 
 import config
 from paradigms.models import EvidenceType, TechnicalEvidence
+from paradigms.reputation import source_identity, source_link_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +28,14 @@ class _ResearchLink:
 
 
 class PriorityResearchPageSource:
-    """只抓取人工维护的官方入口；配置本身即代表来源已核验。"""
+    """抓取重点研究入口；召回优先级与发布者背书是两件独立的事。"""
 
     source_name = "priority-research-page"
 
-    def __init__(self, lookback_days: int = 7, per_page: int = 6):
+    def __init__(self, lookback_days: int = 7, per_page: int | None = None):
         self.lookback_days = max(lookback_days, 1)
-        self.per_page = max(per_page, 1)
+        configured = config.PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE
+        self.per_page = max(per_page if per_page is not None else configured, 1)
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
         if not config.PRIORITY_RESEARCH_PAGES:
@@ -66,7 +68,10 @@ class PriorityResearchPageSource:
                     logger.warning("官方研究入口返回失败 %s: %s", index_url, exc)
                     continue
                 links = _discover_index_links(response.text, str(response.url))
-                for link in links[: self.per_page]:
+                allowed_links = [
+                    link for link in links if source_link_allowed(index_url, link.url)
+                ]
+                for link in allowed_links[: self.per_page]:
                     discovered.append((index_url, link))
 
             detail_responses = await asyncio.gather(
@@ -109,6 +114,12 @@ class PriorityResearchPageSource:
             # “Technical Report”误判成普通模型发布。
             origin_kind = _origin_kind(f"{title} {link.title}", link.url)
             host = urlparse(index_url).netloc
+            source_meta, owner, publisher_tier = source_identity(index_url)
+            owner_name = str(owner.get("name", "")) if owner else ""
+            if source_meta:
+                publisher_evidence = f"内置研究入口（{publisher_tier}）：{index_url}"
+            else:
+                publisher_evidence = f"用户追加的重点入口，尚无内置 owner 核验：{index_url}"
             summary_limit = 60_000 if origin_kind == "technical_report" else 16_000
             results.append(
                 TechnicalEvidence(
@@ -119,13 +130,16 @@ class PriorityResearchPageSource:
                     summary=body[:summary_limit],
                     published_at=(published_dt.isoformat() if published_dt else published),
                     authors=list(dict.fromkeys(authors)),
-                    organization=site_name or host,
+                    # 内置入口使用已核验 owner；用户自定义入口只保留域名，避免
+                    # 网页伪造 og:site_name 后继承知名机构身份。
+                    organization=owner_name or host,
                     raw={
                         "origin_kind": origin_kind,
                         "origin_priority": 3 if origin_kind == "technical_report" else 2,
-                        "publisher_tier": "established",
-                        "publisher_evidence": f"人工维护的官方研究入口：{index_url}",
+                        "publisher_tier": publisher_tier,
+                        "publisher_evidence": publisher_evidence,
                         "research_index_url": index_url,
+                        "source_owner_id": str(source_meta.get("owner", "")) if source_meta else "",
                     },
                 )
             )
@@ -251,6 +265,16 @@ def _looks_like_research_link(title: str, url: str) -> bool:
                 "agent",
                 "multimodal",
                 "world",
+                "技术报告",
+                "研究报告",
+                "模型",
+                "架构",
+                "推理",
+                "智能体",
+                "多模态",
+                "世界模型",
+                "具身",
+                "机器人",
             )
         )
     )
@@ -263,17 +287,24 @@ def _looks_like_research_link(title: str, url: str) -> bool:
             "/paper",
             "/report",
             "/news/",
+            "/article/",
+            "/detail/",
+            "/achievement/",
             ".pdf",
         )
     )
-    return title_signal and path_signal
+    publication_path = any(
+        marker in lowered_path
+        for marker in ("/publication/", "/publications/", "/paper/", "/report/", ".pdf")
+    )
+    return path_signal and (title_signal or publication_path)
 
 
 def _origin_kind(title: str, url: str) -> str:
     lowered = f"{title} {url}".casefold()
-    if "technical report" in lowered or "tech-report" in lowered:
+    if any(value in lowered for value in ("technical report", "tech-report", "技术报告", "系统报告")):
         return "technical_report"
-    if any(value in lowered for value in ("introducing", "release", "model", "/blog/kimi-")):
+    if any(value in lowered for value in ("introducing", "release", "model", "模型发布", "发布", "/blog/kimi-")):
         return "official_model_release"
     return "official_research"
 

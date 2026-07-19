@@ -6,6 +6,7 @@ import math
 
 import config
 from .models import EvidenceType, ParadigmCandidate
+from .reputation import resolve_organization, verified_priority_researcher
 
 
 WEIGHTS = {
@@ -199,13 +200,29 @@ def _assess_publisher(candidate: ParadigmCandidate) -> None:
             established.append(
                 str(item.raw.get("publisher_evidence") or item.organization or item.source)
             )
-        if _matches_established_organization(item.organization):
-            established.append(item.organization)
+        elif item.raw.get("publisher_tier") == "verified":
+            verified.append(
+                str(item.raw.get("publisher_evidence") or item.organization or item.source)
+            )
+        organization = resolve_organization(item.organization)
+        if organization and organization["tier"] == "established":
+            established.append(str(organization["name"]))
+        elif organization:
+            verified.append(f"{organization['name']}：监测组织，尚不自动背书")
         elif item.organization:
             verified.append(item.organization)
     for profile in candidate.researchers:
-        if _matches_established_organization(profile.current_affiliation):
-            established.append(profile.current_affiliation)
+        organization = resolve_organization(profile.current_affiliation)
+        if organization and organization["tier"] == "established":
+            established.append(str(organization["name"]))
+        elif organization:
+            verified.append(f"{organization['name']}：监测组织，研究者身份待联合核验")
+        priority_researcher = verified_priority_researcher(profile)
+        if priority_researcher:
+            verified.append(
+                f"{profile.name}：重点研究者身份已由公开 ID/主页核验；"
+                f"长期方向为{priority_researcher['focus']}"
+            )
         elif (
             profile.current_affiliation
             and profile.trajectory_consistency >= 7
@@ -227,13 +244,8 @@ def _assess_publisher(candidate: ParadigmCandidate) -> None:
 
 
 def _matches_established_organization(value: str) -> bool:
-    normalized = value.casefold().strip()
-    return bool(normalized) and any(
-        organization.casefold() in normalized
-        or normalized in organization.casefold()
-        for organization in config.ESTABLISHED_RESEARCH_ORGANIZATIONS
-        if organization.strip()
-    )
+    organization = resolve_organization(value)
+    return bool(organization and organization["tier"] == "established")
 
 
 def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:

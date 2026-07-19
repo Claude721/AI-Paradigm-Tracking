@@ -39,6 +39,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from research_watchlist import (
+    default_monitored_organization_aliases,
+    default_organization_aliases,
+    default_priority_pages,
+    default_researcher_aliases,
+)
+
 load_dotenv()
 
 
@@ -67,6 +74,23 @@ def _env_float(name: str, default: float) -> float:
         return float(val.strip())
     except ValueError:
         return default
+
+
+def _env_csv(name: str) -> list[str]:
+    return [value.strip() for value in os.getenv(name, "").split(",") if value.strip()]
+
+
+def _merge_watchlist(defaults: list[str], custom: list[str], mode: str) -> list[str]:
+    values = custom if mode == "replace" else [*defaults, *custom]
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = value.casefold().rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
 
 # ── 项目路径 ──────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
@@ -150,40 +174,44 @@ RESEARCH_FEED_URLS: list[str] = [
     if value.strip()
 ]
 
-# 人工维护的高优先级官方研究入口。它们用于补足“重要机构只发官网
-# Technical Report / 技术博客、没有 RSS 或尚未进入 arXiv”的召回缺口。
-_DEFAULT_PRIORITY_RESEARCH_PAGES = (
-    "https://www.moonshot.ai/,"
-    "https://www.anthropic.com/research,"
-    "https://openai.com/research/,"
-    "https://deepmind.google/research/,"
-    "https://ai.meta.com/research/,"
-    "https://qwenlm.github.io/"
-)
-PRIORITY_RESEARCH_PAGES: list[str] = [
-    value.strip()
-    for value in (
-        os.getenv("PRIORITY_RESEARCH_PAGES", "")
-        or _DEFAULT_PRIORITY_RESEARCH_PAGES
-    ).split(",")
-    if value.strip()
-]
+# 内置名单版本化保存在 research_watchlist.py。环境变量默认只追加少量自定义
+# 项，避免 GitHub 中的旧 Variable 阻止仓库名单随版本更新；replace 可显式替换。
+RESEARCH_WATCHLIST_MODE: str = os.getenv(
+    "RESEARCH_WATCHLIST_MODE", "merge"
+).strip().casefold()
+if RESEARCH_WATCHLIST_MODE not in {"merge", "replace"}:
+    RESEARCH_WATCHLIST_MODE = "merge"
 
-# 这里只放能够给新技术带来天然验证与传播势能的前沿研究组织，不把普通
-# 大学署名自动当作权威背书。可在 .env 中覆盖或追加。
-_DEFAULT_ESTABLISHED_RESEARCH_ORGANIZATIONS = (
-    "OpenAI,Anthropic,Google DeepMind,DeepMind,Meta AI,FAIR,"
-    "Microsoft Research,NVIDIA,Moonshot AI,月之暗面,DeepSeek,"
-    "Alibaba DAMO,Qwen,ByteDance Seed,xAI,Mistral AI,Cohere"
+# 重点页面只控制主动召回；页面能否构成发布者背书由内置 owner/tier 元数据决定。
+PRIORITY_RESEARCH_PAGES: list[str] = _merge_watchlist(
+    default_priority_pages(),
+    _env_csv("PRIORITY_RESEARCH_PAGES"),
+    RESEARCH_WATCHLIST_MODE,
 )
-ESTABLISHED_RESEARCH_ORGANIZATIONS: list[str] = [
-    value.strip()
-    for value in (
-        os.getenv("ESTABLISHED_RESEARCH_ORGANIZATIONS", "")
-        or _DEFAULT_ESTABLISHED_RESEARCH_ORGANIZATIONS
-    ).split(",")
-    if value.strip()
-]
+PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE: int = max(
+    1, min(_env_int("PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE", 4), 12)
+)
+
+# “已建立”与“监测”严格分层。别名只做实体精确归一，不使用任意子串匹配；
+# 不登记整所大学，也不加入 Seed、GLM、AI Lab 等歧义裸词。
+ESTABLISHED_RESEARCH_ORGANIZATIONS: list[str] = _merge_watchlist(
+    default_organization_aliases(),
+    _env_csv("ESTABLISHED_RESEARCH_ORGANIZATIONS"),
+    RESEARCH_WATCHLIST_MODE,
+)
+MONITORED_RESEARCH_ORGANIZATIONS: list[str] = _merge_watchlist(
+    default_monitored_organization_aliases(),
+    _env_csv("MONITORED_RESEARCH_ORGANIZATIONS"),
+    RESEARCH_WATCHLIST_MODE,
+)
+
+# 重点研究者必须再由公开个人主页、ORCID/OpenAlex 等身份信息核验；姓名本身
+# 只提高背景核验优先级，不会让工作越过技术或外部承接门槛。
+PRIORITY_RESEARCHERS: list[str] = _merge_watchlist(
+    default_researcher_aliases(),
+    _env_csv("PRIORITY_RESEARCHERS"),
+    RESEARCH_WATCHLIST_MODE,
+)
 
 # ── Twitter 追踪账号（逗号分隔） ─────────────────────────
 _tw_accounts = os.getenv("TWITTER_WATCH_ACCOUNTS", "")

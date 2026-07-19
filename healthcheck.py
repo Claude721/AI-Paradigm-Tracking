@@ -63,7 +63,21 @@ def collect_checks() -> list[Check]:
             "前沿研究组织名单",
             "发布者势能核验",
             "ready" if config.ESTABLISHED_RESEARCH_ORGANIZATIONS else "missing",
-            f"已配置 {len(config.ESTABLISHED_RESEARCH_ORGANIZATIONS)} 个组织",
+            f"已配置 {len(config.ESTABLISHED_RESEARCH_ORGANIZATIONS)} 个已建立组织别名；"
+            f"模式为 {config.RESEARCH_WATCHLIST_MODE}",
+        ),
+        Check(
+            "监测研究组织名单",
+            "广覆盖但不自动背书",
+            "ready" if config.MONITORED_RESEARCH_ORGANIZATIONS else "missing",
+            f"已配置 {len(config.MONITORED_RESEARCH_ORGANIZATIONS)} 个监测组织别名",
+        ),
+        Check(
+            "重点研究者名单",
+            "人物身份与长期轨迹核验",
+            "ready" if config.PRIORITY_RESEARCHERS else "missing",
+            f"已配置 {len(config.PRIORITY_RESEARCHERS)} 个姓名别名；"
+            "必须再有公开 ID 或主页才生效",
         ),
         Check(
             "GitHub",

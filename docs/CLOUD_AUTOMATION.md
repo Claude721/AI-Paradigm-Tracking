@@ -42,12 +42,16 @@
 |---|---|
 | `OPENREVIEW_VENUES` | 逗号分隔的 venue id |
 | `RESEARCH_FEED_URLS` | 已验证的官方 RSS/Atom 地址，逗号分隔 |
-| `PRIORITY_RESEARCH_PAGES` | 已核验的官方研究首页；缺省时使用项目内置的 Moonshot/OpenAI/Anthropic/DeepMind/Meta AI/Qwen 列表 |
-| `ESTABLISHED_RESEARCH_ORGANIZATIONS` | 能提供研究与传播势能的前沿组织，逗号分隔；普通大学不要仅凭名称加入 |
+| `RESEARCH_WATCHLIST_MODE` | 推荐 `merge`；自定义值追加到仓库内置目录，只有明确需要时才用 `replace` |
+| `PRIORITY_RESEARCH_PAGES` | 可选的额外官方研究索引；留空使用内置海内外目录，追加页面不会自动成为权威背书 |
+| `PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE` | 每个入口每轮最多读取的近期链接数，默认 `4` |
+| `ESTABLISHED_RESEARCH_ORGANIZATIONS` | 可选的额外已核验组织/具名实验室别名；禁止填整所大学和歧义短词 |
+| `MONITORED_RESEARCH_ORGANIZATIONS` | 可选的额外监测组织；只增加关注，不因品牌自动放行 |
+| `PRIORITY_RESEARCHERS` | 可选的额外重点研究者姓名；必须与公开主页或学术 ID 联合核验 |
 | `REDDIT_API_ACCESS_APPROVED` | 只有收到 Reddit 批准且用途符合许可时填 `true`；否则保持空或 `false` |
 | `REDDIT_USER_AGENT` | 例如 `python:ai-paradigm-radar:v1.0 (by /u/你的用户名)`；不含密钥，可放 Variable |
 
-不配置变量时，RSS 信源为空；高优先级官方页面和前沿组织使用项目默认值，不影响工作流语法。
+不配置变量时，RSS 信源为空；研究入口、组织与重点研究者使用仓库中的版本化默认目录，不影响工作流语法。若仓库已有旧版 `PRIORITY_RESEARCH_PAGES` 或 `ESTABLISHED_RESEARCH_ORGANIZATIONS` 长名单，`merge` 会保留它们并同时加载新默认目录，不会冻结后续更新。
 
 Tavily 本地开关、域名和结果数已有保守默认值，GitHub 上通常只需添加 `TAVILY_API_KEY`。Reddit 的 Client ID/Secret 必须和“已批准”开关一起配置；只填密钥但不开启批准开关时，代码不会请求 Reddit API。
 

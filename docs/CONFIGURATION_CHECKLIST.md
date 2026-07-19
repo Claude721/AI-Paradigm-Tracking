@@ -87,17 +87,20 @@ RESEARCH_FEED_URLS=https://research.google/blog/rss/,https://deepmind.google/dis
 
 只填写 RSS/Atom XML 地址，不能填写普通博客首页。单个 Feed 失效时系统会跳过，不影响其他 Feed。
 
-高优先级官方页面用于补足“重要机构没有 RSS、Technical Report 尚未进入 arXiv”的缺口。默认已经包含 Moonshot、OpenAI、Anthropic、DeepMind、Meta AI 与 Qwen：
+高优先级官方页面用于补足“重要机构没有 RSS、Technical Report 尚未进入 arXiv”的缺口。完整默认目录版本化保存在 `research_watchlist.py`，覆盖海内外基础模型公司、World Model/机器人组织和具名高校实验室。通常保持以下值即可：
 
 ```env
-PRIORITY_RESEARCH_PAGES=https://www.moonshot.ai/,https://www.anthropic.com/research,https://openai.com/research/,https://deepmind.google/research/,https://ai.meta.com/research/,https://qwenlm.github.io/
+RESEARCH_WATCHLIST_MODE=merge
+PRIORITY_RESEARCH_PAGES=
+PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE=4
+ESTABLISHED_RESEARCH_ORGANIZATIONS=
+MONITORED_RESEARCH_ORGANIZATIONS=
+PRIORITY_RESEARCHERS=
 ```
 
-这些地址必须是已经确认归属的官方研究入口，因为配置本身会成为“发布者已核验”的证据。普通大学或泛科技新闻站不要加入。前沿组织名单也可覆盖；空值会自动回到项目默认名单：
+`merge` 表示环境变量只追加少量自定义项，仓库更新时仍会获得新的内置名单；`replace` 才会完全替换默认目录。GitHub 中曾保存过旧版长名单也不需要删除，默认会去重合并。新增页面只提高召回优先级：只有内置目录记录了 owner 与 tier 的页面才继承发布者身份，用户追加页面只能同域抓取并降为 `verified`。
 
-```env
-ESTABLISHED_RESEARCH_ORGANIZATIONS=OpenAI,Anthropic,Google DeepMind,DeepMind,Meta AI,FAIR,Microsoft Research,NVIDIA,Moonshot AI,月之暗面,DeepSeek,Alibaba DAMO,Qwen,ByteDance Seed,xAI,Mistral AI,Cohere
-```
+入口与名单分为四层：Priority pages 负责主动召回；`ESTABLISHED_RESEARCH_ORGANIZATIONS` 用于身份可核验、持续产出前沿研究的公司研究组织与具名实验室；`MONITORED_RESEARCH_ORGANIZATIONS` 保证模型厂商、机器人公司等被观察，但不会仅凭品牌自动放行；`PRIORITY_RESEARCHERS` 只在姓名精确匹配且已有主页、ORCID/OpenAlex 等公开身份后，提供人物轨迹线索。不要加入整所大学或 `AI Lab`、`Seed`、`GLM`、`ARC Lab` 等歧义裸词。完整名单与选择依据见 [前沿机构与研究者 Watchlist](FRONTIER_RESEARCH_WATCHLIST.md)。
 
 KOL、播客与技术博客二次传播候选：
 
