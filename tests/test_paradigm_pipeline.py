@@ -12,9 +12,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 import config
+from agents.paradigm_orchestrator import _apply_safety_limit
 from agents.llm_utils import parse_json_object
 from database.paradigm_store import ParadigmStore
-from paradigms.analyzer import ParadigmAnalyzer, ParadigmSynthesizer
+from paradigms.analyzer import (
+    ParadigmAnalyzer,
+    ParadigmSynthesizer,
+    _validate_mental_model,
+)
 from paradigms.clustering import cluster_extractions
 from paradigms.enrichment import EvidenceEnricher
 from paradigms.models import (
@@ -24,6 +29,7 @@ from paradigms.models import (
     ResearcherProfile,
     TechnicalEvidence,
 )
+from paradigms.rubric import evaluate_rubric, load_rubric
 from paradigms.scoring import is_reportable, score_candidate
 from reports.paradigm_generator import (
     ParadigmReportGenerator,
@@ -31,7 +37,10 @@ from reports.paradigm_generator import (
     _valid_editorial_report,
 )
 from skills.loader import SkillLoader
-from sources.paradigm_evidence_source import _is_relevant_repository
+from sources.paradigm_evidence_source import (
+    CommunityEvidenceClient,
+    _is_relevant_repository,
+)
 from sources.arxiv_source import ArxivSource
 from sources.openalex_source import OpenAlexSource
 from sources.openreview_source import OpenReviewSource
@@ -58,7 +67,49 @@ def paper(suffix: str = "1") -> TechnicalEvidence:
     )
 
 
+def rubric_answers(
+    innovation_types: list[str] | None = None,
+    *,
+    weak_ids: set[str] | None = None,
+) -> list[dict]:
+    rubric = load_rubric()
+    selected = innovation_types or ["architecture"]
+    criteria = list(rubric["common_criteria"])
+    for innovation_type in selected:
+        criteria.extend(rubric["type_criteria"][innovation_type])
+    weak = weak_ids or set()
+    answers = []
+    for criterion in criteria:
+        if criterion["id"] in weak:
+            answer = min(criterion["options"], key=criterion["options"].get)
+        else:
+            answer = max(criterion["options"], key=criterion["options"].get)
+        answers.append(
+            {
+                "criterion_id": criterion["id"],
+                "answer": answer,
+                "evidence": f"{criterion['id']} 的模拟可核验证据",
+            }
+        )
+    return answers
+
+
+def rubric_assessment(
+    innovation_types: list[str] | None = None,
+    *,
+    stage: str = "final",
+    weak_ids: set[str] | None = None,
+) -> dict:
+    return evaluate_rubric(
+        stage=stage,
+        innovation_types=innovation_types or ["architecture"],
+        answers=rubric_answers(innovation_types, weak_ids=weak_ids),
+    )
+
+
 def candidate(evidence: list[TechnicalEvidence] | None = None) -> ParadigmCandidate:
+    screening = rubric_assessment(["architecture"], stage="screening")
+    final = rubric_assessment(["architecture"], stage="final")
     return ParadigmCandidate(
         key="latent-action-world-models",
         name="Latent-action world models",
@@ -70,19 +121,44 @@ def candidate(evidence: list[TechnicalEvidence] | None = None) -> ParadigmCandid
         mechanism="从无标注视频中学习离散潜在动作并预测未来状态。",
         technical_explanation="把视频变化压缩成离散潜在动作，并在该空间预测未来状态。",
         mental_model={
-            "anchor_and_tension": "像素预测能生成画面，却没有可供行动使用的紧凑状态。",
-            "system_objects": ["潜在动作：由视频变化学习出的离散状态转移变量"],
-            "training_flow": ["视频片段进入编码器，状态变化被压缩为潜在动作"],
-            "inference_flow": ["当前状态与候选动作进入动力学模型，得到未来状态"],
-            "learning_signal": "未来状态预测误差迫使潜在动作保留可预测的变化。",
-            "minimal_example": "用两帧杯子移动的视频表示一次状态变化。",
+            "observation_axis": "沿状态表征到未来状态预测的世界模型流程观察。",
+            "low_resolution_model": (
+                "旧方法预测像素却缺少动作变量；新方法把帧间变化压成潜在动作，"
+                "再用它约束未来状态预测。"
+            ),
+            "decisive_intervention": "在状态转移接口引入可学习的离散潜在动作。",
+            "resolution_ladder": [
+                {
+                    "question": "潜在动作究竟是什么？",
+                    "answer": "由帧间状态变化学习出的离散变量。",
+                    "evidence_status": "interpretive_compression",
+                    "model_update": "它不是机器人控制量，而是预测状态转移的中间表示。",
+                },
+                {
+                    "question": "什么信号迫使它保留动作信息？",
+                    "answer": "未来状态预测误差。",
+                    "evidence_status": "source_fact",
+                    "model_update": "只有能解释后续变化的信息会被保留。",
+                },
+            ],
+            "training_causal_chain": [
+                "视频片段进入编码器，状态变化经预测误差被压缩为潜在动作。"
+            ],
+            "runtime_causal_chain": [
+                "当前状态与候选潜在动作进入动力学模型，得到未来状态。"
+            ],
+            "minimal_simulation": "用两帧杯子移动的视频表示一次状态变化。",
             "counterfactual_and_boundary": "拿掉动作条件后只能预测平均未来。",
+            "unresolved_interfaces": ["潜在动作如何与真实机器人控制量对齐。"],
         },
         application_value="让机器人从互联网视频中获得可迁移的动态先验。",
+        innovation_types=["architecture"],
         lineage_parent="video prediction world models",
         lineage_path=["video prediction", "latent-action world models"],
         keywords=["latent action", "world model", "video prediction"],
         evidence=evidence or [paper()],
+        screening_rubric=screening,
+        rubric_assessment=final,
         novelty_score=9,
         solidity_score=8,
         scope_score=9,
@@ -91,6 +167,40 @@ def candidate(evidence: list[TechnicalEvidence] | None = None) -> ParadigmCandid
 
 
 class ParadigmPipelineTests(unittest.TestCase):
+    def test_zero_safety_limit_never_truncates_dynamic_volume(self) -> None:
+        items = list(range(275))
+        selected, deferred = _apply_safety_limit(items, 0)
+        self.assertEqual(selected, items)
+        self.assertEqual(deferred, [])
+
+    def test_rubric_uses_type_specific_questions(self) -> None:
+        architecture = rubric_assessment(["architecture"], stage="screening")
+        algorithm = rubric_assessment(["algorithm"], stage="screening")
+        architecture_ids = {
+            item["criterion_id"] for item in architecture["answers"]
+        }
+        algorithm_ids = {
+            item["criterion_id"] for item in algorithm["answers"]
+        }
+        self.assertIn("architecture_computation_change", architecture_ids)
+        self.assertNotIn("architecture_computation_change", algorithm_ids)
+        self.assertIn("algorithm_credit_assignment", algorithm_ids)
+
+    def test_incomplete_rubric_requires_retry_instead_of_merit_rejection(self) -> None:
+        assessment = evaluate_rubric(
+            stage="screening",
+            innovation_types=["architecture"],
+            answers=[
+                {
+                    "criterion_id": "problem_is_material",
+                    "answer": "yes",
+                    "evidence": "存在跨任务瓶颈。",
+                }
+            ],
+        )
+        self.assertEqual(assessment["decision"], "incomplete")
+        self.assertIn("应重试而不是据此淘汰", assessment["decision_reason"])
+
     def test_invalid_llm_json_log_does_not_dump_model_content(self) -> None:
         sensitive = '{"field":"DO_NOT_LOG_THIS", BROKEN}'
         with self.assertLogs("agents.llm_utils", level="WARNING") as captured:
@@ -100,10 +210,10 @@ class ParadigmPipelineTests(unittest.TestCase):
 
     def test_unknown_low_volume_work_stays_in_observation_pool(self) -> None:
         item = candidate()
-        with patch.object(config, "PARADIGM_MIN_SCORE", 65):
-            score_candidate(item)
-            self.assertFalse(is_reportable(item))
-            self.assertIn("发布者背景未核验", item.rejection_reason)
+        score_candidate(item)
+        self.assertFalse(is_reportable(item))
+        self.assertIn("发布者背景未核验", item.admission_reason)
+        self.assertEqual(item.rubric_assessment["decision"], "observe")
 
     def test_established_team_technical_report_gets_priority_admission(self) -> None:
         evidence = paper()
@@ -142,10 +252,9 @@ class ParadigmPipelineTests(unittest.TestCase):
                 ),
             ]
         )
-        with patch.object(config, "PARADIGM_MIN_SCORE", 50):
-            score_candidate(item)
-            self.assertTrue(is_reportable(item))
-            self.assertIn("独立讨论", item.admission_reason)
+        score_candidate(item)
+        self.assertTrue(is_reportable(item))
+        self.assertIn("独立讨论", item.admission_reason)
 
     def test_author_self_release_is_identity_evidence_not_secondary_validation(self) -> None:
         item = candidate()
@@ -161,7 +270,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         score_candidate(item)
         self.assertFalse(is_reportable(item))
-        self.assertIn("缺少实质二次讨论", item.rejection_reason)
+        self.assertIn("缺少实质二次讨论", item.admission_reason)
 
     def test_tavily_indexed_pages_do_not_validate_unknown_publisher(self) -> None:
         item = candidate()
@@ -187,7 +296,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         score_candidate(item)
         self.assertFalse(is_reportable(item))
-        self.assertIn("缺少实质二次讨论", item.rejection_reason)
+        self.assertIn("缺少实质二次讨论", item.admission_reason)
 
     def test_tavily_parses_three_platforms_as_discovery_only(self) -> None:
         item = candidate()
@@ -286,6 +395,19 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertEqual(found[0].source, "reddit")
         self.assertEqual(found[0].metrics["comments"], 11)
         self.assertIn("independent analysis", found[0].summary)
+        self.assertIn(
+            "命中 1 条", item.community_coverage["reddit_official"]
+        )
+
+    def test_community_query_failure_is_visible_in_candidate_coverage(self) -> None:
+        item = candidate()
+        response = SimpleNamespace(status_code=503)
+        client = SimpleNamespace(get=AsyncMock(return_value=response))
+        found = asyncio.run(
+            CommunityEvidenceClient()._hackernews(client, item)
+        )
+        self.assertEqual(found, [])
+        self.assertIn("HTTP 503", item.community_coverage["hackernews"])
 
     def test_ephemeral_social_content_is_scrubbed_after_synthesis(self) -> None:
         item = candidate()
@@ -318,7 +440,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             item.secondary_discussion_summary, "社区主要讨论潜在动作是否可迁移。"
         )
 
-    def test_relevant_repository_uptake_can_validate_unknown_publisher(self) -> None:
+    def test_independent_repository_uptake_can_validate_unknown_publisher(self) -> None:
         item = candidate()
         item.evidence.append(
             TechnicalEvidence(
@@ -327,22 +449,34 @@ class ParadigmPipelineTests(unittest.TestCase):
                 title="community/latent-action-world-models",
                 url="https://github.com/community/latent-action-world-models",
                 metrics={"stars": 60, "forks": 8},
-                raw={"relationship": "name_and_mechanism_match"},
+                raw={
+                    "relationship": "name_and_mechanism_match",
+                    "independence": "independent",
+                },
             )
         )
-        with patch.object(config, "PARADIGM_MIN_SCORE", 50):
-            score_candidate(item)
-            self.assertTrue(is_reportable(item))
-            self.assertIn("独立讨论或承接", item.admission_reason)
+        score_candidate(item)
+        self.assertTrue(is_reportable(item))
+        self.assertIn("独立讨论或承接", item.admission_reason)
 
-    def test_incremental_tweak_is_hard_rejected(self) -> None:
+    def test_weak_rubric_answers_override_model_like_numeric_scores(self) -> None:
         item = candidate()
-        item.novelty_score = 5
-        item.scope_score = 4
-        item.incremental_penalty = 8
+        item.novelty_score = 10
+        item.scope_score = 10
+        item.solidity_score = 10
+        all_ids = {
+            value["id"] for value in load_rubric()["common_criteria"]
+        } | {
+            value["id"]
+            for value in load_rubric()["type_criteria"]["architecture"]
+        }
+        item.rubric_assessment = rubric_assessment(
+            ["architecture"], stage="final", weak_ids=all_ids
+        )
         score_candidate(item)
         self.assertFalse(is_reportable(item))
-        self.assertIn("小改动", item.rejection_reason)
+        self.assertEqual(item.rubric_assessment["decision"], "reject")
+        self.assertLess(item.total_score, 35)
 
     def test_similar_extractions_cluster_into_one_paradigm(self) -> None:
         first = ParadigmExtraction(
@@ -354,6 +488,10 @@ class ParadigmPipelineTests(unittest.TestCase):
             mechanism="m",
             lineage_parent="Video World Models",
             keywords=["latent action", "world model", "video dynamics"],
+            innovation_types=["architecture"],
+            rubric_assessment=rubric_assessment(
+                ["architecture"], stage="screening"
+            ),
             novelty_score=8,
             solidity_score=8,
             scope_score=8,
@@ -367,6 +505,10 @@ class ParadigmPipelineTests(unittest.TestCase):
             mechanism="m2",
             lineage_parent="Video World Models",
             keywords=["latent action", "world model", "video dynamics"],
+            innovation_types=["architecture"],
+            rubric_assessment=rubric_assessment(
+                ["architecture"], stage="screening"
+            ),
             novelty_score=9,
             solidity_score=7,
             scope_score=9,
@@ -381,28 +523,24 @@ class ParadigmPipelineTests(unittest.TestCase):
         payload = {
             "hypotheses": [
                 {
-                    "is_candidate": True,
                     "canonical_name": "Sparse attention routing",
                     "route_family": "Efficient frontier architectures",
                     "thesis": "t1",
                     "problem_shift": "p1",
                     "mechanism": "m1",
                     "keywords": ["sparse attention"],
-                    "novelty_score": 8,
-                    "solidity_score": 8,
-                    "scope_score": 8,
+                    "innovation_types": ["architecture"],
+                    "rubric_answers": rubric_answers(["architecture"]),
                 },
                 {
-                    "is_candidate": True,
                     "canonical_name": "Residual expert composition",
                     "route_family": "Efficient frontier architectures",
                     "thesis": "t2",
                     "problem_shift": "p2",
                     "mechanism": "m2",
                     "keywords": ["expert composition"],
-                    "novelty_score": 8,
-                    "solidity_score": 8,
-                    "scope_score": 8,
+                    "innovation_types": ["architecture"],
+                    "rubric_answers": rubric_answers(["architecture"]),
                 },
             ]
         }
@@ -431,13 +569,45 @@ class ParadigmPipelineTests(unittest.TestCase):
 
     def test_synthesis_builds_internal_mental_model_for_deep_candidates(self) -> None:
         payload = {
+            "innovation_types": ["architecture"],
+            "rubric_answers": rubric_answers(["architecture"]),
             "mental_model": {
-                "anchor_and_tension": "旧方法能预测画面，却不能把变化对应到行动。",
-                "system_objects": ["潜在动作：状态转移的离散表示"],
-                "training_flow": ["编码相邻视频帧", "用预测误差学习潜在动作"],
-                "inference_flow": ["读取当前状态", "预测候选动作后的未来状态"],
-                "learning_signal": "未来状态预测误差",
-                "minimal_example": "杯子从桌面左侧移动到右侧。",
+                "observation_axis": "沿世界模型的状态转移预测流程观察。",
+                "low_resolution_model": (
+                    "旧模型预测画面但没有动作变量；新方法把帧间变化压成潜在动作，"
+                    "再以它为条件预测未来状态。"
+                ),
+                "decisive_intervention": "在状态转移接口引入离散潜在动作。",
+                "resolution_ladder": [
+                    {
+                        "question": "潜在动作在计算图中是什么？",
+                        "answer": "状态转移的离散表示。",
+                        "evidence_status": "interpretive_compression",
+                        "model_update": "它先解释视频变化，还不是机器人控制量。",
+                    },
+                    {
+                        "question": "什么信号使它保留可预测变化？",
+                        "answer": "未来状态预测误差。",
+                        "evidence_status": "source_fact",
+                        "model_update": "预测目标把动作表示和未来状态绑定起来。",
+                    },
+                ],
+                "training_causal_chain": [
+                    "编码相邻视频帧",
+                    "用未来状态预测误差学习潜在动作",
+                ],
+                "runtime_causal_chain": [
+                    "读取当前状态",
+                    "预测候选动作后的未来状态",
+                ],
+                "minimal_simulation": "杯子从桌面左侧移动到右侧。",
+                "misconception_corrections": [
+                    {
+                        "hypothesis": "潜在动作等于真实控制量。",
+                        "correction": "它首先是从视频变化学习的中间变量。",
+                        "basis": "尚未看到与机器人控制接口的对齐证据。",
+                    }
+                ],
                 "counterfactual_and_boundary": "没有动作条件时只能学习平均变化。",
                 "unresolved_interfaces": ["潜在动作如何与机器人控制量对齐"],
             }
@@ -463,7 +633,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             ParadigmSynthesizer(client=client, model="test").run([item])
         )
         self.assertEqual(
-            item.mental_model["learning_signal"], "未来状态预测误差"
+            item.mental_model["observation_axis"],
+            "沿世界模型的状态转移预测流程观察。",
         )
         self.assertIn(
             "潜在动作如何与机器人控制量对齐",
@@ -473,9 +644,59 @@ class ParadigmPipelineTests(unittest.TestCase):
             "content"
         ]
         self.assertGreater(len(prompt), 2400)
+        self.assertIn("先建立低分辨率运行图", prompt)
+        self.assertIn("interpretive_compression", prompt)
         self.assertEqual(
             _candidate_dossier(item)["mental_model"], item.mental_model
         )
+
+    def test_mental_model_rejects_module_dump_without_resolution_ladder(self) -> None:
+        with self.assertRaisesRegex(ValueError, "observation_axis"):
+            _validate_mental_model(
+                {
+                    "system_objects": ["Encoder", "SCM", "U-Net"],
+                    "training_flow": ["联合训练全部模块"],
+                    "inference_flow": ["模型输出图像"],
+                    "minimal_example": "编辑年龄。",
+                    "counterfactual_and_boundary": "可能泛化不足。",
+                }
+            )
+
+    def test_technical_mental_model_skill_requires_progressive_correction(self) -> None:
+        method = SkillLoader().load("technical-mental-model")
+        self.assertIn("先建立低分辨率运行图", method)
+        self.assertIn("选择一个主导观察坐标", method)
+        self.assertIn("条件注入不等于改写采样动力学", method)
+        self.assertIn("interpretive_compression", method)
+        case = (
+            Path("skills/technical-mental-model/references/"
+                 "cidiffuser-calibration.md")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("不是“因果图直接定义了噪声轨迹”", case)
+        self.assertIn("顺畅但错误的解释", case)
+
+    def test_synthesis_failure_cannot_fall_back_into_report(self) -> None:
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="{}"))]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(return_value=response)
+                )
+            )
+        )
+        item = candidate()
+        item.mental_model = {}
+        asyncio.run(
+            ParadigmSynthesizer(client=client, model="test").run([item])
+        )
+        score_candidate(item)
+        self.assertEqual(client.chat.completions.create.await_count, 2)
+        self.assertEqual(item.rubric_assessment["decision"], "incomplete")
+        self.assertFalse(is_reportable(item))
+        self.assertIn("范式综合失败", item.rejection_reason)
 
     def test_report_delivery_signature_prevents_weekly_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -625,12 +846,15 @@ class ParadigmPipelineTests(unittest.TestCase):
             organization="Lab",
             identifiers={"arxiv": "2607.1"},
             origin_kind="technical_report",
+            frontier_domains=["world_spatial_models"],
             publisher_context={"organization": "Lab"},
+            rubric_definition="{}",
         )
         self.assertIn('"hypotheses"', prompt)
         self.assertIn('"canonical_name"', prompt)
         self.assertIn('"route_family"', prompt)
         self.assertIn('"design_philosophy"', prompt)
+        self.assertIn('"rubric_answers"', prompt)
         self.assertIn("2607.1", prompt)
 
         synthesis = SkillLoader().render(
@@ -644,14 +868,21 @@ class ParadigmPipelineTests(unittest.TestCase):
             mechanism="mechanism",
             technical_explanation="explanation",
             mental_model="{}",
+            innovation_types='["architecture"]',
+            screening_rubric="{}",
+            rubric_definition="{}",
+            mental_model_method="先建立低分辨率运行图，再逐层提高分辨率。",
             lineage_parent="video prediction",
             evidence="[]",
         )
         self.assertIn('"trend_interpretation"', synthesis)
         self.assertIn('"excluded_evidence_indices"', synthesis)
         self.assertIn('"mental_model"', synthesis)
-        self.assertIn('"training_flow"', synthesis)
+        self.assertIn('"observation_axis"', synthesis)
+        self.assertIn('"resolution_ladder"', synthesis)
+        self.assertIn('"rubric_answers"', synthesis)
         self.assertIn('证据列表：[]', synthesis)
+        self.assertIn("先建立低分辨率运行图", synthesis)
 
         editorial = SkillLoader().render(
             "weekly_research_memo",
@@ -659,11 +890,13 @@ class ParadigmPipelineTests(unittest.TestCase):
             lookback_days=7,
             stats="{}",
             candidate_dossiers="[]",
+            mental_model_method="先建立低分辨率运行图，再逐层提高分辨率。",
         )
         self.assertIn("约 450 到 650 个中文字", editorial)
         self.assertIn("不展示总分", editorial)
         self.assertIn("最小实例", editorial)
         self.assertIn("训练过程与推理过程必须分开", editorial)
+        self.assertIn("先建立低分辨率运行图", editorial)
 
         revision = SkillLoader().render(
             "weekly_memo_revision",
@@ -672,6 +905,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             violations="出现英文原文",
             candidate_dossiers="[]",
             previous_draft="draft",
+            mental_model_method="先建立低分辨率运行图，再逐层提高分辨率。",
         )
         self.assertIn("严禁复制英文摘要", revision)
 
@@ -682,6 +916,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             lookback_days=7,
             stats='{"origin_count": 3}',
             candidate_dossiers='[{"name": "route"}]',
+            mental_model_method="低分辨率方法",
         )
         self.assertIn('{"origin_count": 3}', prompt)
         self.assertNotIn('{{"origin_count"', prompt)
@@ -784,6 +1019,37 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         self.assertEqual(params["search"], '"world model"')
 
+    def test_openalex_stops_after_relevance_is_exhausted_not_fixed_top_k(self) -> None:
+        def page(cursor: str) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "display_name": "Unrelated horticulture paper",
+                            "primary_topic": {"display_name": "Botany"},
+                        }
+                    ],
+                    "meta": {"next_cursor": cursor},
+                },
+                request=httpx.Request("GET", "https://api.openalex.org/works"),
+            )
+
+        transport = MagicMock()
+        transport.get = AsyncMock(side_effect=[page("cursor-1"), page("cursor-2")])
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch.object(config, "OPENALEX_API_KEY", "configured"),
+            patch("sources.openalex_source.httpx.AsyncClient", return_value=context),
+        ):
+            result = asyncio.run(
+                OpenAlexSource(searches=['"world model"'], per_query=1).fetch()
+            )
+        self.assertEqual(result, [])
+        self.assertEqual(transport.get.await_count, 2)
+
     def test_openreview_uses_public_search_endpoint_instead_of_challenged_notes(self) -> None:
         response = httpx.Response(
             200,
@@ -823,15 +1089,17 @@ class ParadigmPipelineTests(unittest.TestCase):
         transport = MagicMock()
         transport.post = AsyncMock(return_value=response)
         client = SocialWebSearchClient(max_requests=1)
+        first, second = candidate(), candidate()
         with (
             patch.object(config, "TAVILY_SOCIAL_SEARCH_ENABLED", True),
             patch.object(config, "TAVILY_API_KEY", "configured"),
             patch.object(config, "TAVILY_SOCIAL_SEARCH_DOMAINS", ["reddit.com"]),
         ):
-            asyncio.run(client.search(transport, candidate()))
-            asyncio.run(client.search(transport, candidate()))
+            asyncio.run(client.search(transport, first))
+            asyncio.run(client.search(transport, second))
         self.assertEqual(transport.post.await_count, 1)
         self.assertEqual(client.requests_used, 1)
+        self.assertIn("credit safety limit", second.community_coverage["tavily_social_web"])
 
     def test_unanalyzed_discovery_remains_eligible_next_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

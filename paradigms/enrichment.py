@@ -9,8 +9,14 @@ from difflib import SequenceMatcher
 from sources.paradigm_evidence_source import CommunityEvidenceClient
 from sources.semantic_scholar_source import SemanticScholarClient
 from sources.researcher_profile_source import ResearcherProfileClient
+from sources.arxiv_document_source import ArxivDocumentClient
 
-from .models import EvidenceType, ParadigmCandidate, TechnicalEvidence
+from .models import (
+    EvidenceType,
+    ParadigmCandidate,
+    TechnicalEvidence,
+    material_metric_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +27,7 @@ class EvidenceEnricher:
         self.semantic_scholar = SemanticScholarClient()
         self.community = CommunityEvidenceClient()
         self.researchers = ResearcherProfileClient()
+        self.documents = ArxivDocumentClient()
 
     async def run(
         self,
@@ -37,6 +44,40 @@ class EvidenceEnricher:
 
         return await asyncio.gather(*(enrich_one(candidate) for candidate in candidates))
 
+    async def hydrate_priority_origins(
+        self, evidence: list[TechnicalEvidence]
+    ) -> dict[str, int]:
+        """在初筛前只补水高势能原点，避免摘要信息不足误杀关键节点。"""
+        targets = [
+            item
+            for item in evidence
+            if int(item.raw.get("origin_priority", 0) or 0) >= 2
+            or item.raw.get("explicit_seed")
+        ]
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        async def hydrate_one(item: TechnicalEvidence) -> bool:
+            async with semaphore:
+                try:
+                    coverage = await self.documents.hydrate(item)
+                except Exception as exc:
+                    logger.warning(
+                        "高优先级原点正文补水异常 [%s]: %s",
+                        item.title,
+                        exc,
+                    )
+                    return False
+                return bool(item.raw.get("document_excerpt")) and not any(
+                    "失败" in value for value in coverage.values()
+                )
+
+        results = await asyncio.gather(*(hydrate_one(item) for item in targets))
+        return {
+            "priority_origin_targets": len(targets),
+            "priority_origin_hydrated": sum(results),
+            "priority_origin_hydration_failed": len(targets) - sum(results),
+        }
+
     async def refresh(
         self,
         candidates: list[ParadigmCandidate],
@@ -47,15 +88,46 @@ class EvidenceEnricher:
 
         async def refresh_one(candidate: ParadigmCandidate) -> ParadigmCandidate | None:
             async with semaphore:
-                previous = {item.fingerprint for item in candidate.evidence}
+                previous = {
+                    item.fingerprint: (
+                        material_metric_signature(item.metrics),
+                        dict(item.metrics),
+                    )
+                    for item in candidate.evidence
+                }
                 self._attach_support(candidate, supporting)
                 try:
                     candidate.evidence.extend(await self.community.search(candidate))
-                    candidate.community_coverage = self.community.coverage()
+                    candidate.community_coverage = {
+                        **self.community.coverage(),
+                        **candidate.community_coverage,
+                    }
                 except Exception as exc:
                     logger.warning("历史范式社区刷新失败 [%s]: %s", candidate.name, exc)
                 candidate.evidence = _dedupe_evidence(candidate.evidence)
-                if not any(item.fingerprint not in previous for item in candidate.evidence):
+                changed = False
+                for item in candidate.evidence:
+                    prior = previous.get(item.fingerprint)
+                    if prior is None:
+                        changed = True
+                        continue
+                    current_signature = material_metric_signature(item.metrics)
+                    if current_signature == prior[0]:
+                        continue
+                    delta = {}
+                    for key, value in item.metrics.items():
+                        try:
+                            difference = float(value or 0) - float(
+                                prior[1].get(key, 0) or 0
+                            )
+                        except (TypeError, ValueError):
+                            continue
+                        if difference > 0:
+                            delta[key] = int(difference) if difference.is_integer() else difference
+                    if delta:
+                        item.raw["metric_delta"] = delta
+                    changed = True
+                if not changed:
                     return None
                 _attach_social_profiles(candidate)
                 return candidate
@@ -65,6 +137,15 @@ class EvidenceEnricher:
 
     async def _external_enrichment(self, candidate: ParadigmCandidate) -> None:
         lead = candidate.evidence[0]
+        document_coverage = await self.documents.hydrate(lead)
+        candidate.community_coverage = {
+            **candidate.community_coverage,
+            **document_coverage,
+        }
+        for repository in lead.raw.get("github_repositories", []) or []:
+            candidate.evidence.append(
+                _official_repository_evidence(lead, str(repository))
+            )
         results = await asyncio.gather(
             self.semantic_scholar.enrich_paper(lead),
             self.community.search(candidate),
@@ -82,7 +163,10 @@ class EvidenceEnricher:
             logger.warning("Semantic Scholar 增强失败 [%s]: %s", candidate.name, scholarly)
         if not isinstance(community, Exception):
             candidate.evidence.extend(community)
-            candidate.community_coverage = self.community.coverage()
+            candidate.community_coverage = {
+                **self.community.coverage(),
+                **candidate.community_coverage,
+            }
         else:
             logger.warning("社区证据增强失败 [%s]: %s", candidate.name, community)
         candidate.evidence = list(
@@ -110,6 +194,8 @@ class EvidenceEnricher:
                     "tavily-x": "X 公开索引线索",
                     "xiaohongshu": "小红书公开索引线索",
                     "tavily-xiaohongshu": "小红书公开索引线索",
+                    "web": "独立技术网页索引线索",
+                    "tavily-web": "独立技术网页索引线索",
                 }
                 stable_id = next(iter(evidence.identifiers.values()), "")
                 evidence.title = labels.get(platform, "社区公开讨论")
@@ -198,7 +284,10 @@ def _official_repository_evidence(
         authors=source.authors,
         metrics={"stars": source.metrics.get("stars", 0)},
         identifiers={"github": full_name},
-        raw={"relationship": "paper_linked_repository"},
+        raw={
+            "relationship": "paper_linked_repository",
+            "independence": "official",
+        },
     )
 
 

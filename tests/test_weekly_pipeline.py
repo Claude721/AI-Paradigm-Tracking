@@ -61,6 +61,16 @@ class WeeklyPipelineTests(unittest.TestCase):
         self.assertIsNotNone(next_fire)
         self.assertEqual(next_fire.isoformat(), "2026-07-24T09:00:00+08:00")
 
+    def test_cloud_state_reuses_dedup_history_but_rebuilds_landscape_baseline(self) -> None:
+        workflow = Path(".github/workflows/weekly-radar.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("PARADIGM_RECALL_OVERLAP_DAYS", workflow)
+        self.assertIn("state_landscape", workflow)
+        self.assertIn("current_landscape", workflow)
+        self.assertIn("恢复旧数据库用于证据去重", workflow)
+        self.assertNotIn('state_commit="$(jq', workflow)
+
     def test_email_builds_attachment_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "deal_flow_2026-07-18.md"
@@ -126,12 +136,13 @@ class WeeklyPipelineTests(unittest.TestCase):
         audit.record_candidate(
             {
                 "name": "Example Route",
-                "reportable": True,
+                "reportable": False,
                 "admission_reason": "存在独立承接",
+                "rejection_reason": "最终 Rubric 未达到报告阈值",
                 "mental_model_components": [
-                    "anchor_and_tension",
-                    "training_flow",
-                    "inference_flow",
+                    "observation_axis",
+                    "low_resolution_model",
+                    "resolution_ladder",
                 ],
             }
         )
@@ -150,6 +161,8 @@ class WeeklyPipelineTests(unittest.TestCase):
         self.assertEqual(payload["llm_summary"]["llm_reasoning_tokens"], 8)
         self.assertNotIn("prompt", payload["llm_calls"][0])
         self.assertNotIn("response", payload["llm_calls"][0])
+        self.assertIn("发布者/社区依据：存在独立承接", markdown)
+        self.assertIn("最终依据：最终 Rubric 未达到报告阈值", markdown)
         self.assertIn("心智模型脚手架已形成 3 个有效部件", markdown)
 
     def test_required_email_failure_fails_the_task(self) -> None:

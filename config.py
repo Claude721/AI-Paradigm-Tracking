@@ -97,6 +97,24 @@ BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "database" / "deal_sourcing.db"
 PARADIGM_DB_PATH = BASE_DIR / "database" / "paradigm_radar.db"
 REPORTS_DIR = BASE_DIR / "reports" / "output"
+_landscape_value = os.getenv("FRONTIER_LANDSCAPE_PATH", "").strip()
+_landscape_path = Path(_landscape_value).expanduser() if _landscape_value else None
+FRONTIER_LANDSCAPE_PATH = (
+    (
+        _landscape_path
+        if _landscape_path.is_absolute()
+        else BASE_DIR / _landscape_path
+    )
+    if _landscape_path
+    else BASE_DIR / "taxonomy" / "frontier_landscape.json"
+)
+_rubric_value = os.getenv("PARADIGM_RUBRIC_PATH", "").strip()
+_rubric_path = Path(_rubric_value).expanduser() if _rubric_value else None
+PARADIGM_RUBRIC_PATH = (
+    (_rubric_path if _rubric_path.is_absolute() else BASE_DIR / _rubric_path)
+    if _rubric_path
+    else BASE_DIR / "rubrics" / "paradigm_rubric.json"
+)
 
 # ── 全局 LLM 配置（子/主 Agent 的共同 fallback） ─────────
 LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "")
@@ -153,9 +171,17 @@ TAVILY_SOCIAL_SEARCH_DOMAINS: list[str] = [
 TAVILY_SOCIAL_MAX_RESULTS: int = max(
     1, min(_env_int("TAVILY_SOCIAL_MAX_RESULTS", 12), 20)
 )
-# 每轮最多消耗的 Tavily basic search credits。候选数再多也不会无限调用。
-TAVILY_MAX_REQUESTS_PER_RUN: int = max(
-    0, _env_int("TAVILY_MAX_REQUESTS_PER_RUN", 12)
+# 同一个 Tavily 请求默认同时发现社区页面和独立技术博客。留空表示不按域名
+# 限制搜索；结果仍只是索引线索，必须经直接来源核验后才能计入独立承接。
+TAVILY_DISCOVERY_DOMAINS: list[str] = [
+    value.strip().casefold()
+    for value in os.getenv("TAVILY_DISCOVERY_DOMAINS", "").split(",")
+    if value.strip()
+]
+# Tavily 默认覆盖全部通过 Rubric 的深挖候选。非零值是用户显式设置的
+# credit safety limit，不参与候选排序或研究去留。
+TAVILY_REQUEST_SAFETY_LIMIT: int = max(
+    0, _env_int("TAVILY_REQUEST_SAFETY_LIMIT", 0)
 )
 
 # Reddit 官方 Data API 必须先获得 Reddit 批准并使用 OAuth。商业用途还需
@@ -198,8 +224,8 @@ PRIORITY_RESEARCH_PAGES: list[str] = _merge_watchlist(
     _env_csv("PRIORITY_RESEARCH_PAGES"),
     RESEARCH_WATCHLIST_MODE,
 )
-PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE: int = max(
-    1, min(_env_int("PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE", 4), 12)
+PRIORITY_RESEARCH_LINK_SAFETY_LIMIT: int = max(
+    0, _env_int("PRIORITY_RESEARCH_LINK_SAFETY_LIMIT", 0)
 )
 PRIORITY_RESEARCH_CONCURRENCY: int = max(
     1, min(_env_int("PRIORITY_RESEARCH_CONCURRENCY", 6), 12)
@@ -258,24 +284,29 @@ STAR_THRESHOLD: int = _env_int("STAR_THRESHOLD", 50)
 # 默认启用技术范式雷达；legacy 可回退到原有项目型 Deal Flow。
 PIPELINE_MODE: str = os.getenv("PIPELINE_MODE", "paradigm").strip().lower()
 
-# 技术范式筛选参数。热度不作为准入门槛，防止错过低声量的新范式。
-PARADIGM_MIN_SCORE: float = _env_float("PARADIGM_MIN_SCORE", 65.0)
-PARADIGM_MIN_NOVELTY: float = _env_float("PARADIGM_MIN_NOVELTY", 6.0)
-PARADIGM_MIN_SCOPE: float = _env_float("PARADIGM_MIN_SCOPE", 6.0)
-PARADIGM_MAX_DISCOVERY_ITEMS: int = _env_int(
-    "PARADIGM_MAX_DISCOVERY_ITEMS", 100
+# 技术筛选唯一依据是版本化 Rubric。模型回答离散问题并给出证据，程序按
+# rubrics/paradigm_rubric.json 确定性计分；不再读取模型自报的 0-10 主观分。
+#
+# 以下 safety limit 只用于用户主动设置的运行熔断，0 表示不限制。它们绝不
+# 参与候选排序或研究去留；触发时必须在审计中明确标为“未完成”，不能写成
+# “未通过筛选”。旧版 PARADIGM_MAX_* 环境变量不再读取，避免 GitHub 中
+# 遗留的 100/30/16 继续影响新逻辑。
+PARADIGM_DISCOVERY_SAFETY_LIMIT: int = max(
+    0, _env_int("PARADIGM_DISCOVERY_SAFETY_LIMIT", 0)
 )
-# 原始召回与昂贵 LLM 分析分开限额。正式 Technical Report/官方发布按优先级
-# 排在前面；普通论文不会因为召回池达到 100 条就全部调用主模型。
-PARADIGM_MAX_ANALYSIS_ITEMS: int = max(
-    1, _env_int("PARADIGM_MAX_ANALYSIS_ITEMS", 30)
+PARADIGM_ANALYSIS_SAFETY_LIMIT: int = max(
+    0, _env_int("PARADIGM_ANALYSIS_SAFETY_LIMIT", 0)
 )
-PARADIGM_MAX_DEEP_CANDIDATES: int = max(
-    1, _env_int("PARADIGM_MAX_DEEP_CANDIDATES", 16)
+PARADIGM_DEEP_SAFETY_LIMIT: int = max(
+    0, _env_int("PARADIGM_DEEP_SAFETY_LIMIT", 0)
 )
-PARADIGM_MAX_REPORT_ITEMS: int = _env_int("PARADIGM_MAX_REPORT_ITEMS", 12)
+PARADIGM_REPORT_SAFETY_LIMIT: int = max(
+    0, _env_int("PARADIGM_REPORT_SAFETY_LIMIT", 0)
+)
 PARADIGM_ALLOW_UPDATES: bool = _env_bool("PARADIGM_ALLOW_UPDATES", True)
-PARADIGM_MAX_REFRESH_ITEMS: int = _env_int("PARADIGM_MAX_REFRESH_ITEMS", 40)
+PARADIGM_REFRESH_SAFETY_LIMIT: int = max(
+    0, _env_int("PARADIGM_REFRESH_SAFETY_LIMIT", 0)
+)
 PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS: int = _env_int(
     "PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS", 2
 )
@@ -285,6 +316,26 @@ PARADIGM_MIN_SECONDARY_ENGAGEMENT: int = _env_int(
 
 # 周报/月度回顾的抓取时间窗口
 SOURCING_LOOKBACK_DAYS: int = max(_env_int("SOURCING_LOOKBACK_DAYS", 7), 1)
+# 定时周更保留一个重叠发现窗口。数据库负责按证据指纹去重，因此扫描 14 天
+# 不会重复分析上一周已处理的论文，却能覆盖某个信源上周失败、Actions 延迟
+# 或论文索引晚到造成的漏项。手动 30/60/90 天窗口不受缩短。
+PARADIGM_RECALL_OVERLAP_DAYS: int = max(
+    SOURCING_LOOKBACK_DAYS,
+    _env_int("PARADIGM_RECALL_OVERLAP_DAYS", 14),
+)
+# 正常周更只看本周新增；数据库为空或用户显式 reset 时使用较长冷启动窗口，
+# 以免项目第一次上线时错过最近形成、但已超出 7/30 天的关键节点。
+PARADIGM_BOOTSTRAP_LOOKBACK_DAYS: int = max(
+    PARADIGM_RECALL_OVERLAP_DAYS,
+    _env_int("PARADIGM_BOOTSTRAP_LOOKBACK_DAYS", 60),
+)
+# 可选的精确论文补录通道，用逗号分隔 arXiv ID。它主要用于审计、回补与
+# 黄金样例复查，不是用论文白名单替代领域召回。
+PARADIGM_SEED_ARXIV_IDS: list[str] = _env_csv("PARADIGM_SEED_ARXIV_IDS")
+PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
+    3, min(_env_int("PARADIGM_RESEARCHER_PROFILE_LIMIT", 6), 10)
+)
+PARADIGM_STATE_SCHEMA_VERSION: int = 2
 
 # 定时任务（默认每周五 09:00，Asia/Shanghai）
 SCHEDULE_DAY_OF_WEEK: str = os.getenv("SCHEDULE_DAY_OF_WEEK", "fri")

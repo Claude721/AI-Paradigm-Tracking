@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import config
 from agents.llm_utils import resolve_all
+from paradigms.landscape import load_landscape
+from paradigms.rubric import load_rubric
 
 
 @dataclass
@@ -22,7 +24,15 @@ def collect_checks() -> list[Check]:
     checks = [
         _model_check("论文范式抽取模型", sub),
         _model_check("范式综合/人物模型", main),
+        _rubric_check(),
+        _landscape_check(),
         Check("arXiv", "论文发现", "ready", "官方 API，无需 Key；本检查未发请求"),
+        Check(
+            "arXiv HTML / 项目页",
+            "深挖正文与人物入口",
+            "ready",
+            "高优先级原点在初筛前读取，其他候选在深挖时读取；无需 Key",
+        ),
         Check(
             "Hugging Face Daily Papers",
             "论文社区信号",
@@ -104,12 +114,16 @@ def collect_checks() -> list[Check]:
         Check("Hacker News Algolia", "社区讨论", "ready", "无需 Key；本检查未发请求"),
         Check(
             "Tavily 跨站公开索引",
-            "X/Reddit/小红书讨论发现",
+            "社区页面/独立技术博客发现",
             "ready" if config.TAVILY_API_KEY else "degraded",
-            f"已配置；整轮最多 {config.TAVILY_MAX_REQUESTS_PER_RUN} 次请求；"
-            "只作为部分索引线索，不代表平台总声量"
-            if config.TAVILY_API_KEY
-            else "未配置 TAVILY_API_KEY，运行时跳过跨站公开索引",
+            (
+                f"已配置；credit safety limit="
+                f"{config.TAVILY_REQUEST_SAFETY_LIMIT or '不限制'}；"
+                f"域名限制={config.TAVILY_DISCOVERY_DOMAINS or '无'}；"
+                "只作为部分索引线索，不代表平台总声量"
+                if config.TAVILY_API_KEY
+                else "未配置 TAVILY_API_KEY，运行时跳过跨站公开索引"
+            ),
         ),
         Check(
             "Reddit 官方 Data API",
@@ -143,6 +157,48 @@ def collect_checks() -> list[Check]:
         _schedule_check(),
     ]
     return checks
+
+
+def _rubric_check() -> Check:
+    try:
+        rubric = load_rubric()
+        deep = rubric["decisions"]["deep_dive"]["min_score"]
+        report = rubric["decisions"]["report"]["min_score"]
+        return Check(
+            "技术范式 Rubric",
+            "可审计研究决策",
+            "ready",
+            f"版本 {rubric['version']}；{len(rubric['common_criteria'])} 道 common 题；"
+            f"{len(rubric['type_criteria'])} 类创新量表；深挖/报告阈值 {deep}/{report}",
+        )
+    except Exception as exc:
+        return Check(
+            "技术范式 Rubric",
+            "可审计研究决策",
+            "missing",
+            f"Rubric 无法加载：{exc}",
+        )
+
+
+def _landscape_check() -> Check:
+    try:
+        landscape = load_landscape()
+        domains = landscape["domains"]
+        return Check(
+            "AI 前沿覆盖地图",
+            "产业/技术栈召回审计",
+            "ready",
+            f"版本 {landscape['version']}；{len(domains)} 个必查领域；"
+            f"周更重叠 {config.PARADIGM_RECALL_OVERLAP_DAYS} 天；"
+            f"空状态/地图升级回看 {config.PARADIGM_BOOTSTRAP_LOOKBACK_DAYS} 天",
+        )
+    except Exception as exc:
+        return Check(
+            "AI 前沿覆盖地图",
+            "产业/技术栈召回审计",
+            "missing",
+            f"覆盖地图无法加载：{exc}",
+        )
 
 
 def print_checks() -> None:

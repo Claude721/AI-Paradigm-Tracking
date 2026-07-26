@@ -51,21 +51,45 @@ class OpenReviewSource:
 
     async def fetch(self) -> list[TechnicalEvidence]:
         semaphore = asyncio.Semaphore(self.concurrency)
+        cutoff_ms = int(
+            (datetime.now(timezone.utc) - timedelta(days=self.lookback_days)).timestamp()
+            * 1000
+        )
 
         async def search_one(client, venue: str, query: str):
             async with semaphore:
-                return await client.get(
-                    OPENREVIEW_SEARCH_API,
-                    params={
-                        # /notes 目前可能要求浏览器 Challenge；官方 search
-                        # 端点仍允许公开检索，并支持 venueid 过滤。
-                        "query": query,
-                        "venueid": venue,
-                        "limit": self.limit,
-                        "sort": "tmdate:desc",
-                        "details": "replyCount",
-                    },
-                )
+                offset = 0
+                notes: list[dict] = []
+                while True:
+                    response = await client.get(
+                        OPENREVIEW_SEARCH_API,
+                        params={
+                            # /notes 目前可能要求浏览器 Challenge；官方 search
+                            # 端点仍允许公开检索，并支持 venueid 过滤。
+                            "query": query,
+                            "venueid": venue,
+                            # limit 是 API 传输页大小，不是候选上限。
+                            "limit": self.limit,
+                            "offset": offset,
+                            "sort": "tmdate:desc",
+                            "details": "replyCount",
+                        },
+                    )
+                    response.raise_for_status()
+                    page = response.json().get("notes", [])
+                    notes.extend(page)
+                    dates = [
+                        int(note.get("tmdate") or note.get("cdate") or 0)
+                        for note in page
+                    ]
+                    if (
+                        len(page) < self.limit
+                        or not page
+                        or any(value and value < cutoff_ms for value in dates)
+                    ):
+                        break
+                    offset += self.limit
+                return notes
 
         async with httpx.AsyncClient(
             timeout=30,
@@ -82,20 +106,12 @@ class OpenReviewSource:
             ]
             responses = await asyncio.gather(*tasks, return_exceptions=True)
 
-        cutoff_ms = int(
-            (datetime.now(timezone.utc) - timedelta(days=self.lookback_days)).timestamp()
-            * 1000
-        )
         items: list[TechnicalEvidence] = []
-        for response in responses:
-            if isinstance(response, Exception):
-                logger.warning("OpenReview 单个 venue 获取失败: %s", response)
+        for notes in responses:
+            if isinstance(notes, Exception):
+                logger.warning("OpenReview 单个 venue 获取失败: %s", notes)
                 continue
-            if response.status_code >= 400:
-                logger.warning("OpenReview 单个 venue 返回 HTTP %s", response.status_code)
-                continue
-            response.raise_for_status()
-            for note in response.json().get("notes", []):
+            for note in notes:
                 modified = int(note.get("tmdate") or note.get("cdate") or 0)
                 if modified and modified < cutoff_ms:
                     continue

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-import config
-
 from .models import ParadigmCandidate, ParadigmExtraction, normalize_paradigm_name
 
 
@@ -22,33 +20,49 @@ def cluster_extractions(extractions: list[ParadigmExtraction]) -> list[ParadigmC
 
 
 def _passes_initial_gate(item: ParadigmExtraction) -> bool:
-    """在社区搜索和主模型综合前挡住模型自报的局部小改动。"""
+    """只让版本化 Rubric 判定为 deep_dive 的机制进入昂贵证据深挖。"""
     return not initial_gate_reason(item)
 
 
 def initial_gate_reason(item: ParadigmExtraction) -> str:
     """返回未进入昂贵证据深挖的明确原因；空字符串表示通过。"""
-    if not item.is_candidate:
-        return item.rejection_reason or "机制抽取 Agent 判断不构成范式候选"
-    formal_report = (
-        item.evidence.raw.get("origin_kind") == "technical_report"
-        and item.evidence.raw.get("publisher_tier") == "established"
+    assessment = item.rubric_assessment
+    if not assessment:
+        return "缺少版本化 Rubric 结果，不能据模型主观分数进入深挖"
+    decision = assessment.get("decision")
+    priority_review = (
+        decision == "observe"
+        and _has_review_priority(item)
     )
-    if formal_report:
-        return ""
-    if item.novelty_score < config.PARADIGM_MIN_NOVELTY:
-        return "新颖性没有跨过内部技术硬门槛"
-    if item.scope_score < config.PARADIGM_MIN_SCOPE:
-        return "技术外延过窄，仍是现有范式下的局部改进"
-    if item.incremental_penalty >= 7 and item.scope_score < 8:
-        return "增量改动惩罚过高，且没有足够大的能力边界变化"
+    if decision != "deep_dive" and not priority_review:
+        return str(
+            assessment.get("decision_reason")
+            or item.rejection_reason
+            or "Rubric 未判定进入深挖"
+        )
     if not item.canonical_name:
-        return "没有形成可归一的技术路线名称"
+        return "抽取结构不完整：没有形成可归一的技术路线名称"
     if not item.mechanism:
-        return "没有抽取出可复核的新机制"
+        return "抽取结构不完整：没有抽取出可复核的新机制"
     if not item.problem_shift:
-        return "没有说明问题定义或能力边界发生了什么变化"
+        return "抽取结构不完整：没有说明问题定义或能力边界发生了什么变化"
     return ""
+
+
+def is_priority_review(item: ParadigmExtraction) -> bool:
+    """高势能但初筛边界不确定的材料进入复核，不代表自动通过最终门槛。"""
+    return (
+        item.rubric_assessment.get("decision") == "observe"
+        and _has_review_priority(item)
+        and not initial_gate_reason(item)
+    )
+
+
+def _has_review_priority(item: ParadigmExtraction) -> bool:
+    return (
+        int(item.evidence.raw.get("origin_priority", 0) or 0) >= 2
+        or bool(item.evidence.raw.get("explicit_seed"))
+    )
 
 
 def _find_similar_group(
@@ -83,7 +97,7 @@ def _build_candidate(
 ) -> ParadigmCandidate:
     lead = max(
         items,
-        key=lambda item: item.novelty_score + item.solidity_score + item.scope_score,
+        key=lambda item: float(item.rubric_assessment.get("score", 0.0)),
     )
     evidence = []
     seen = set()
@@ -105,6 +119,13 @@ def _build_candidate(
         application_value=lead.application_value,
         why_now=lead.why_now,
         novelty_type=lead.novelty_type,
+        innovation_types=sorted(
+            {
+                innovation_type
+                for item in items
+                for innovation_type in item.innovation_types
+            }
+        ),
         lineage_parent=lead.lineage_parent,
         lineage_path=[value for value in [lead.lineage_parent, lead.canonical_name] if value],
         keywords=sorted({word for item in items for word in item.keywords}),
@@ -113,4 +134,6 @@ def _build_candidate(
         solidity_score=max(item.solidity_score for item in items),
         scope_score=max(item.scope_score for item in items),
         incremental_penalty=min(item.incremental_penalty for item in items),
+        screening_rubric=lead.rubric_assessment,
+        total_score=float(lead.rubric_assessment.get("score", 0.0)),
     )

@@ -9,13 +9,17 @@
 ```text
 论文 / Technical Report / 官方研究博客
           ↓
+ 版本化前沿覆盖地图（具身 / World Model / AI4S / 系统等）
+          ↓
  抽取一个或多个“新机制假说”
           ↓
- 新颖性 + 扎实度 + 范式外延硬门槛
+ 版本化离散 Rubric 确定性初筛
           ↓
- 发布团队背景 × GitHub / HN / X / KOL 外部响应
+ arXiv 正文/项目页补水 × 发布团队背景 × 外部响应
           ↓
  OpenAlex / S2 / ORCID / 个人主页核验关键人物
+          ↓
+ 从低分辨率运行图递进构建技术心智模型
           ↓
  研究总编辑合并技术路线并生成每周 Memo
 ```
@@ -32,22 +36,24 @@ Product Hunt、普通 GitHub Trending 和产品热榜不再决定候选，只在
 
 ## 如何判断“新范式”
 
-系统先区分作者写下的宏大问题与论文真正做出的 intervention。缺少清晰新机制、问题边界没有变化、外延空间过窄时直接淘汰；通过技术硬门槛后，再按发布证据决定是否占用本周报告篇幅：
+系统先区分作者写下的宏大问题与论文真正做出的 intervention。模型不再凭整体印象直接输出“新颖性 7 分”，而是根据版本化 Rubric 回答带证据的二分/选择题；架构、算法、学习范式、数据、推理、Agent 闭环、具身、World Model、AI4S、系统与评测分别使用不同问题。程序按选项规则确定性计算初筛和最终决策：
 
 - 已核验前沿组织发布的正式 Technical Report 优先进入解读，并逐项检查其中可独立承接的新机制。
-- 普通论文即使来自强团队，也需要至少一条实质外部响应；身份仅仅“有机构署名”不等于有技术势能。
+- 普通论文不能只凭一个机构署名晋级；但多位长期前沿研究者的身份与方向被公开主页/学术 ID 核验后，本身构成发布势能，仍需先通过技术 Rubric。
 - 发布者背景一般或无法核验时，需要跨来源的有内容讨论、独立复现、产品承接或高关注研究者的二次解读。
 - 作者本人在 X 或个人主页发布工作可用于核验身份、机构与既往轨迹，但不能把自己的宣传转化为“社区已经验证”。
-- Tavily 免费搜索用于发现公开索引的 X、Reddit、小红书线索；它不是平台全量 API，也不参与声量计分。Reddit OAuth 只有在明确获批后才读取帖子、评论与互动指标。
+- Tavily 免费搜索用于发现公开索引的社区页面和独立技术博客；它不是平台全量 API，也不参与声量计分。Reddit OAuth 只有在明确获批后才读取帖子、评论与互动指标。
 - 前沿机构目录区分“主动抓取、已建立、监测、重点研究者”四层；完整名单与官方核验入口见 [前沿机构与研究者 Watchlist](docs/FRONTIER_RESEARCH_WATCHLIST.md)。
 
-内部仍保留评分用于排序，但它不代替这些门槛，也不会出现在最终报告中。
+Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，可长期增删问题、调整 option 权重与阶段阈值。每周分析数量由实际召回和 Rubric 结果共同决定，不固定取前 100、30 或 16 个；Rubric 分数与回答只进入审计，不进入最终报告。
+
+行业发现范围位于 [`taxonomy/frontier_landscape.json`](taxonomy/frontier_landscape.json)。每次审计都会逐领域显示已查询/零命中/失败，避免“报告为零”掩盖信源覆盖故障。数据库为空或覆盖地图升级时自动回看 60 天；正常周更采用至少 14 天重叠窗口并由数据库去重。T‑Rex 被保留为离线黄金样例，用于约束触觉具身召回、正文与人物补水、官方仓库/独立讨论分账及跨周路线合并，但生产逻辑没有把它写成论文白名单。
 
 ## 每周交付物
 
-报告文件位于 `reports/output/paradigm_radar_YYYY-MM-DD.md`。候选通过初筛后会先构建内部“可运行心智模型”，把真实对象、训练信号、推理/行动信息流、最小实例、反事实边界和未知接口跑通；研究总编辑再写约 500 字的本期 Memo，并按共同 background 把多篇工作组织成少数技术路线。这个脚手架不会作为固定字段输出，完整方法见 [可运行心智模型写作法](docs/MENTAL_MODEL_WRITING_METHOD.md)。正文必须用中文转述；论文名和必要术语可以保留英文，但英文摘要或长句会触发自动重写，重写仍不合格则任务失败且不发送邮件。
+报告文件位于 `reports/output/paradigm_radar_YYYY-MM-DD.md`。候选通过初筛后会调用 [`technical-mental-model`](skills/technical-mental-model/SKILL.md)：先选择一条能统摄技术的训练、推理、表示或行动流程，用二到四句建立低分辨率运行图，再沿真正改变理解的接口逐层提高分辨率并纠正错误直觉。研究总编辑据此写约 500 字的本期 Memo，并按共同 background 把多篇工作组织成技术路线。内部脚手架不会作为固定字段输出，完整方法见 [从低分辨率到高分辨率的技术心智模型写作法](docs/MENTAL_MODEL_WRITING_METHOD.md)。正文必须用中文转述；论文名和必要术语可以保留英文，但英文摘要或长句会触发自动重写，重写仍不合格则任务失败且不发送邮件。
 
-每条重要路线都会追踪第一作者或关键作者。人物档案优先核验当前机构、代表作、研究连续性、个人主页、ORCID、GitHub、LinkedIn 与公开邮箱；没有公开联系方式时，报告必须保留检索过的公开来源和能够确认的最低背景，不能只写“尚未验证”。
+每条重要路线都会追踪前三位作者、末位/资深作者和重点名单中的关键作者；官方项目页明确标注共同一作/通讯关系时按贡献角色组织，不能把大型合作论文写成“某位大佬的论文”。人物档案优先核验当前机构、代表作、研究连续性、个人主页、ORCID、GitHub、LinkedIn 与公开邮箱；没有公开联系方式时，报告必须保留检索过的公开来源和能够确认的最低背景。
 
 系统使用独立的 `database/paradigm_radar.db`。同一证据按 DOI、arXiv ID 或稳定 URL 去重；观察池和已报告路线会在每周重新检索近期讨论。同一范式只有在证据签名发生实质变化时才会以“进展更新”再次出现，因此相邻周不会原样重复。没有候选跨过联合门槛时会正常发送一份空雷达，而不是硬凑一条新范式。
 
@@ -81,13 +87,15 @@ python main.py --smoke-test # 小成本真实检查接口；SMTP 只登录、不
 
 ```env
 SOURCING_LOOKBACK_DAYS=7
+PARADIGM_RECALL_OVERLAP_DAYS=14
+PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
 SCHEDULE_DAY_OF_WEEK=fri
 SCHEDULE_HOUR=9
 SCHEDULE_MINUTE=0
 SCHEDULE_TIMEZONE=Asia/Shanghai
 ```
 
-如需观察最近一个月，将 `SOURCING_LOOKBACK_DAYS` 改为 `30`。跨周不重复由数据库证据签名保证，不依赖时间窗口是否重叠。
+如需观察最近一个月，将 `SOURCING_LOOKBACK_DAYS` 改为 `30`。默认周更实际重叠扫描 14 天，只交付数据库中未处理或发生实质变化的内容；这能修复上周接口失败、Actions 延迟或索引晚到，且不会重复调用 LLM 分析已经处理的材料。
 
 ## 邮件推送
 
@@ -120,13 +128,17 @@ SMTP_USE_STARTTLS=false
 
 ```text
 paradigms/
+  landscape.py       版本化产业/技术覆盖地图与运行审计
   models.py          证据、范式、研究者模型
   discovery.py       论文/研究博客优先发现
   analyzer.py        新机制抽取与人物轨迹分析
   clustering.py      论文级结果聚合为范式
   enrichment.py      引用、实现、讨论、人物增强
-  scoring.py         范式评分与增量优化硬门槛
+  rubric.py          版本化量表校验、确定性计分与客观证据题
+  scoring.py         汇总 Rubric 与发布者/社区结构化证据
 sources/
+  arxiv_source.py
+  arxiv_document_source.py
   openalex_source.py
   openreview_source.py
   semantic_scholar_source.py

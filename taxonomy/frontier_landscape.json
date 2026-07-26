@@ -1,0 +1,98 @@
+{
+  "version": "2026-07-26.2",
+  "description": "AI 技术范式雷达的版本化前沿覆盖地图。它描述需要持续观察的能力层与产业技术栈，不把具体论文或产品名硬编码为长期规则。",
+  "domains": [
+    {
+      "id": "foundation_models",
+      "label": "基础模型与模型架构",
+      "group": "core_models",
+      "arxiv_categories": ["cs.AI", "cs.CL", "cs.LG", "cs.NE"],
+      "query_phrases": ["foundation model", "large language model", "mixture of experts", "state space model", "model architecture", "long context"],
+      "match_terms": ["foundation model", "language model", "mixture of experts", "state space", "architecture", "long context", "attention", "transformer"]
+    },
+    {
+      "id": "reasoning_agents",
+      "label": "推理、强化学习与 Agent",
+      "group": "core_models",
+      "arxiv_categories": ["cs.AI", "cs.CL", "cs.LG"],
+      "query_phrases": ["reasoning model", "test-time compute", "reinforcement learning reasoning", "agentic learning", "tool-using agent", "agent memory", "software engineering agent", "computer use agent", "program synthesis"],
+      "match_terms": ["reasoning", "test-time compute", "reinforcement learning", "agent", "tool use", "planning", "verifier", "memory", "software engineering", "computer use", "program synthesis", "code model"]
+    },
+    {
+      "id": "multimodal_generation",
+      "label": "多模态理解与生成",
+      "group": "core_models",
+      "arxiv_categories": ["cs.AI", "cs.CL", "cs.CV", "cs.LG"],
+      "query_phrases": ["multimodal learning", "vision language model", "vision foundation model", "text to video", "diffusion model", "autoregressive image", "native multimodal", "speech language model", "audio generation", "3D foundation model"],
+      "match_terms": ["multimodal", "vision language", "vision foundation", "text-to-video", "video generation", "diffusion", "image generation", "audio language", "speech language", "audio generation", "speech generation", "3d foundation", "document intelligence"]
+    },
+    {
+      "id": "world_spatial_models",
+      "label": "世界模型、空间智能与可交互生成",
+      "group": "physical_intelligence",
+      "arxiv_categories": ["cs.AI", "cs.CV", "cs.LG", "cs.RO"],
+      "query_phrases": ["world model", "video world model", "spatial intelligence", "interactive world model", "neural simulator", "action-conditioned video", "3D scene model", "4D scene representation"],
+      "match_terms": ["world model", "spatial intelligence", "interactive world", "neural simulator", "action-conditioned", "video prediction", "latent dynamics", "3d scene", "4d scene", "scene dynamics"]
+    },
+    {
+      "id": "embodied_robotics",
+      "label": "具身智能、机器人与 Physical AI",
+      "group": "physical_intelligence",
+      "arxiv_categories": ["cs.AI", "cs.CV", "cs.LG", "cs.RO", "eess.SY"],
+      "query_phrases": ["vision language action", "robot foundation model", "robot learning", "embodied intelligence", "dexterous manipulation", "tactile robotics", "haptic policy", "whole-body control", "humanoid robot", "autonomous driving foundation model", "robot navigation", "drone autonomy"],
+      "match_terms": ["vision-language-action", "vision language action", "robot learning", "embodied", "robotics", "manipulation", "dexterous", "tactile", "haptic", "force feedback", "locomotion", "whole-body", "humanoid", "autonomous driving", "robot navigation", "drone autonomy", "mobile manipulation"]
+    },
+    {
+      "id": "ai4science",
+      "label": "AI4S：生命、化学、材料、物理与地球系统",
+      "group": "science",
+      "arxiv_categories": ["cs.AI", "cs.LG", "q-bio.BM", "q-bio.GN", "q-bio.QM", "physics.chem-ph", "cond-mat.mtrl-sci", "physics.comp-ph"],
+      "query_phrases": ["AI for science", "scientific foundation model", "scientific agent", "protein language model", "molecular generation", "materials discovery", "neural operator", "weather foundation model", "laboratory agent", "genomics foundation model", "automated theorem proving"],
+      "match_terms": ["ai for science", "scientific foundation", "scientific agent", "protein", "molecular", "drug discovery", "materials discovery", "neural operator", "weather model", "climate model", "laboratory", "genome", "physics simulation", "theorem proving", "quantum chemistry"]
+    },
+    {
+      "id": "data_learning",
+      "label": "数据工程与新学习范式",
+      "group": "learning_systems",
+      "arxiv_categories": ["cs.AI", "cs.CL", "cs.CV", "cs.LG", "stat.ML"],
+      "query_phrases": ["self-supervised learning", "continual learning", "test-time learning", "synthetic data", "data curation", "self-improving model", "online adaptation"],
+      "match_terms": ["self-supervised", "continual learning", "test-time learning", "synthetic data", "data curation", "self-improving", "online adaptation", "curriculum", "weak supervision"]
+    },
+    {
+      "id": "ml_systems_hardware",
+      "label": "AI 系统、推理基础设施与软硬件协同",
+      "group": "learning_systems",
+      "arxiv_categories": ["cs.AI", "cs.LG", "cs.DC", "cs.AR", "eess.SP"],
+      "query_phrases": ["machine learning systems", "inference serving", "training system", "memory efficient inference", "sparse inference", "hardware software co-design", "AI accelerator", "on-device AI", "inference compiler", "model quantization"],
+      "match_terms": ["ml systems", "machine learning systems", "serving", "inference system", "training system", "memory efficient", "sparse inference", "co-design", "accelerator", "distributed training", "communication", "on-device", "edge ai", "inference compiler", "quantization"]
+    },
+    {
+      "id": "trust_alignment",
+      "label": "安全、对齐、可解释与可信 AI",
+      "group": "trust",
+      "arxiv_categories": ["cs.AI", "cs.CL", "cs.CR", "cs.LG"],
+      "query_phrases": ["AI alignment", "mechanistic interpretability", "model safety", "scalable oversight", "representation engineering", "privacy preserving learning", "model unlearning", "adversarial robustness"],
+      "match_terms": ["alignment", "interpretability", "model safety", "oversight", "representation engineering", "jailbreak", "privacy preserving", "robustness", "uncertainty", "model unlearning", "watermarking"]
+    },
+    {
+      "id": "evaluation_governance",
+      "label": "评测、可靠性与能力治理",
+      "group": "trust",
+      "arxiv_categories": ["cs.AI", "cs.CL", "cs.LG", "cs.CY"],
+      "query_phrases": ["foundation model evaluation", "agent evaluation", "AI capability evaluation", "model reliability", "AI auditing"],
+      "match_terms": ["evaluation", "benchmark", "capability evaluation", "agent evaluation", "reliability", "auditing", "red teaming", "measurement"]
+    }
+  ],
+  "required_domain_ids": [
+    "foundation_models",
+    "reasoning_agents",
+    "multimodal_generation",
+    "world_spatial_models",
+    "embodied_robotics",
+    "ai4science",
+    "data_learning",
+    "ml_systems_hardware",
+    "trust_alignment",
+    "evaluation_governance"
+  ]
+}

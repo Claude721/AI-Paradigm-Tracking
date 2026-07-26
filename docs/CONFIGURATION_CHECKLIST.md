@@ -100,7 +100,7 @@ RESEARCH_FEED_URLS=https://research.google/blog/rss/,https://bair.berkeley.edu/b
 ```env
 RESEARCH_WATCHLIST_MODE=merge
 PRIORITY_RESEARCH_PAGES=
-PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE=4
+PRIORITY_RESEARCH_LINK_SAFETY_LIMIT=0
 PRIORITY_RESEARCH_CONCURRENCY=6
 ESTABLISHED_RESEARCH_ORGANIZATIONS=
 MONITORED_RESEARCH_ORGANIZATIONS=
@@ -126,17 +126,18 @@ TWITTER_BEARER_TOKEN=你的X-API-Bearer-Token
 
 不配置时自动跳过，不影响论文、GitHub 与 Hacker News。配置后系统会按工作标题搜索最近帖子，并读取公开账号简介与粉丝规模。作者本人发帖只用于身份核验；非作者的高关注账号解读、互动和讨论内容才进入外部势能判断。小红书目前没有稳定的官方公开搜索 API，因此本项目不做不可靠的页面抓取。
 
-推荐先配置 Tavily 免费层，作为 X、Reddit、小红书公开网页的发现兜底：
+推荐先配置 Tavily 免费层，作为 X、Reddit、小红书和独立技术博客的公开网页发现兜底：
 
 ```env
 TAVILY_API_KEY=tvly-你的Key
 TAVILY_SOCIAL_SEARCH_ENABLED=true
 TAVILY_SOCIAL_SEARCH_DOMAINS=x.com,twitter.com,reddit.com,xiaohongshu.com
 TAVILY_SOCIAL_MAX_RESULTS=12
-TAVILY_MAX_REQUESTS_PER_RUN=12
+TAVILY_DISCOVERY_DOMAINS=
+TAVILY_REQUEST_SAFETY_LIMIT=0
 ```
 
-在 Tavily 创建普通账号即可，不要求学术邮箱，也不要求信用卡。免费计划额度以 Tavily 控制台当前显示为准；项目对每个候选采用一次 `basic` 组合搜索，不会分别为三个平台重复消耗。`TAVILY_MAX_REQUESTS_PER_RUN` 是整轮硬预算，候选再多也不会超过它。搜索结果只能说明页面被公开索引，不能证明完整覆盖或用相关度替代点赞、评论等声量指标。
+在 Tavily 创建普通账号即可，不要求学术邮箱，也不要求信用卡。免费计划额度以 Tavily 控制台当前显示为准；项目对每个通过 Rubric 的深挖候选采用一次 `basic` 组合搜索，不会分别为三个平台重复消耗。`TAVILY_DISCOVERY_DOMAINS` 留空时执行全网发现，能找到独立技术博客；需要限制站点时再填域名。`TAVILY_REQUEST_SAFETY_LIMIT=0` 表示动态覆盖全部深挖候选；只有你需要严格保护 credits 时才设置非零熔断值。搜索结果只能说明页面被公开索引，不能证明完整覆盖或用相关度替代点赞、评论等声量指标。
 
 Reddit 若要获得帖子分数、评论量和讨论正文，需要先向 Reddit 申请 Data API 访问。获批后配置：
 
@@ -195,25 +196,30 @@ SMTP_USE_STARTTLS=true
 
 Gmail 需要先启用两步验证，再生成应用密码。
 
-## D. 范式筛选参数
+## D. Rubric 与运行熔断
 
 建议第一次整体运行保持默认值：
 
 ```env
-PARADIGM_MIN_SCORE=65
-PARADIGM_MIN_NOVELTY=6
-PARADIGM_MIN_SCOPE=6
-PARADIGM_MAX_DISCOVERY_ITEMS=100
-PARADIGM_MAX_ANALYSIS_ITEMS=30
-PARADIGM_MAX_DEEP_CANDIDATES=16
-PARADIGM_MAX_REPORT_ITEMS=12
-PARADIGM_MAX_REFRESH_ITEMS=40
+PARADIGM_RUBRIC_PATH=
+FRONTIER_LANDSCAPE_PATH=
+PARADIGM_DISCOVERY_SAFETY_LIMIT=0
+PARADIGM_ANALYSIS_SAFETY_LIMIT=0
+PARADIGM_DEEP_SAFETY_LIMIT=0
+PARADIGM_REPORT_SAFETY_LIMIT=0
+PARADIGM_REFRESH_SAFETY_LIMIT=0
 PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS=2
 PARADIGM_MIN_SECONDARY_ENGAGEMENT=50
 PARADIGM_ALLOW_UPDATES=true
+PARADIGM_RECALL_OVERLAP_DAYS=14
+PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
+PARADIGM_SEED_ARXIV_IDS=
+PARADIGM_RESEARCHER_PROFILE_LIMIT=6
 ```
 
-这里的分数只做内部排序。真正的准入顺序是：技术硬门槛 → 发布者/团队核验 → 独立讨论或承接。`PARADIGM_MAX_ANALYSIS_ITEMS` 限制本轮机制抽取数量，`PARADIGM_MAX_DEEP_CANDIDATES` 限制调用外部证据与主模型深挖的路线数量；被预算延后的材料仍会保留到下轮。`PARADIGM_MAX_REFRESH_ITEMS` 控制每周重新检索新讨论的观察池规模；后两项只约束发布者背景尚不明确的候选，不会把作者本人的宣传帖计入独立讨论。
+技术去留由仓库中的 `rubrics/paradigm_rubric.json` 决定；行业覆盖由 `taxonomy/frontier_landscape.json` 决定。前者维护判断问题，后者维护基础模型、推理与软件 Agent、多模态/语音/3D、具身/自动驾驶、World Model、AI4S、系统/端侧/硬件、安全等发现范围。通常两个路径都留空，直接维护仓库内版本并提交。覆盖地图的 `version` 改变后，云端会重新扫描 60 天，避免新增领域继续继承旧召回盲区。
+
+五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版 `PARADIGM_MIN_*` 与 `PARADIGM_MAX_*` 已停用，GitHub 中即使残留也不会影响新逻辑。
 
 第一次运行前必须先做专用 smoke test。它每个接口只取极少结果、模型只要求回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。
 
@@ -221,6 +227,7 @@ PARADIGM_ALLOW_UPDATES=true
 
 ```env
 SOURCING_LOOKBACK_DAYS=7
+PARADIGM_RECALL_OVERLAP_DAYS=14
 SCHEDULE_DAY_OF_WEEK=fri
 SCHEDULE_HOUR=9
 SCHEDULE_MINUTE=0
@@ -228,6 +235,9 @@ SCHEDULE_TIMEZONE=Asia/Shanghai
 ```
 
 - [ ] 周报使用 7 天窗口；月度专题才改成 30 天
+- [ ] `PARADIGM_RECALL_OVERLAP_DAYS=14`：扫描窗口重叠一周，由数据库去重并修复单周漏抓
+- [ ] `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60`：数据库为空或覆盖地图升级时自动建立近期基线
+- [ ] 常规运行保持 `PARADIGM_SEED_ARXIV_IDS` 为空；只在精确回补/审计漏项时临时填写
 - [ ] Codex 自动任务“AI 技术范式雷达周报”保持启用
 - [ ] 不要同时长期运行 `python main.py --schedule`，避免形成两套调度
 

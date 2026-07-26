@@ -9,20 +9,16 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 import config
+from paradigms.landscape import (
+    classify_frontier_domains,
+    openalex_search_plan,
+)
 from paradigms.models import EvidenceType, TechnicalEvidence
 
 logger = logging.getLogger(__name__)
 
 OPENALEX_WORKS_API = "https://api.openalex.org/works"
-DEFAULT_SEARCHES = [
-    '"world model" AND (video OR robotics OR embodied)',
-    '(reasoning OR inference-time) AND ("reinforcement learning" OR verifier)',
-    '"vision language action" OR "vision-language-action"',
-    '(agent OR agentic) AND (memory OR planning OR "tool use")',
-    '"self-supervised" AND (video OR multimodal)',
-    '("state space model" OR "test-time learning") AND (neural OR model)',
-    '("synthetic data" OR "data curation") AND ("foundation model" OR LLM)',
-]
+DEFAULT_SEARCHES = openalex_search_plan()
 
 
 class OpenAlexSource:
@@ -52,20 +48,54 @@ class OpenAlexSource:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
         date_filter = f"from_publication_date:{cutoff.date().isoformat()}"
         headers = {"User-Agent": "AI-Paradigm-Radar/3.2"}
-        async with httpx.AsyncClient(timeout=30, headers=headers) as client:
-            tasks = [
-                client.get(
+
+        async def search_one(client: httpx.AsyncClient, query: str) -> list[dict]:
+            cursor = "*"
+            works: list[dict] = []
+            consecutive_irrelevant_pages = 0
+            while cursor:
+                response = await client.get(
                     OPENALEX_WORKS_API,
                     params={
                         "api_key": config.OPENALEX_API_KEY,
                         "search": query,
                         "filter": date_filter,
-                        # 时间窗已经由 filter 限定，先按检索相关性排序，避免
-                        # “最新但无关”的跨学科论文挤掉真正的技术候选。
+                        # 时间窗已经由 filter 限定，先按检索相关性排序。
                         "sort": "relevance_score:desc,publication_date:desc",
+                        # per_query 是传输页大小，不是每周候选上限。
                         "per-page": self.per_query,
+                        "cursor": cursor,
                     },
                 )
+                response.raise_for_status()
+                payload = response.json()
+                page = payload.get("results", [])
+                relevant_page = [
+                    work for work in page if _work_frontier_domains(work)
+                ]
+                works.extend(relevant_page)
+                consecutive_irrelevant_pages = (
+                    0
+                    if relevant_page
+                    else consecutive_irrelevant_pages + 1
+                )
+                next_cursor = str((payload.get("meta") or {}).get("next_cursor") or "")
+                # OpenAlex search 可能把弱相关结果分页到很深。这里不是固定 Top-K：
+                # 只有在按相关性排序后连续两页都没有命中版本化覆盖地图时才
+                # 认为该查询的有效证据已耗尽，避免 60 天冷启动无界下载。
+                if (
+                    not page
+                    or not next_cursor
+                    or next_cursor == cursor
+                    or consecutive_irrelevant_pages >= 2
+                ):
+                    break
+                cursor = next_cursor
+            return works
+
+        async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+            tasks = [
+                search_one(client, query)
                 for query in self.searches
             ]
             responses = await asyncio.gather(*tasks, return_exceptions=True)
@@ -77,15 +107,7 @@ class OpenAlexSource:
                 failed += 1
                 logger.warning("OpenAlex 单个查询失败 [%s]: %s", query, response)
                 continue
-            if response.status_code >= 400:
-                failed += 1
-                logger.warning(
-                    "OpenAlex 单个查询返回 HTTP %s [%s]",
-                    response.status_code,
-                    query,
-                )
-                continue
-            evidence.extend(self._parse(response.json().get("results", [])))
+            evidence.extend(self._parse(response))
         if failed == len(self.searches):
             raise RuntimeError("OpenAlex 所有查询均失败")
         return _dedupe(evidence)
@@ -107,7 +129,28 @@ class OpenAlexSource:
                 for item in authorships
                 if item.get("author", {}).get("id")
             ]
+            author_openalex_map = {
+                str(item.get("author", {}).get("display_name", "")): str(
+                    item.get("author", {}).get("id", "")
+                )
+                for item in authorships
+                if item.get("author", {}).get("display_name")
+                and item.get("author", {}).get("id")
+            }
+            author_affiliations = {
+                str(item.get("author", {}).get("display_name", "")): [
+                    str(institution.get("display_name", ""))
+                    for institution in (item.get("institutions") or [])
+                    if institution.get("display_name")
+                ]
+                for item in authorships
+                if item.get("author", {}).get("display_name")
+            }
             topic = work.get("primary_topic") or {}
+            abstract = _restore_abstract(work.get("abstract_inverted_index"))
+            frontier_domains = _work_frontier_domains(work)
+            if not frontier_domains:
+                continue
             identifiers = {
                 "openalex": work.get("id", ""),
                 "doi": (work.get("doi") or "").removeprefix("https://doi.org/"),
@@ -121,7 +164,7 @@ class OpenAlexSource:
                     url=(work.get("primary_location") or {}).get("landing_page_url")
                     or work.get("doi")
                     or work.get("id", ""),
-                    summary=_restore_abstract(work.get("abstract_inverted_index")),
+                    summary=abstract,
                     published_at=work.get("publication_date", ""),
                     authors=authors,
                     organization=_first_institution(authorships),
@@ -131,7 +174,12 @@ class OpenAlexSource:
                     },
                     identifiers=identifiers,
                     keywords=[topic.get("display_name", "")] if topic.get("display_name") else [],
-                    raw={"author_openalex_ids": author_ids},
+                    raw={
+                        "author_openalex_ids": author_ids,
+                        "author_openalex_map": author_openalex_map,
+                        "author_affiliations": author_affiliations,
+                        "frontier_domains": frontier_domains,
+                    },
                 )
             )
         return results
@@ -142,6 +190,20 @@ def _restore_abstract(index: dict | None) -> str:
         return ""
     positions = [(position, word) for word, values in index.items() for position in values]
     return " ".join(word for _, word in sorted(positions))
+
+
+def _work_frontier_domains(work: dict) -> list[str]:
+    topic = work.get("primary_topic") or {}
+    return classify_frontier_domains(
+        str(work.get("display_name", "")),
+        _restore_abstract(work.get("abstract_inverted_index")),
+        str(topic.get("display_name", "")),
+        " ".join(
+            str(value.get("display_name", ""))
+            for value in (work.get("topics") or [])
+            if isinstance(value, dict)
+        ),
+    )
 
 
 def _first_institution(authorships: list[dict]) -> str:

@@ -12,6 +12,12 @@ from skills.loader import SkillLoader
 
 from .models import ParadigmExtraction, TechnicalEvidence
 from .models import ParadigmCandidate, ResearcherProfile
+from .rubric import (
+    evaluate_rubric,
+    legacy_dimension_scores,
+    normalize_innovation_types,
+    rubric_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +45,17 @@ class ParadigmAnalyzer:
         return [extraction for batch in batches for extraction in batch]
 
     async def extract(self, evidence: TechnicalEvidence) -> list[ParadigmExtraction]:
+        screening_material = evidence.summary
+        document_excerpt = str(evidence.raw.get("document_excerpt", ""))
+        if document_excerpt:
+            screening_material = (
+                f"{screening_material}\n\n[官方 HTML 正文节选]\n{document_excerpt}"
+            )
         prompt = self.skill_loader.render(
             "paradigm_extraction",
             source=evidence.source,
             title=evidence.title,
-            abstract=evidence.summary[
+            abstract=screening_material[
                 : (
                     50_000
                     if evidence.raw.get("origin_kind") == "technical_report"
@@ -54,53 +66,88 @@ class ParadigmAnalyzer:
             organization=evidence.organization,
             identifiers=evidence.identifiers,
             origin_kind=evidence.raw.get("origin_kind", "research_paper"),
+            frontier_domains=evidence.raw.get("frontier_domains", []),
             publisher_context={
                 "organization": evidence.organization,
                 "publisher_tier": evidence.raw.get("publisher_tier", "unknown"),
                 "publisher_evidence": evidence.raw.get("publisher_evidence", ""),
             },
+            rubric_definition=rubric_prompt("screening"),
         )
-        response = None
-        try:
-            client, model = self._get_client()
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=(
-                    6200
-                    if evidence.raw.get("origin_kind") == "technical_report"
-                    else 3000
-                ),
-                response_format={"type": "json_object"},
+        last_error: Exception | None = None
+        for attempt in range(2):
+            response = None
+            try:
+                client, model = self._get_client()
+                repair_note = (
+                    ""
+                    if attempt == 0
+                    else "\n上一轮 JSON 或 Rubric 回答不完整。请重新输出完整 JSON，"
+                    "确保 common 与所选 innovation_types 的每一道题都出现一次。"
+                )
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt + repair_note}],
+                    temperature=0.1,
+                    max_tokens=(
+                        9000
+                        if evidence.raw.get("origin_kind") == "technical_report"
+                        else 5000
+                    ),
+                    response_format={"type": "json_object"},
+                )
+                payload = parse_json_object(
+                    response.choices[0].message.content or "{}"
+                )
+                hypotheses = payload.get("hypotheses")
+                payloads = hypotheses if isinstance(hypotheses, list) else [payload]
+                parsed = [
+                    self._from_payload(evidence, item)
+                    for item in payloads[:6]
+                    if isinstance(item, dict)
+                ]
+                if not parsed:
+                    raise ValueError("结果为空")
+                incomplete = [
+                    item
+                    for item in parsed
+                    if item.rubric_assessment.get("decision") == "incomplete"
+                ]
+                if incomplete:
+                    raise ValueError(
+                        incomplete[0].rubric_assessment.get(
+                            "decision_reason", "Rubric 回答不完整"
+                        )
+                    )
+                run_audit.record_llm(
+                    stage="paradigm_extraction",
+                    role="sub",
+                    model=model,
+                    subject=evidence.title,
+                    response=response,
+                )
+                return parsed
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "范式抽取第 %s 次失败 [%s]: %s",
+                    attempt + 1,
+                    evidence.title[:60],
+                    exc,
+                )
+                run_audit.record_llm(
+                    stage="paradigm_extraction",
+                    role="sub",
+                    model=self.model,
+                    subject=f"{evidence.title} / attempt-{attempt + 1}",
+                    response=response,
+                    error=exc,
+                )
+        return [
+            self._failed_extraction(
+                evidence, f"抽取失败: {last_error or '未知错误'}"
             )
-            payload = parse_json_object(response.choices[0].message.content or "{}")
-            hypotheses = payload.get("hypotheses")
-            payloads = hypotheses if isinstance(hypotheses, list) else [payload]
-            parsed = [
-                self._from_payload(evidence, item)
-                for item in payloads[:6]
-                if isinstance(item, dict)
-            ]
-            run_audit.record_llm(
-                stage="paradigm_extraction",
-                role="sub",
-                model=model,
-                subject=evidence.title,
-                response=response,
-            )
-            return parsed or [self._failed_extraction(evidence, "抽取失败: 结果为空")]
-        except Exception as exc:
-            logger.warning("范式抽取失败 [%s]: %s", evidence.title[:60], exc)
-            run_audit.record_llm(
-                stage="paradigm_extraction",
-                role="sub",
-                model=self.model,
-                subject=evidence.title,
-                response=response,
-                error=exc,
-            )
-            return [self._failed_extraction(evidence, f"抽取失败: {exc}")]
+        ]
 
     @staticmethod
     def _failed_extraction(
@@ -120,14 +167,17 @@ class ParadigmAnalyzer:
     def _from_payload(
         evidence: TechnicalEvidence, payload: dict
     ) -> ParadigmExtraction:
-        def number(name: str) -> float:
-            try:
-                return min(max(float(payload.get(name, 0)), 0.0), 10.0)
-            except (TypeError, ValueError):
-                return 0.0
-
-        candidate_value = payload.get("is_candidate", False)
-        is_candidate = candidate_value is True or str(candidate_value).lower() == "true"
+        raw_types = payload.get("innovation_types")
+        if not isinstance(raw_types, list):
+            raw_types = [payload.get("novelty_type", "other")]
+        innovation_types = normalize_innovation_types(raw_types)
+        assessment = evaluate_rubric(
+            stage="screening",
+            innovation_types=innovation_types,
+            answers=payload.get("rubric_answers"),
+        )
+        scores = legacy_dimension_scores(assessment)
+        is_candidate = assessment["decision"] == "deep_dive"
         return ParadigmExtraction(
             evidence=evidence,
             is_candidate=is_candidate,
@@ -143,15 +193,19 @@ class ParadigmAnalyzer:
             ).strip(),
             application_value=str(payload.get("application_value", "")).strip(),
             why_now=str(payload.get("why_now", "")).strip(),
-            novelty_type=str(payload.get("novelty_type", "")).strip(),
+            novelty_type=innovation_types[0],
+            innovation_types=innovation_types,
             lineage_parent=str(payload.get("lineage_parent", "")).strip(),
             keywords=_string_list(payload.get("keywords")),
             claimed_results=_string_list(payload.get("claimed_results")),
-            novelty_score=number("novelty_score"),
-            solidity_score=number("solidity_score"),
-            scope_score=number("scope_score"),
-            incremental_penalty=number("incremental_penalty"),
-            rejection_reason=str(payload.get("rejection_reason", "")).strip(),
+            rubric_assessment=assessment,
+            novelty_score=scores["novelty_score"],
+            solidity_score=scores["solidity_score"],
+            scope_score=scores["scope_score"],
+            incremental_penalty=scores["incremental_penalty"],
+            rejection_reason=(
+                "" if is_candidate else assessment["decision_reason"]
+            ),
         )
 
 
@@ -314,6 +368,15 @@ class ParadigmSynthesizer:
                         else 700
                     )
                 ],
+                "document_excerpt": str(
+                    item.raw.get("document_excerpt", "")
+                )[:12_000],
+                "document_source_url": item.raw.get(
+                    "document_source_url", ""
+                ),
+                "affiliations": item.raw.get("affiliations", []),
+                "project_urls": item.raw.get("project_urls", []),
+                "author_roles": item.raw.get("author_roles", {}),
                 "authors": item.authors,
                 "metrics": item.metrics,
                 "historical": bool(item.raw.get("historical")),
@@ -332,91 +395,203 @@ class ParadigmSynthesizer:
             mechanism=candidate.mechanism,
             technical_explanation=candidate.technical_explanation,
             mental_model=json.dumps(candidate.mental_model, ensure_ascii=False),
+            innovation_types=json.dumps(
+                candidate.innovation_types or [candidate.novelty_type or "other"],
+                ensure_ascii=False,
+            ),
+            screening_rubric=json.dumps(
+                candidate.screening_rubric, ensure_ascii=False
+            ),
+            rubric_definition=rubric_prompt("final"),
+            mental_model_method=self.skill_loader.load("technical-mental-model"),
             lineage_parent=candidate.lineage_parent,
             evidence=json.dumps(evidence_payload, ensure_ascii=False),
         )
-        response = None
-        try:
-            client, model = self._get_client()
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=3800,
-                response_format={"type": "json_object"},
-            )
-            payload = parse_json_object(response.choices[0].message.content or "{}")
-            for field_name in (
-                "name",
-                "route_family",
-                "thesis",
-                "background",
-                "problem_shift",
-                "design_philosophy",
-                "mechanism",
-                "technical_explanation",
-                "application_value",
-                "why_now",
-                "evidence_assessment",
-                "secondary_discussion_summary",
-                "trend_interpretation",
-                "marketing_overclaim_risk",
-            ):
-                value = str(payload.get(field_name, "")).strip()
-                if value:
-                    setattr(candidate, field_name, value)
-            questions = _string_list(payload.get("open_questions"))
-            if questions:
-                candidate.open_questions = questions
-            lineage = _string_list(payload.get("lineage_path"))
-            if lineage:
-                candidate.lineage_path = lineage
-            momentum = _string_list(payload.get("objective_momentum_signals"))
-            if momentum:
-                candidate.objective_momentum_signals = momentum
-            mental_model = payload.get("mental_model")
-            if isinstance(mental_model, dict):
-                candidate.mental_model = {
-                    str(key): value
-                    for key, value in mental_model.items()
-                    if value not in ("", [], {}, None)
-                }
-            for payload_name, attribute in (
-                ("scope_reassessment", "scope_score"),
-                ("solidity_reassessment", "solidity_score"),
-            ):
-                try:
-                    reassessed = min(
-                        max(float(payload.get(payload_name)), 0.0), 10.0
-                    )
-                except (TypeError, ValueError):
-                    continue
-                setattr(candidate, attribute, min(getattr(candidate, attribute), reassessed))
-            excluded = {
-                int(value)
-                for value in payload.get("excluded_evidence_indices", [])
-                if str(value).isdigit()
+        last_error: Exception | None = None
+        for attempt in range(2):
+            response = None
+            try:
+                client, model = self._get_client()
+                repair_note = (
+                    ""
+                    if attempt == 0
+                    else "\n上一轮综合结果不完整。请重新输出完整 JSON，补齐所选"
+                    " innovation_types 的全部 Rubric 题；心智模型必须先给主观察"
+                    "坐标与低分辨率运行图，再用至少两个 resolution_ladder 节点"
+                    "逐层纠偏和提高分辨率。"
+                )
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt + repair_note}],
+                    temperature=0.1,
+                    max_tokens=5600,
+                    response_format={"type": "json_object"},
+                )
+                payload = parse_json_object(
+                    response.choices[0].message.content or "{}"
+                )
+                self._apply_synthesis_payload(candidate, payload)
+                run_audit.record_llm(
+                    stage="paradigm_synthesis",
+                    role="main",
+                    model=model,
+                    subject=candidate.name,
+                    response=response,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "范式综合第 %s 次失败 [%s]: %s",
+                    attempt + 1,
+                    candidate.name,
+                    exc,
+                )
+                run_audit.record_llm(
+                    stage="paradigm_synthesis",
+                    role="main",
+                    model=self.model,
+                    subject=f"{candidate.name} / attempt-{attempt + 1}",
+                    response=response,
+                    error=exc,
+                )
+        failure = evaluate_rubric(
+            stage="final",
+            innovation_types=candidate.innovation_types
+            or [candidate.novelty_type or "other"],
+            answers=[],
+        )
+        failure["failure_reason"] = f"范式综合失败: {last_error or '未知错误'}"
+        failure["decision_reason"] = failure["failure_reason"]
+        candidate.rubric_assessment = failure
+
+    @staticmethod
+    def _apply_synthesis_payload(
+        candidate: ParadigmCandidate, payload: dict[str, object]
+    ) -> None:
+        for field_name in (
+            "name",
+            "route_family",
+            "thesis",
+            "background",
+            "problem_shift",
+            "design_philosophy",
+            "mechanism",
+            "technical_explanation",
+            "application_value",
+            "why_now",
+            "evidence_assessment",
+            "secondary_discussion_summary",
+            "trend_interpretation",
+            "marketing_overclaim_risk",
+        ):
+            value = str(payload.get(field_name, "")).strip()
+            if value:
+                setattr(candidate, field_name, value)
+        questions = _string_list(payload.get("open_questions"))
+        if questions:
+            candidate.open_questions = questions
+        lineage = _string_list(payload.get("lineage_path"))
+        if lineage:
+            candidate.lineage_path = lineage
+        momentum = _string_list(payload.get("objective_momentum_signals"))
+        if momentum:
+            candidate.objective_momentum_signals = momentum
+        mental_model = payload.get("mental_model")
+        if isinstance(mental_model, dict):
+            candidate.mental_model = {
+                str(key): value
+                for key, value in mental_model.items()
+                if value not in ("", [], {}, None)
             }
-            if excluded:
-                candidate.evidence = [
-                    item
-                    for index, item in enumerate(candidate.evidence)
-                    if index not in excluded
-                ]
-            run_audit.record_llm(
-                stage="paradigm_synthesis",
-                role="main",
-                model=model,
-                subject=candidate.name,
-                response=response,
+        _validate_mental_model(candidate.mental_model)
+
+        raw_types = payload.get("innovation_types")
+        if not isinstance(raw_types, list):
+            raw_types = candidate.innovation_types or [
+                candidate.novelty_type or "other"
+            ]
+        assessment = evaluate_rubric(
+            stage="final",
+            innovation_types=raw_types,
+            answers=payload.get("rubric_answers"),
+        )
+        candidate.innovation_types = assessment["innovation_types"]
+        candidate.novelty_type = candidate.innovation_types[0]
+        candidate.rubric_assessment = assessment
+        if assessment["decision"] == "incomplete":
+            raise ValueError(assessment["decision_reason"])
+
+        excluded = {
+            int(value)
+            for value in payload.get("excluded_evidence_indices", [])
+            if str(value).isdigit()
+        }
+        if excluded:
+            candidate.evidence = [
+                item
+                for index, item in enumerate(candidate.evidence)
+                if index not in excluded
+            ]
+
+
+def _validate_mental_model(mental_model: dict[str, object]) -> None:
+    """拒绝模块清单式降级稿，要求同一运行图上的递进式理解。"""
+    required_text = (
+        "observation_axis",
+        "low_resolution_model",
+        "decisive_intervention",
+        "minimal_simulation",
+        "counterfactual_and_boundary",
+    )
+    missing = [
+        name
+        for name in required_text
+        if not str(mental_model.get(name, "")).strip()
+    ]
+    if missing:
+        raise ValueError(
+            "技术心智模型缺少关键部件: "
+            + "、".join(missing)
+            + "；应重试而不是生成模块清单式降级档案"
+        )
+
+    ladder = mental_model.get("resolution_ladder")
+    if not isinstance(ladder, list) or not 2 <= len(ladder) <= 6:
+        raise ValueError(
+            "resolution_ladder 必须包含 2 到 6 个真正改变整体理解的下钻节点"
+        )
+    allowed_status = {
+        "source_fact",
+        "interpretive_compression",
+        "inference",
+        "unknown",
+    }
+    for index, node in enumerate(ladder, start=1):
+        if not isinstance(node, dict):
+            raise ValueError(f"resolution_ladder 第 {index} 项不是结构化节点")
+        missing_fields = [
+            field
+            for field in ("question", "answer", "evidence_status", "model_update")
+            if not str(node.get(field, "")).strip()
+        ]
+        if missing_fields:
+            raise ValueError(
+                f"resolution_ladder 第 {index} 项缺少: "
+                + "、".join(missing_fields)
             )
-        except Exception as exc:
-            logger.warning("范式综合失败 [%s]: %s", candidate.name, exc)
-            run_audit.record_llm(
-                stage="paradigm_synthesis",
-                role="main",
-                model=self.model,
-                subject=candidate.name,
-                response=response,
-                error=exc,
+        if str(node["evidence_status"]).strip() not in allowed_status:
+            raise ValueError(
+                f"resolution_ladder 第 {index} 项 evidence_status 无效"
             )
+
+    training = mental_model.get("training_causal_chain")
+    runtime = mental_model.get("runtime_causal_chain")
+    has_training = isinstance(training, list) and any(
+        str(item).strip() for item in training
+    )
+    has_runtime = isinstance(runtime, list) and any(
+        str(item).strip() for item in runtime
+    )
+    if not has_training and not has_runtime:
+        raise ValueError("技术心智模型没有闭合训练或运行侧的任何一条因果链")

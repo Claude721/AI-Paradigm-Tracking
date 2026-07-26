@@ -154,7 +154,9 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- 延后到下轮：{stats.get('analysis_deferred_count', 0)}",
         f"- 恢复待深挖路线：{stats.get('pending_deep_backlog_loaded', 0)}",
         f"- 深挖候选：{stats.get('deep_candidate_count', 0)}",
+        f"- 深挖 safety limit 延后：{stats.get('candidate_deferred_count', 0)}",
         f"- 最终可报告：{stats.get('high_value_count', 0)}",
+        f"- 报告 safety limit 延后：{stats.get('report_safety_deferred_count', 0)}",
         "",
         "## 信源返回量",
         "",
@@ -163,6 +165,29 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         lines.extend(f"- {name}：{count}" for name, count in source_counts.items())
     else:
         lines.append("- 本轮未写入结构化信源计数。")
+    coverage = stats.get("frontier_coverage") or {}
+    domains = coverage.get("domains") or {}
+    lines.extend(["", "## 前沿领域覆盖审计", ""])
+    if domains:
+        lines.append(
+            f"- 覆盖地图：{coverage.get('landscape_version', 'unknown')}；"
+            f"本轮命中 {coverage.get('covered_domains', 0)}/"
+            f"{coverage.get('total_domains', len(domains))} 个领域"
+        )
+        labels = {
+            "covered": "已查询并命中",
+            "searched_zero_hits": "已查询但零命中",
+            "query_failed": "查询失败",
+            "not_executed": "未执行",
+        }
+        for value in domains.values():
+            lines.append(
+                f"- {value.get('label')}："
+                f"{labels.get(value.get('status'), value.get('status'))}；"
+                f"{value.get('hits', 0)} 条"
+            )
+    else:
+        lines.append("- 本轮未写入结构化领域覆盖；不能把零候选解释为零创新。")
     lines.extend(
         [
             "",
@@ -181,9 +206,20 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     if payload["origin_decisions"]:
         for item in payload["origin_decisions"]:
             verdict = "进入候选" if item.get("initial_gate_passed") else "未进入候选"
-            reason = item.get("gate_reason") or item.get("rejection_reason") or "通过"
+            reason = (
+                item.get("gate_reason")
+                or item.get("rubric_decision_reason")
+                or item.get("rejection_reason")
+                or "通过"
+            )
+            if item.get("priority_review"):
+                reason = (
+                    "高势能原点进入二次技术复核；初筛 Rubric 仅达到观察区间，"
+                    "不代表自动进入报告"
+                )
+            rubric = _rubric_summary(item)
             lines.append(
-                f"- **{item.get('title', '未命名材料')}**：{verdict}；{reason}"
+                f"- **{item.get('title', '未命名材料')}**：{verdict}；{reason}{rubric}"
             )
     else:
         lines.append("- 没有完成机制抽取。")
@@ -191,7 +227,12 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     if payload["candidate_decisions"]:
         for item in payload["candidate_decisions"]:
             verdict = "进入报告" if item.get("reportable") else "留在观察池"
-            reason = item.get("admission_reason") or item.get("rejection_reason") or ""
+            admission = item.get("admission_reason") or "无单独发布者准入说明"
+            final_reason = (
+                item.get("rejection_reason")
+                or item.get("rubric_decision_reason")
+                or "Rubric 判定进入报告"
+            )
             components = item.get("mental_model_components") or []
             scaffold = (
                 f"；心智模型脚手架已形成 {len(components)} 个有效部件"
@@ -200,7 +241,8 @@ def _render_markdown(payload: dict[str, Any]) -> str:
             )
             lines.append(
                 f"- **{item.get('name', '未命名路线')}**："
-                f"{verdict}；{reason}{scaffold}"
+                f"{verdict}；发布者/社区依据：{admission}；"
+                f"最终依据：{final_reason}{_rubric_summary(item)}{scaffold}"
             )
     else:
         lines.append("- 没有形成范式级候选。")
@@ -233,6 +275,37 @@ def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             safe[key] = _clean(str(value), 500)
     return safe
+
+
+def _rubric_summary(item: dict[str, Any]) -> str:
+    version = item.get("rubric_version")
+    decision = item.get("rubric_decision")
+    score = item.get("rubric_score")
+    dimensions = item.get("rubric_dimension_scores") or {}
+    if not version and not decision:
+        return ""
+    summary = (
+        f"；Rubric {version or '未标版本'}：{score} 分，"
+        f"决策 `{decision or 'unknown'}`"
+    )
+    if dimensions:
+        summary += "；维度：" + "、".join(
+            f"{name}={value}" for name, value in dimensions.items()
+        )
+    weak = [
+        answer
+        for answer in item.get("rubric_answers") or []
+        if isinstance(answer, dict)
+        and answer.get("source", "model") == "model"
+        and float(answer.get("value", 0) or 0) <= 0.2
+    ]
+    weak.sort(key=lambda answer: -float(answer.get("weight", 0) or 0))
+    if weak:
+        summary += "；主要未闭合：" + "、".join(
+            str(answer.get("question", answer.get("criterion_id", "")))
+            for answer in weak[:2]
+        )
+    return summary
 
 
 def _integer(value: Any) -> int:

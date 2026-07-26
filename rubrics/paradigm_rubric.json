@@ -1,0 +1,748 @@
+{
+  "version": "2026-07-26.2",
+  "description": "技术范式雷达的可维护决策量表。模型只选择离散答案并提供证据，所有分数与去留均由程序按本文件确定性计算。",
+  "decisions": {
+    "deep_dive": {
+      "min_score": 52.0,
+      "minimum_answer_coverage": 0.85
+    },
+    "report": {
+      "min_score": 70.0,
+      "minimum_answer_coverage": 0.85
+    },
+    "observe": {
+      "min_score": 35.0
+    }
+  },
+  "common_criteria": [
+    {
+      "id": "problem_is_material",
+      "dimension": "problem_definition",
+      "stages": ["screening", "final"],
+      "weight": 1.0,
+      "question": "这项工作实际处理的瓶颈是否会限制一类模型、任务或系统，而不只是单一 benchmark 的局部误差？",
+      "options": {
+        "yes": 1.0,
+        "partial": 0.5,
+        "no": 0.0,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "mechanism_is_specific",
+      "dimension": "mechanism",
+      "stages": ["screening", "final"],
+      "weight": 1.5,
+      "question": "材料是否给出了可以复述和复核的技术 intervention，而不只是新名称、能力声明或结果数字？",
+      "options": {
+        "yes": 1.0,
+        "partial": 0.5,
+        "no": 0.0,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "causal_chain_supported",
+      "dimension": "mechanism",
+      "stages": ["screening", "final"],
+      "weight": 1.5,
+      "question": "材料能否把设计变化、学习或运行过程与新增能力连成一条有证据的因果链？",
+      "options": {
+        "yes": 1.0,
+        "partial": 0.5,
+        "no": 0.0,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "capability_boundary_shift",
+      "dimension": "novelty",
+      "stages": ["screening", "final"],
+      "weight": 2.0,
+      "question": "它是否改变了此前可实现能力的边界、学习信号、信息表示、缩放轴或部署前提？",
+      "options": {
+        "clear_shift": 1.0,
+        "plausible_shift": 0.65,
+        "local_improvement": 0.2,
+        "none": 0.0,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "intervention_scale",
+      "dimension": "novelty",
+      "stages": ["screening", "final"],
+      "weight": 1.5,
+      "question": "去掉作者的宏大叙事后，实际 intervention 的尺度属于哪一层？",
+      "options": {
+        "problem_redefinition": 1.0,
+        "reusable_mechanism": 0.75,
+        "pipeline_component": 0.35,
+        "parameter_or_benchmark_tweak": 0.0,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "cross_context_transfer",
+      "dimension": "scope",
+      "stages": ["screening", "final"],
+      "weight": 1.5,
+      "question": "该机制是否有证据或明确因果理由可迁移到多个任务、模型尺度、数据域或硬件环境？",
+      "options": {
+        "demonstrated": 1.0,
+        "mechanistically_plausible": 0.65,
+        "single_context_only": 0.15,
+        "no": 0.0,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "downstream_dependency",
+      "dimension": "scope",
+      "stages": ["screening", "final"],
+      "weight": 1.0,
+      "question": "如果该机制成立，是否会让后续研究或产品改变设计选择，而非只获得一次性指标提升？",
+      "options": {
+        "yes": 1.0,
+        "partial": 0.5,
+        "no": 0.0,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "controlled_validation",
+      "dimension": "solidity",
+      "stages": ["screening", "final"],
+      "weight": 1.5,
+      "question": "材料是否用对照、消融、跨任务、真实系统或其他控制实验隔离了关键设计的作用？",
+      "options": {
+        "multiple_controls": 1.0,
+        "one_relevant_control": 0.65,
+        "result_only": 0.2,
+        "none": 0.0,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "claim_falsifiability",
+      "dimension": "solidity",
+      "stages": ["screening", "final"],
+      "weight": 0.75,
+      "question": "是否能明确说出什么后续实验结果会证伪或显著削弱这项技术主张？",
+      "options": {
+        "yes": 1.0,
+        "partial": 0.5,
+        "no": 0.0,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "why_now_is_real",
+      "dimension": "timing",
+      "stages": ["screening", "final"],
+      "weight": 0.5,
+      "question": "是否存在可核验的新数据、算力、模型能力、硬件或生态条件，使这条路线现在才变得可行？",
+      "options": {
+        "yes": 1.0,
+        "partial": 0.5,
+        "no": 0.0,
+        "unknown": 0.0
+      }
+    }
+  ],
+  "type_criteria": {
+    "architecture": [
+      {
+        "id": "architecture_computation_change",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "架构变化是否改变了信息流、状态表示、计算原语或模块间接口，而非只增减层数或参数？",
+        "options": {
+          "new_primitive_or_flow": 1.0,
+          "meaningful_recomposition": 0.65,
+          "local_module": 0.25,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "architecture_capability_dependency",
+        "dimension": "mechanism",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "新增能力是否确实依赖该架构设计，而不是主要来自更大模型、更多数据或更长训练？",
+        "options": {
+          "demonstrated": 1.0,
+          "partially_isolated": 0.55,
+          "confounded": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "architecture_scaling_path",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "该结构是否展示或说明了随模型、上下文、模态或环境规模扩展的合理路径？",
+        "options": {
+          "demonstrated": 1.0,
+          "plausible": 0.6,
+          "unclear": 0.2,
+          "blocked": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "algorithm": [
+      {
+        "id": "algorithm_objective_alignment",
+        "dimension": "mechanism",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "算法目标是否直接对应真实瓶颈，而不是用方便优化的代理指标替代原问题？",
+        "options": {
+          "direct": 1.0,
+          "reasonable_proxy": 0.6,
+          "weak_proxy": 0.2,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "algorithm_credit_assignment",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "它是否实质改变了搜索、优化、信用分配、状态更新或决策方式？",
+        "options": {
+          "fundamental_change": 1.0,
+          "substantial_change": 0.65,
+          "local_heuristic": 0.2,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "algorithm_failure_behavior",
+        "dimension": "solidity",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "材料是否验证算法在噪声、分布变化、长时程或规模扩大时的失效方式？",
+        "options": {
+          "multiple_boundaries": 1.0,
+          "one_boundary": 0.55,
+          "not_tested": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "learning_paradigm": [
+      {
+        "id": "learning_signal_change",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "它是否改变了监督、奖励、反馈、数据生成或参数更新的来源与组织方式？",
+        "options": {
+          "new_signal_or_loop": 1.0,
+          "substantial_reorganization": 0.65,
+          "loss_variant": 0.2,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "learning_capability_emergence",
+        "dimension": "mechanism",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "学习信号为何会迫使目标能力出现，是否有机制解释或实验支持？",
+        "options": {
+          "causally_supported": 1.0,
+          "mechanistically_plausible": 0.6,
+          "correlational_only": 0.2,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "learning_closed_loop",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "该学习方式是否能随新数据、环境反馈或模型能力形成可持续迭代闭环？",
+        "options": {
+          "demonstrated": 1.0,
+          "plausible": 0.6,
+          "one_shot_only": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "data": [
+      {
+        "id": "data_structure_not_volume",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "贡献是否来自新的数据结构、生成机制、选择反馈或跨模态对应，而不只是更多数据？",
+        "options": {
+          "new_data_mechanism": 1.0,
+          "substantial_curation_logic": 0.6,
+          "mostly_volume": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "data_changes_learning",
+        "dimension": "mechanism",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "是否能说明这种数据组织如何改变模型实际学到的表示、策略或能力？",
+        "options": {
+          "causally_supported": 1.0,
+          "plausible": 0.6,
+          "correlational": 0.2,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "data_scalability",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "数据获取、过滤、合成或反馈流程是否能扩展，而不会依赖不可复制的人工瓶颈？",
+        "options": {
+          "scalable": 1.0,
+          "partially_scalable": 0.55,
+          "manual_bottleneck": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "inference": [
+      {
+        "id": "inference_state_or_compute_change",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "推理时是否改变了计算分配、内部状态、搜索过程、记忆更新或输出验证方式？",
+        "options": {
+          "fundamental_change": 1.0,
+          "substantial_change": 0.65,
+          "prompt_or_decoding_tweak": 0.2,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "inference_capability_gain",
+        "dimension": "mechanism",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "新增推理能力是否来自该过程本身，而非更强底座模型或更多外部提示？",
+        "options": {
+          "demonstrated": 1.0,
+          "partially_isolated": 0.55,
+          "confounded": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "inference_cost_boundary",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "材料是否交代性能收益随推理成本、时延或上下文增长的边界？",
+        "options": {
+          "well_characterized": 1.0,
+          "partially_characterized": 0.55,
+          "not_characterized": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "agent_action_loop": [
+      {
+        "id": "agent_loop_closure",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "它是否实质改变了观察、规划、行动、反馈和状态更新之间的闭环？",
+        "options": {
+          "new_closed_loop": 1.0,
+          "substantial_change": 0.65,
+          "workflow_orchestration": 0.2,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "agent_environment_learning",
+        "dimension": "mechanism",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "Agent 是否从环境结果更新内部状态、策略或可复用经验，而非只串联固定工具调用？",
+        "options": {
+          "learns_or_updates": 1.0,
+          "limited_update": 0.55,
+          "fixed_orchestration": 0.1,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "agent_long_horizon",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "该闭环是否在长时程、任务变化或真实工具失败下仍有验证？",
+        "options": {
+          "demonstrated": 1.0,
+          "partial": 0.5,
+          "toy_only": 0.1,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "embodiment": [
+      {
+        "id": "embodied_grounding",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "机制是否改变感知、世界状态、动作或身体反馈之间的 grounding，而非仅把视觉模型接到机器人上？",
+        "options": {
+          "new_grounding": 1.0,
+          "substantial_alignment": 0.65,
+          "model_attachment": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "embodied_temporal_dynamics",
+        "dimension": "mechanism",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "是否显式处理状态随动作演变、接触、误差恢复或闭环控制？",
+        "options": {
+          "yes": 1.0,
+          "partial": 0.5,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "embodied_transfer",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "是否验证跨任务、跨机器人本体、仿真到真实或零/少样本迁移？",
+        "options": {
+          "multiple_transfers": 1.0,
+          "one_transfer": 0.55,
+          "single_setup": 0.1,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "systems": [
+      {
+        "id": "systems_feasibility_boundary",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "系统创新是否把此前因成本、内存、时延、通信或能耗不可实现的能力变成可实现？",
+        "options": {
+          "new_feasibility_boundary": 1.0,
+          "substantial_enablement": 0.65,
+          "ordinary_optimization": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "systems_algorithm_codesign",
+        "dimension": "mechanism",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "收益是否来自算法、模型和系统约束的协同设计，而不是可替换的工程加速？",
+        "options": {
+          "codesigned": 1.0,
+          "partially_codesigned": 0.55,
+          "implementation_only": 0.1,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "systems_generalizability",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "方法是否适用于多个模型、硬件或部署形态，而不绑定单一内部栈？",
+        "options": {
+          "demonstrated": 1.0,
+          "plausible": 0.55,
+          "single_stack": 0.1,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "evaluation": [
+      {
+        "id": "evaluation_construct_shift",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "评测是否揭示现有指标系统性遗漏的能力或失败，并因此改变研究目标？",
+        "options": {
+          "changes_research_objective": 1.0,
+          "reveals_material_gap": 0.65,
+          "new_benchmark_only": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "evaluation_validity",
+        "dimension": "solidity",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "评测构念是否经过人类、真实环境、外部结果或已知失败模式的有效性校验？",
+        "options": {
+          "strongly_validated": 1.0,
+          "partially_validated": 0.55,
+          "self_referential": 0.1,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "evaluation_actionability",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "结果是否能具体指导模型、训练或部署设计，而非只产生一个新排行榜？",
+        "options": {
+          "yes": 1.0,
+          "partial": 0.5,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "world_model": [
+      {
+        "id": "world_model_state_dynamics",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "它是否学习了可随动作、时间或交互演变的状态表示，而不是把普通视频生成或静态表征重新命名为世界模型？",
+        "options": {
+          "action_conditioned_dynamics": 1.0,
+          "predictive_state_dynamics": 0.7,
+          "video_or_static_proxy": 0.2,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "world_model_decision_interface",
+        "dimension": "mechanism",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "预测到的状态或轨迹是否真正进入规划、控制、数据生成或策略学习闭环？",
+        "options": {
+          "closed_loop": 1.0,
+          "demonstrated_interface": 0.6,
+          "visualization_only": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "world_model_generalization",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "模型是否验证跨环境、长时程、组合变化或少样本下游对齐，而非只复现训练分布？",
+        "options": {
+          "multiple_axes": 1.0,
+          "one_axis": 0.55,
+          "in_distribution_only": 0.1,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "scientific_discovery": [
+      {
+        "id": "science_target_is_real",
+        "dimension": "problem_definition",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "目标是否对应真实科学变量、机制或实验决策，而不是只在通用数据集上预测一个方便指标？",
+        "options": {
+          "real_scientific_target": 1.0,
+          "credible_proxy": 0.6,
+          "benchmark_proxy": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "science_constraints_grounded",
+        "dimension": "mechanism",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "模型是否把物理、生物、化学或实验约束落进表示、目标、搜索或验证过程？",
+        "options": {
+          "mechanistically_grounded": 1.0,
+          "constraint_aware": 0.6,
+          "posthoc_filter_only": 0.2,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "science_external_validation",
+        "dimension": "solidity",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "结论是否经过湿实验、高保真模拟、前瞻实验或独立科学数据验证？",
+        "options": {
+          "prospective_or_physical": 1.0,
+          "high_fidelity_or_external": 0.65,
+          "retrospective_only": 0.2,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "science_discovery_loop",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 0.75,
+        "question": "它是否缩短了提出假说、选择实验、获得反馈和更新模型的闭环，而非只做一次离线预测？",
+        "options": {
+          "closed_loop": 1.0,
+          "actionable_step": 0.55,
+          "offline_prediction": 0.15,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ],
+    "other": [
+      {
+        "id": "other_distinct_mechanism",
+        "dimension": "novelty",
+        "stages": ["screening", "final"],
+        "weight": 1.25,
+        "question": "若不属于标准类型，是否仍能明确指出它改变的技术对象、接口和能力边界？",
+        "options": {
+          "yes": 1.0,
+          "partial": 0.5,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      },
+      {
+        "id": "other_reusable_logic",
+        "dimension": "scope",
+        "stages": ["screening", "final"],
+        "weight": 1.0,
+        "question": "其核心逻辑是否可被其他团队复用、复现或发展为独立路线？",
+        "options": {
+          "yes": 1.0,
+          "partial": 0.5,
+          "no": 0.0,
+          "unknown": 0.0
+        }
+      }
+    ]
+  },
+  "objective_criteria": [
+    {
+      "id": "publisher_signal",
+      "dimension": "publisher",
+      "stages": ["final"],
+      "weight": 2.0,
+      "question": "发布团队和发布形式的可核验势能。",
+      "options": {
+        "established_formal_release": 1.0,
+        "established_team": 0.8,
+        "verified_team_or_researcher": 0.45,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "independent_validation",
+      "dimension": "external_validation",
+      "stages": ["final"],
+      "weight": 2.5,
+      "question": "独立复现、后续论文、产品采用或真实实现的承接强度。",
+      "options": {
+        "independent_replication_or_adoption": 1.0,
+        "independent_implementation": 0.8,
+        "official_implementation_uptake": 0.6,
+        "multiple_primary_works": 0.55,
+        "linked_implementation": 0.35,
+        "primary_claim_only": 0.15,
+        "none": 0.0
+      }
+    },
+    {
+      "id": "secondary_discussion",
+      "dimension": "momentum",
+      "stages": ["final"],
+      "weight": 1.5,
+      "question": "非作者的实质二次讨论与互动承接。",
+      "options": {
+        "independent_high_signal": 1.0,
+        "multiple_substantive_sources": 0.75,
+        "one_substantive_source": 0.45,
+        "indexed_hint_only": 0.1,
+        "none_or_unsearched": 0.0
+      }
+    },
+    {
+      "id": "researcher_continuity",
+      "dimension": "researcher",
+      "stages": ["final"],
+      "weight": 1.0,
+      "question": "关键研究者身份与长期研究轨迹的可核验程度。",
+      "options": {
+        "verified_continuous_trajectory": 1.0,
+        "verified_identity_and_history": 0.65,
+        "identity_only": 0.3,
+        "unknown": 0.0
+      }
+    },
+    {
+      "id": "route_convergence",
+      "dimension": "external_validation",
+      "stages": ["final"],
+      "weight": 1.0,
+      "question": "同一机制是否被多个独立原点材料共同承接。",
+      "options": {
+        "multiple_independent_origins": 1.0,
+        "multiple_related_origins": 0.6,
+        "single_origin": 0.15,
+        "none": 0.0
+      }
+    }
+  ]
+}

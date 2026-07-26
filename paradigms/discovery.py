@@ -18,6 +18,7 @@ from sources.openreview_source import OpenReviewSource
 from sources.priority_research_source import PriorityResearchPageSource
 from sources.research_feed_source import ResearchFeedSource
 
+from .landscape import classify_frontier_domains, coverage_report
 from .models import EvidenceType, TechnicalEvidence
 
 logger = logging.getLogger(__name__)
@@ -28,16 +29,19 @@ class DiscoveryBatch:
     origins: list[TechnicalEvidence]
     supporting: list[TechnicalEvidence]
     source_counts: dict[str, int]
+    coverage: dict
 
 
 class ParadigmDiscovery:
     """发现源只允许论文和技术博客；热榜/社区只作为支持证据。"""
 
-    def __init__(self):
-        lookback = config.SOURCING_LOOKBACK_DAYS
+    def __init__(self, lookback_days: int | None = None):
+        lookback = lookback_days or config.SOURCING_LOOKBACK_DAYS
+        self.lookback_days = lookback
         self.arxiv = ArxivSource(
-            max_results=config.PARADIGM_MAX_DISCOVERY_ITEMS,
+            max_results=config.PARADIGM_DISCOVERY_SAFETY_LIMIT or None,
             lookback_days=lookback,
+            seed_arxiv_ids=config.PARADIGM_SEED_ARXIV_IDS,
         )
         self.hf = HuggingFacePapersSource(lookback_days=lookback)
         self.follow_builders = FollowBuildersSource()
@@ -63,12 +67,14 @@ class ParadigmDiscovery:
         origins.extend(
             _follow_builder_blog_to_origin(item)
             for item in follow_raw
-            if item.source == "follow-builders-blog" and _within_lookback(item)
+            if item.source == "follow-builders-blog"
+            and _within_lookback(item, self.lookback_days)
         )
         supporting.extend(
             _follow_builder_to_support(item)
             for item in follow_raw
-            if item.source != "follow-builders-blog" and _within_lookback(item)
+            if item.source != "follow-builders-blog"
+            and _within_lookback(item, self.lookback_days)
         )
         for batch in native_batches:
             origins.extend(batch)
@@ -86,6 +92,13 @@ class ParadigmDiscovery:
         )
 
         origins = _merge_origins(origins)
+        for item in origins:
+            if not item.raw.get("frontier_domains"):
+                item.raw["frontier_domains"] = classify_frontier_domains(
+                    item.title,
+                    item.summary,
+                    " ".join(item.keywords),
+                )
         origins = sorted(
             origins,
             key=lambda item: (
@@ -93,16 +106,33 @@ class ParadigmDiscovery:
                 item.published_at or "",
             ),
             reverse=True,
-        )[: config.PARADIGM_MAX_DISCOVERY_ITEMS]
+        )
+        if (
+            config.PARADIGM_DISCOVERY_SAFETY_LIMIT > 0
+            and len(origins) > config.PARADIGM_DISCOVERY_SAFETY_LIMIT
+        ):
+            logger.warning(
+                "触发用户显式配置的 discovery safety limit：%s → %s；"
+                "这只是运行熔断，不代表其余材料未通过研究筛选",
+                len(origins),
+                config.PARADIGM_DISCOVERY_SAFETY_LIMIT,
+            )
+            origins = origins[: config.PARADIGM_DISCOVERY_SAFETY_LIMIT]
         logger.info(
             "范式发现完成：%s 条原始论文/博客，%s 条平台支持信号",
             len(origins),
             len(supporting),
         )
+        coverage = coverage_report(
+            origins,
+            executed_groups=self.arxiv.executed_query_groups,
+            failed_groups=self.arxiv.failed_query_groups,
+        )
         return DiscoveryBatch(
             origins=origins,
             supporting=supporting,
             source_counts=source_counts,
+            coverage=coverage,
         )
 
 
@@ -201,7 +231,7 @@ def _normalize_arxiv_id(value: str) -> str:
     return match.group(1) if match else ""
 
 
-def _within_lookback(item: RawProject) -> bool:
+def _within_lookback(item: RawProject, lookback_days: int) -> bool:
     if not item.created_at:
         return True
     try:
@@ -211,7 +241,7 @@ def _within_lookback(item: RawProject) -> bool:
     except ValueError:
         return True
     return published >= datetime.now(timezone.utc) - timedelta(
-        days=config.SOURCING_LOOKBACK_DAYS
+        days=max(lookback_days, 1)
     )
 
 

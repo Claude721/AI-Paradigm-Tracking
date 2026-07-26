@@ -11,6 +11,13 @@ on:
         options:
           - "7"
           - "30"
+          - "60"
+          - "90"
+      seed_arxiv_ids:
+        description: 可选：精确补录/复查的 arXiv ID，逗号分隔
+        required: false
+        default: ""
+        type: string
       reset_state:
         description: 忽略旧数据库，从空状态开始本轮
         required: true
@@ -58,21 +65,31 @@ jobs:
       RESEARCH_FEED_URLS: ${{ vars.RESEARCH_FEED_URLS }}
       RESEARCH_WATCHLIST_MODE: ${{ vars.RESEARCH_WATCHLIST_MODE }}
       PRIORITY_RESEARCH_PAGES: ${{ vars.PRIORITY_RESEARCH_PAGES }}
-      PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE: ${{ vars.PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE }}
+      PRIORITY_RESEARCH_LINK_SAFETY_LIMIT: ${{ vars.PRIORITY_RESEARCH_LINK_SAFETY_LIMIT || '0' }}
       PRIORITY_RESEARCH_CONCURRENCY: ${{ vars.PRIORITY_RESEARCH_CONCURRENCY }}
       ESTABLISHED_RESEARCH_ORGANIZATIONS: ${{ vars.ESTABLISHED_RESEARCH_ORGANIZATIONS }}
       MONITORED_RESEARCH_ORGANIZATIONS: ${{ vars.MONITORED_RESEARCH_ORGANIZATIONS }}
       PRIORITY_RESEARCHERS: ${{ vars.PRIORITY_RESEARCHERS }}
       TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER_TOKEN }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-      TAVILY_MAX_REQUESTS_PER_RUN: ${{ vars.TAVILY_MAX_REQUESTS_PER_RUN }}
+      TAVILY_DISCOVERY_DOMAINS: ${{ vars.TAVILY_DISCOVERY_DOMAINS }}
+      TAVILY_REQUEST_SAFETY_LIMIT: ${{ vars.TAVILY_REQUEST_SAFETY_LIMIT || '0' }}
       REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
       REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
       REDDIT_API_ACCESS_APPROVED: ${{ vars.REDDIT_API_ACCESS_APPROVED }}
       REDDIT_USER_AGENT: ${{ vars.REDDIT_USER_AGENT }}
-      PARADIGM_MAX_ANALYSIS_ITEMS: ${{ vars.PARADIGM_MAX_ANALYSIS_ITEMS }}
-      PARADIGM_MAX_DEEP_CANDIDATES: ${{ vars.PARADIGM_MAX_DEEP_CANDIDATES }}
+      # 0 表示不限制；这些只是显式运行熔断，研究去留由版本化 Rubric 决定。
+      PARADIGM_DISCOVERY_SAFETY_LIMIT: ${{ vars.PARADIGM_DISCOVERY_SAFETY_LIMIT || '0' }}
+      PARADIGM_ANALYSIS_SAFETY_LIMIT: ${{ vars.PARADIGM_ANALYSIS_SAFETY_LIMIT || '0' }}
+      PARADIGM_DEEP_SAFETY_LIMIT: ${{ vars.PARADIGM_DEEP_SAFETY_LIMIT || '0' }}
+      PARADIGM_REPORT_SAFETY_LIMIT: ${{ vars.PARADIGM_REPORT_SAFETY_LIMIT || '0' }}
+      PARADIGM_REFRESH_SAFETY_LIMIT: ${{ vars.PARADIGM_REFRESH_SAFETY_LIMIT || '0' }}
       SOURCING_LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '7' }}
+      PARADIGM_RECALL_OVERLAP_DAYS: ${{ vars.PARADIGM_RECALL_OVERLAP_DAYS || '14' }}
+      PARADIGM_BOOTSTRAP_LOOKBACK_DAYS: ${{ vars.PARADIGM_BOOTSTRAP_LOOKBACK_DAYS || '60' }}
+      PARADIGM_SEED_ARXIV_IDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seed_arxiv_ids || '' }}
+      PARADIGM_RESEARCHER_PROFILE_LIMIT: ${{ vars.PARADIGM_RESEARCHER_PROFILE_LIMIT || '6' }}
+      PARADIGM_STATE_SCHEMA_VERSION: "2"
       EMAIL_PUSH_ENABLED: "true"
       EMAIL_PUSH_REQUIRED: "true"
       SMTP_HOST: smtp.qq.com
@@ -125,11 +142,17 @@ jobs:
           gh api "$artifact_url" > /tmp/paradigm-radar-state.zip
           unzip -oq /tmp/paradigm-radar-state.zip -d /tmp/paradigm-radar-restore
 
-          state_commit="$(jq -r '.commit_sha // empty' /tmp/paradigm-radar-restore/state-meta.json 2>/dev/null || true)"
-          if [ "$state_commit" != "$GITHUB_SHA" ]; then
-            echo "检测到代码版本变化，本轮从空数据库开始"
+          state_schema="$(jq -r '.schema_version // empty' /tmp/paradigm-radar-restore/state-meta.json 2>/dev/null || true)"
+          if [ "$state_schema" != "$PARADIGM_STATE_SCHEMA_VERSION" ]; then
+            echo "检测到状态数据库结构不兼容，本轮从空数据库开始"
             echo "restored=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+
+          state_landscape="$(jq -r '.landscape_version // empty' /tmp/paradigm-radar-restore/state-meta.json 2>/dev/null || true)"
+          current_landscape="$(jq -r '.version' taxonomy/frontier_landscape.json)"
+          if [ "$state_landscape" != "$current_landscape" ]; then
+            echo "前沿覆盖地图已变化：恢复旧数据库用于证据去重，并由程序补扫近 60 天新覆盖面"
           fi
 
           if [ ! -f /tmp/paradigm-radar-restore/paradigm_radar.db ]; then
@@ -140,7 +163,7 @@ jobs:
 
           mkdir -p database
           cp /tmp/paradigm-radar-restore/paradigm_radar.db database/paradigm_radar.db
-          echo "已恢复同一代码版本的去重状态"
+          echo "已恢复兼容版本的跨周路线与去重状态"
           echo "restored=true" >> "$GITHUB_OUTPUT"
 
       - name: 配置体检
@@ -157,7 +180,8 @@ jobs:
       - name: 记录状态对应的代码版本
         if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         run: |
-          printf '{"commit_sha":"%s","run_id":"%s"}\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > database/state-meta.json
+          landscape_version="$(jq -r '.version' taxonomy/frontier_landscape.json)"
+          printf '{"schema_version":%s,"landscape_version":"%s","commit_sha":"%s","run_id":"%s"}\n' "$PARADIGM_STATE_SCHEMA_VERSION" "$landscape_version" "$GITHUB_SHA" "$GITHUB_RUN_ID" > database/state-meta.json
 
       - name: 保存跨周去重状态
         if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}

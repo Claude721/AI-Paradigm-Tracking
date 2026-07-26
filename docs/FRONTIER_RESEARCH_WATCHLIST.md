@@ -1,6 +1,6 @@
 # AI 前沿机构与研究者 Watchlist
 
-> 调研与核验日期：2026-07-19。机器可读的完整默认目录位于 `research_watchlist.py`；本文件解释为什么纳入、如何分层，以及哪些名字不能构成自动背书。
+> 调研与核验日期：2026-07-26。机器可读的完整默认目录位于 `research_watchlist.py`；本文件解释为什么纳入、如何分层，以及哪些名字不能构成自动背书。
 
 ## 1. 名单不是“名气榜”
 
@@ -19,6 +19,8 @@
 
 第一层是高信号研究索引。海外覆盖 [OpenAI Research](https://openai.com/research/index/)、[Anthropic Research](https://www.anthropic.com/research)、[Google DeepMind Research](https://deepmind.google/research/)、[Meta Research Publications](https://ai.meta.com/research/publications/)、[Microsoft AI Frontiers](https://www.microsoft.com/en-us/research/lab/ai-frontiers/publications/)、[NVIDIA GEAR](https://research.nvidia.com/labs/gear/publications/)、[Mistral Research](https://mistral.ai/news/?category=research)、[Cohere Research](https://cohere.com/research)、[Ai2](https://allenai.org/news)、[World Labs](https://www.worldlabs.ai/blog)、[Physical Intelligence](https://www.pi.website/research)、[Runway Research](https://runwayml.com/research/publications) 与 [Sakana Publications](https://pub.sakana.ai/)。
 
+AI4S 作为独立技术栈覆盖 [FutureHouse Research](https://www.futurehouse.org/research)、[Arc Institute Publications](https://arcinstitute.org/publications)、[Microsoft Research AI for Science](https://www.microsoft.com/en-us/research/lab/microsoft-research-ai-for-science/)、[Isomorphic Labs Articles](https://www.isomorphiclabs.com/articles) 与 [Lila Sciences 技术页](https://www.lila.ai/tech)。FutureHouse、Arc 与 Microsoft AI for Science 已有连续、可审计研究产出；Isomorphic 与 Lila 目前作为 `verified` 主动入口，不能仅凭公司叙事自动晋级。
+
 中国侧覆盖 [Baidu ERNIE Blog](https://ernie.baidu.com/blog/)、[ByteDance Seed Research](https://seed.bytedance.com/en/research)、[Qwen Publications](https://qwenlm.github.io/publication/)、[Moonshot AI](https://www.moonshot.ai/)、[Z.ai Blog](https://z.ai/blog)、[DeepSeek Transparency](https://www.deepseek.com/en/transparency/)、[StepFun Research](https://chat.stepfun.com/research/en)、[MiniMax Blog](https://www.minimax.io/blog) 与 [ModelBest](https://modelbest.cn/)。
 
 Google Research、Apple、Amazon、IBM、xAI、腾讯 ARC、华为诺亚、BAIR、Stanford CRFM、CMU RI 和 NYU CILVR 也会被主动读取，但默认 tier 是 `verified`：它们的页面要么覆盖面很宽，要么偏模型发布/动态页面，要么普通论文数量很大，不能仅凭入口直接晋级。Z.ai、Qwen 新站、腾讯 ARC 和华为诺亚的动态页面可能需要专用解析器；通用抓取失败时，arXiv/OpenAlex 仍是第二条召回路径。
@@ -29,6 +31,7 @@ Google Research、Apple、Amazon、IBM、xAI、腾讯 ARC、华为诺亚、BAIR�
 
 - 基础模型、reasoning 与 Agent：OpenAI、Anthropic、Google DeepMind、Google Research、Meta FAIR、Microsoft Research / AI Frontiers、NVIDIA Research、Apple ML Research、Amazon Science、IBM Research、xAI、Mistral AI、Cohere Labs、Allen Institute for AI。
 - World Model、空间智能与 Physical AI：World Labs、Physical Intelligence、Wayve、Runway Research、Toyota Research Institute、NVIDIA GEAR / Spatial Intelligence、Sakana AI。
+- AI4S 与闭环科学发现：FutureHouse、Arc Institute、Microsoft Research AI for Science；Isomorphic Labs 与 Lila Sciences 位于监测/verified 层，等待更多正式报告与独立验证。
 - Hugging Face 与其研究团队保留在目录中用于身份归一和开源承接，但 Hugging Face 平台热度不能单独生成范式。
 
 World Model 路线尤其说明了为什么需要同时维护“机构—实验室—人物”关系：[World Labs 官方介绍](https://www.worldlabs.ai/about)确认 Fei-Fei Li 等创始团队聚焦空间智能；[Meta V-JEPA](https://ai.meta.com/research/vjepa/)把 JEPA 延伸到视频预测；[NVIDIA Cosmos](https://research.nvidia.com/labs/dir/cosmos1/)与 GEAR 则连接世界基础模型和机器人训练。它们共享问题背景，但解法、数据与下游承接不同，报告应按路线综合，而不是按品牌逐条列举。
@@ -62,7 +65,7 @@ World Model 路线尤其说明了为什么需要同时维护“机构—实验�
 
 ## 5. 重点研究者图谱
 
-名单围绕长期轨迹而不是单次热门论文组织。World Model / 空间智能关注 Yann LeCun、Mido Assran、Fei-Fei Li、Kaiming He、Jiajun Wu、David Ha、Danijar Hafner、Saining Xie、Rob Fergus；RL / reasoning 关注 Richard Sutton、David Silver、Demis Hassabis、Noam Brown；VLA / 机器人关注 Sergey Levine、Chelsea Finn、Pieter Abbeel、Jitendra Malik、Trevor Darrell、Shuran Song、Yuke Zhu、Linxi Jim Fan、Dieter Fox、Russ Tedrake、Deepak Pathak、Marco Hutter；基础模型与 Agent 关注 Ilya Sutskever、Oriol Vinyals、Jianfeng Gao、Ece Kamar、Percy Liang、Yejin Choi、Aidan Gomez、Joelle Pineau。
+名单围绕长期轨迹而不是单次热门论文组织。World Model / 空间智能关注 Yann LeCun、Mido Assran、Fei-Fei Li、Kaiming He、Jiajun Wu、David Ha、Danijar Hafner、Saining Xie、Rob Fergus；RL / reasoning 关注 Richard Sutton、David Silver、Demis Hassabis、Noam Brown；VLA / 机器人关注 Sergey Levine、Chelsea Finn、Pieter Abbeel、Ken Goldberg、Danfei Xu、Jitendra Malik、Trevor Darrell、Shuran Song、Yuke Zhu、Linxi Jim Fan、Dieter Fox、Russ Tedrake、Deepak Pathak、Marco Hutter；AI4S 关注 David Baker、John Jumper、Pushmeet Kohli、Christopher Bishop、Patrick Hsu 与 Brian Hie；基础模型与 Agent 关注 Ilya Sutskever、Oriol Vinyals、Jianfeng Gao、Ece Kamar、Percy Liang、Yejin Choi、Aidan Gomez、Joelle Pineau。
 
 中国侧重点包括 Jun Zhu / 朱军、Yang Gao / 高阳、Zhiyuan Liu / 刘知远、Jie Tang / 唐杰、Song-Chun Zhu / 朱松纯、Zhilin Yang / 杨植麟、Daxin Jiang / 姜大昕、Cewu Lu / 卢策吾、He Wang / 王鹤、Hao Dong / 董豪、Hao Tang / 唐昊、Yizhou Wang / 王亦洲、Baoquan Chen / 陈宝权、Yao Mu / 穆尧、Guofeng Zhang / 章国锋、Hong Qiao / 乔红与 Yi Zeng / 曾毅。
 
@@ -73,6 +76,8 @@ World Model 路线尤其说明了为什么需要同时维护“机构—实验�
 - [Yann LeCun 的 Meta 页面](https://ai.meta.com/people/yann-lecun/)和 [NYU 页面](https://cds.nyu.edu/team/yann-lecun/)共同核验 FAIR、NYU 与 JEPA 路线关系。
 
 姓名命中不等于论文晋级。系统只有在人物档案已经取得公开 profile URL 或学术 ID 后，才写入“重点研究者身份已核验”；这个信号的 tier 仍是 `verified`，还需要技术硬门槛与外部承接。
+
+T‑Rex 这类大型合作是人物规则的反例测试：报告应先识别 Dantong Niu、Zhuoyang Liu、Zekai Wang 的共同一作角色，再说明 Fei‑Fei Li、Ken Goldberg、Pieter Abbeel 等资深研究网络带来的研究连续性与传播势能，不能把工作简写成“李飞飞发布了一篇论文”。
 
 ## 6. 配置与维护规则
 

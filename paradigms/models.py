@@ -106,9 +106,13 @@ class ParadigmExtraction:
     trend_interpretation: str = ""
     open_questions: list[str] = field(default_factory=list)
     novelty_type: str = ""
+    innovation_types: list[str] = field(default_factory=list)
     lineage_parent: str = ""
     keywords: list[str] = field(default_factory=list)
     claimed_results: list[str] = field(default_factory=list)
+    # Rubric 是技术筛选的事实来源；以下 0-10 字段仅保留为兼容性派生值，
+    # 不再接受模型直接打分，也不再作为独立硬门槛。
+    rubric_assessment: dict[str, Any] = field(default_factory=dict)
     novelty_score: float = 0.0
     solidity_score: float = 0.0
     scope_score: float = 0.0
@@ -149,6 +153,7 @@ class ParadigmCandidate:
     is_formal_technical_report: bool = False
     marketing_overclaim_risk: str = ""
     novelty_type: str = ""
+    innovation_types: list[str] = field(default_factory=list)
     lineage_parent: str = ""
     lineage_path: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
@@ -161,6 +166,10 @@ class ParadigmCandidate:
     researcher_score: float = 0.0
     volume_score: float = 0.0
     incremental_penalty: float = 0.0
+    # screening_rubric 决定是否进入外部深挖；rubric_assessment 在综合后
+    # 加入客观发布者/承接题，决定最终是否进入报告。
+    screening_rubric: dict[str, Any] = field(default_factory=dict)
+    rubric_assessment: dict[str, Any] = field(default_factory=dict)
     total_score: float = 0.0
     status: str = "watch"
     report_kind: str = "new"
@@ -181,7 +190,15 @@ class ParadigmCandidate:
     def report_signature(self) -> str:
         payload = {
             "key": self.key,
-            "evidence": sorted(item.fingerprint for item in self.evidence),
+            "evidence": sorted(
+                (
+                    item.fingerprint,
+                    material_metric_signature(item.metrics),
+                    str(item.raw.get("relationship", "")),
+                    str(item.raw.get("independence", "")),
+                )
+                for item in self.evidence
+            ),
             "mechanism": self.mechanism.strip(),
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -227,3 +244,39 @@ def technical_evidence_from_dict(payload: dict[str, Any]) -> TechnicalEvidence:
             "evidence_type": EvidenceType(payload["evidence_type"]),
         }
     )
+
+
+def material_metric_signature(
+    metrics: dict[str, float | int | str]
+) -> tuple[tuple[str, int], ...]:
+    """只在互动量跨越有意义量级时触发路线更新，避免每个 +1 都重发。"""
+    tracked = (
+        "citations",
+        "upvotes",
+        "comments",
+        "stars",
+        "forks",
+        "likes",
+        "retweets",
+        "reposts",
+        "replies",
+        "score",
+    )
+    return tuple(
+        (key, _metric_bucket(metrics.get(key, 0)))
+        for key in tracked
+        if _numeric(metrics.get(key, 0)) > 0
+    )
+
+
+def _metric_bucket(value: object) -> int:
+    number = _numeric(value)
+    thresholds = (1, 3, 10, 25, 50, 100, 250, 500, 1000, 5000, 10_000)
+    return sum(number >= threshold for threshold in thresholds)
+
+
+def _numeric(value: object) -> float:
+    try:
+        return max(float(value or 0), 0.0)
+    except (TypeError, ValueError):
+        return 0.0

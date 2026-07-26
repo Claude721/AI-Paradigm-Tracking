@@ -32,8 +32,9 @@ class ResearcherProfileClient:
         self,
         evidence: TechnicalEvidence,
         existing: list[ResearcherProfile],
-        limit: int = 2,
+        limit: int | None = None,
     ) -> list[ResearcherProfile]:
+        limit = limit or config.PARADIGM_RESEARCHER_PROFILE_LIMIT
         profiles = _seed_profiles(evidence, existing, limit)
 
         async with httpx.AsyncClient(
@@ -72,23 +73,35 @@ class ResearcherProfileClient:
         evidence: TechnicalEvidence,
     ) -> None:
         _note(profile, "已检索 OpenAlex Authors 并用当前论文题目核验身份")
-        response = await client.get(
-            OPENALEX_AUTHORS,
-            params={
-                "api_key": config.OPENALEX_API_KEY,
-                "search": profile.name,
-                "per-page": 5,
-            },
-        )
-        if response.status_code >= 400:
-            _note(profile, f"OpenAlex 作者检索返回 HTTP {response.status_code}")
-            return
-        matches = [
-            item
-            for item in response.json().get("results", [])
-            if _name_similarity(profile.name, item.get("display_name", "")) >= 0.92
-        ]
-        best = await self._match_current_work(client, matches, evidence.title)
+        known_id = profile.identifiers.get("openalex", "")
+        best = None
+        if known_id:
+            known_short_id = known_id.rstrip("/").rsplit("/", 1)[-1]
+            response = await client.get(
+                f"{OPENALEX_AUTHORS}/{known_short_id}",
+                params={"api_key": config.OPENALEX_API_KEY},
+            )
+            if response.status_code < 400:
+                best = response.json()
+                _note(profile, "沿当前论文返回的 OpenAlex 作者 ID 直接核验")
+        if best is None:
+            response = await client.get(
+                OPENALEX_AUTHORS,
+                params={
+                    "api_key": config.OPENALEX_API_KEY,
+                    "search": profile.name,
+                    "per-page": 5,
+                },
+            )
+            if response.status_code >= 400:
+                _note(profile, f"OpenAlex 作者检索返回 HTTP {response.status_code}")
+                return
+            matches = [
+                item
+                for item in response.json().get("results", [])
+                if _name_similarity(profile.name, item.get("display_name", "")) >= 0.92
+            ]
+            best = await self._match_current_work(client, matches, evidence.title)
         if not best:
             _note(profile, "未找到能与当前论文可靠对齐的 OpenAlex 作者实体")
             return
@@ -313,17 +326,133 @@ def _seed_profiles(
     limit: int,
 ) -> list[ResearcherProfile]:
     by_name = {profile.name.casefold(): profile for profile in existing}
-    for index, name in enumerate(evidence.authors[:limit]):
+    roles = {
+        str(name): str(role)
+        for name, role in (evidence.raw.get("author_roles") or {}).items()
+        if name and role
+    }
+    profile_urls = {
+        str(name): str(url)
+        for name, url in (evidence.raw.get("author_profile_urls") or {}).items()
+        if name and url
+    }
+    public_emails = {
+        str(name): str(email)
+        for name, email in (evidence.raw.get("author_public_emails") or {}).items()
+        if name and _valid_email(str(email))
+    }
+    openalex_map = {
+        str(name): str(identifier)
+        for name, identifier in (evidence.raw.get("author_openalex_map") or {}).items()
+        if name and identifier
+    }
+    affiliation_map = {
+        str(name): [str(value) for value in values if value]
+        for name, values in (evidence.raw.get("author_affiliations") or {}).items()
+        if name and isinstance(values, list)
+    }
+    selected: list[str] = []
+    # 研究负责人选择是分层配额，不是论文作者列表的机械截断：
+    # 先保留最可能主导方法的前三位，再保留末位/资深作者和名单中的长期
+    # 前沿研究者，最后补入项目页明确标注的其他贡献角色。
+    selected.extend(evidence.authors[:3])
+    if len(evidence.authors) > 1:
+        selected.append(evidence.authors[-1])
+    priority_names = {
+        re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", value.casefold())
+        for value in config.PRIORITY_RESEARCHERS
+    }
+    selected.extend(
+        name
+        for name in evidence.authors
+        if re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", name.casefold())
+        in priority_names
+    )
+    selected.extend(roles)
+    selected = list(dict.fromkeys(name for name in selected if name))[:limit]
+
+    for name in selected:
         if not name:
             continue
+        index = evidence.authors.index(name) if name in evidence.authors else -1
+        role = roles.get(name, "")
+        if not role:
+            if index == 0:
+                role = "第一作者"
+            elif index == len(evidence.authors) - 1 and index > 0:
+                role = "末位作者/资深作者线索"
+            elif 0 < index < 3:
+                role = "前列作者/共同一作待核验"
+            else:
+                role = "共同作者"
         profile = by_name.setdefault(
             name.casefold(),
             ResearcherProfile(
                 name=name,
-                role="第一作者" if index == 0 else "共同作者",
+                role=role,
                 current_affiliation=evidence.organization,
             ),
         )
+        if role and not profile.role:
+            profile.role = role
+        openalex_id = next(
+            (
+                identifier
+                for author_name, identifier in openalex_map.items()
+                if _name_similarity(name, author_name) >= 0.92
+            ),
+            "",
+        )
+        if openalex_id:
+            profile.identifiers.setdefault("openalex", openalex_id)
+            profile.profile_urls.setdefault("openalex", openalex_id)
+        affiliations = next(
+            (
+                values
+                for author_name, values in affiliation_map.items()
+                if _name_similarity(name, author_name) >= 0.92
+            ),
+            [],
+        )
+        if affiliations:
+            profile.current_affiliation = affiliations[0]
+            for affiliation in affiliations[1:]:
+                if affiliation not in profile.prior_affiliations:
+                    profile.prior_affiliations.append(affiliation)
+        homepage = next(
+            (
+                url
+                for author_name, url in profile_urls.items()
+                if _name_similarity(name, author_name) >= 0.92
+                and _safe_public_url(url)
+            ),
+            "",
+        )
+        if homepage:
+            label = _profile_label(homepage, "homepage")
+            profile.profile_urls.setdefault(label, homepage)
+            if label == "homepage":
+                profile.profile_urls.setdefault("homepage", homepage)
+            if "orcid.org" in urlparse(homepage).netloc.casefold():
+                orcid = homepage.rstrip("/").rsplit("/", 1)[-1]
+                if re.fullmatch(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]", orcid):
+                    profile.identifiers.setdefault("orcid", orcid)
+                    profile.profile_urls.setdefault("orcid", homepage)
+            _note(profile, "已从论文官方 HTML 的作者链接获得公开主页")
+        public_email = next(
+            (
+                email
+                for author_name, email in public_emails.items()
+                if _name_similarity(name, author_name) >= 0.92
+            ),
+            "",
+        )
+        if public_email:
+            profile.public_email = public_email
+            profile.public_email_source = str(
+                (evidence.raw.get("project_urls") or [evidence.url])[0]
+            )
+            _note(profile, "已从论文官方项目页获得公开职业邮箱")
         _note(profile, "已从当前论文作者列表建立身份种子")
     return list(by_name.values())[:limit]
 

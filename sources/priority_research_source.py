@@ -40,8 +40,10 @@ class PriorityResearchPageSource:
         concurrency: int | None = None,
     ):
         self.lookback_days = max(lookback_days, 1)
-        configured = config.PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE
-        self.per_page = max(per_page if per_page is not None else configured, 1)
+        configured = config.PRIORITY_RESEARCH_LINK_SAFETY_LIMIT
+        self.per_page = max(
+            per_page if per_page is not None else configured, 0
+        )
         self.pages = config.PRIORITY_RESEARCH_PAGES if pages is None else pages
         self.concurrency = max(
             concurrency
@@ -98,7 +100,19 @@ class PriorityResearchPageSource:
                     or not _parse_date(link.published_at)
                     or _parse_date(link.published_at) >= cutoff
                 ]
-                for link in recent_links[: self.per_page]:
+                selected_links = (
+                    recent_links[: self.per_page]
+                    if self.per_page > 0
+                    else recent_links
+                )
+                if self.per_page > 0 and len(recent_links) > self.per_page:
+                    logger.warning(
+                        "官方研究入口 %s 触发显式 link safety limit：%s → %s",
+                        index_url,
+                        len(recent_links),
+                        self.per_page,
+                    )
+                for link in selected_links:
                     discovered.append((index_url, link))
 
             detail_responses = await asyncio.gather(

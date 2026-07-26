@@ -44,6 +44,9 @@ class RedditEvidenceClient:
             return []
         token = await self._token(client)
         if not token:
+            candidate.community_coverage["reddit_official"] = (
+                "已配置 Reddit Data API，但本轮 OAuth Token 获取失败"
+            )
             return []
         work_title, identifier = _search_identity(candidate)
         if not work_title:
@@ -66,6 +69,9 @@ class RedditEvidenceClient:
         )
         if response.status_code >= 400:
             logger.warning("Reddit 官方搜索失败: HTTP %s", response.status_code)
+            candidate.community_coverage["reddit_official"] = (
+                f"已尝试 Reddit OAuth 搜索，但返回 HTTP {response.status_code}"
+            )
             return []
         cutoff = datetime.now(timezone.utc) - timedelta(
             days=config.SOURCING_LOOKBACK_DAYS
@@ -118,6 +124,9 @@ class RedditEvidenceClient:
                     },
                 )
             )
+        candidate.community_coverage["reddit_official"] = (
+            f"已执行 Reddit OAuth 搜索；相关讨论命中 {len(results)} 条"
+        )
         return results
 
     async def _token(self, client: httpx.AsyncClient) -> str:

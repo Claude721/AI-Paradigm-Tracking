@@ -40,11 +40,22 @@ class CommunityEvidenceClient:
                 return_exceptions=True,
             )
         results = []
-        for source_name, batch in zip(
-            ("GitHub", "Hacker News", "Tavily", "Reddit", "X"), batches
+        for source_name, coverage_key, batch in zip(
+            ("GitHub", "Hacker News", "Tavily", "Reddit", "X"),
+            (
+                "github",
+                "hackernews",
+                "tavily_social_web",
+                "reddit_official",
+                "x_official",
+            ),
+            batches,
         ):
             if isinstance(batch, Exception):
                 logger.warning("%s 范式证据搜索失败: %s", source_name, batch)
+                candidate.community_coverage[coverage_key] = (
+                    f"已尝试，但查询异常：{type(batch).__name__}"
+                )
                 continue
             results.extend(batch)
         return results
@@ -78,6 +89,10 @@ class CommunityEvidenceClient:
         self, client: httpx.AsyncClient, candidate: ParadigmCandidate
     ) -> list[TechnicalEvidence]:
         if not config.GITHUB_TOKEN or self._github_circuit_open:
+            if self._github_circuit_open:
+                candidate.community_coverage["github"] = (
+                    "此前 GitHub Search 已鉴权/限流失败，本轮熔断后未继续查询"
+                )
             return []
         headers = {
             "Accept": "application/vnd.github+json",
@@ -123,22 +138,28 @@ class CommunityEvidenceClient:
                     "停止后续 GitHub 搜索" if self._github_circuit_open else "继续降级",
                 )
                 self._github_failure_logged = True
+            candidate.community_coverage["github"] = (
+                f"已尝试 GitHub Search，但返回 HTTP {response.status_code}"
+            )
             return []
         results = []
-        cutoff = datetime.now(timezone.utc) - timedelta(
-            days=config.SOURCING_LOOKBACK_DAYS
-        )
+        official_repositories = {
+            str(url).rstrip("/").removeprefix("https://github.com/").casefold()
+            for evidence in candidate.evidence
+            for url in (evidence.raw.get("github_repositories") or [])
+            if url
+        }
         for repo in response.json().get("items", []):
             if not _is_relevant_repository(candidate, repo):
                 continue
             updated_at = str(repo.get("updated_at", ""))
-            if (updated := _parse_datetime(updated_at)) and updated < cutoff:
-                continue
+            full_name = str(repo.get("full_name", ""))
+            is_official = full_name.casefold() in official_repositories
             results.append(
                 TechnicalEvidence(
                     source="github",
                     evidence_type=EvidenceType.IMPLEMENTATION,
-                    title=repo.get("full_name", ""),
+                    title=full_name,
                     url=repo.get("html_url", ""),
                     summary=repo.get("description") or "",
                     published_at=updated_at or repo.get("created_at", ""),
@@ -147,15 +168,22 @@ class CommunityEvidenceClient:
                         "stars": repo.get("stargazers_count", 0) or 0,
                         "forks": repo.get("forks_count", 0) or 0,
                     },
-                    identifiers={"github": repo.get("full_name", "")},
+                    identifiers={"github": full_name},
                     raw={
                         "updated_at": repo.get("updated_at", ""),
                         "created_at": repo.get("created_at", ""),
-                        "relationship": "name_and_mechanism_match",
-                        "independence": "unverified",
+                        "relationship": (
+                            "paper_linked_repository"
+                            if is_official
+                            else "name_and_mechanism_match"
+                        ),
+                        "independence": "official" if is_official else "unverified",
                     },
                 )
             )
+        candidate.community_coverage["github"] = (
+            f"已执行 GitHub Search；相关实现/仓库命中 {len(results)} 条"
+        )
         return results
 
     async def _hackernews(
@@ -175,6 +203,9 @@ class CommunityEvidenceClient:
             },
         )
         if response.status_code >= 400:
+            candidate.community_coverage["hackernews"] = (
+                f"已尝试 Hacker News 搜索，但返回 HTTP {response.status_code}"
+            )
             return []
         results = []
         for hit in response.json().get("hits", []):
@@ -198,6 +229,9 @@ class CommunityEvidenceClient:
                     raw={"relationship": "exact_or_mechanism_title_match"},
                 )
             )
+        candidate.community_coverage["hackernews"] = (
+            f"已执行 Hacker News 搜索；相关讨论命中 {len(results)} 条"
+        )
         return results
 
     async def _x_title_search(
@@ -231,6 +265,9 @@ class CommunityEvidenceClient:
         )
         if response.status_code >= 400:
             logger.warning("X 标题搜索失败: HTTP %s", response.status_code)
+            candidate.community_coverage["x_official"] = (
+                f"已尝试 X Recent Search，但返回 HTTP {response.status_code}"
+            )
             return []
         payload = response.json()
         users = {
@@ -284,6 +321,9 @@ class CommunityEvidenceClient:
                     },
                 )
             )
+        candidate.community_coverage["x_official"] = (
+            f"已执行 X 精确标题搜索；相关帖子命中 {len(results)} 条"
+        )
         return results
 
 

@@ -7,90 +7,45 @@ import math
 import config
 from .models import EvidenceType, ParadigmCandidate
 from .reputation import resolve_organization, verified_priority_researcher
-
-
-WEIGHTS = {
-    "novelty": 20.0,
-    "solidity": 20.0,
-    "scope": 15.0,
-    "momentum": 20.0,
-    "researcher": 20.0,
-    "volume": 5.0,
-}
+from .rubric import finalize_candidate_rubric, substantive_secondary
 
 
 def score_candidate(candidate: ParadigmCandidate) -> ParadigmCandidate:
-    """原地计算内部评分，并应用“技术 × 发布者 × 传播验证”联合门槛。"""
+    """用版本化 Rubric 计算最终决策；不再读取模型自报的数字分。"""
     candidate.rejection_reason = ""
     _assess_publisher(candidate)
     candidate.momentum_score = _momentum_score(candidate)
     candidate.researcher_score = _researcher_score(candidate)
     candidate.volume_score = _volume_score(candidate)
-
-    candidate.total_score = round(
-        WEIGHTS["novelty"] * _unit(candidate.novelty_score)
-        + WEIGHTS["solidity"] * _unit(effective_solidity_score(candidate))
-        + WEIGHTS["scope"] * _unit(candidate.scope_score)
-        + WEIGHTS["momentum"] * _unit(candidate.momentum_score)
-        + WEIGHTS["researcher"] * _unit(candidate.researcher_score)
-        + WEIGHTS["volume"] * _unit(candidate.volume_score)
-        - min(max(candidate.incremental_penalty, 0.0), 10.0) * 3.5,
-        1,
-    )
-    candidate.total_score = max(0.0, min(candidate.total_score, 100.0))
-
-    admission_ok, admission_reason = _admission_gate(candidate)
+    gate_passed, admission_reason = _admission_gate(candidate)
     candidate.admission_reason = admission_reason
-
-    hard_rejected = False
-    if not candidate.mechanism.strip() or not candidate.problem_shift.strip():
-        candidate.rejection_reason = "缺少可辨认的新机制或问题边界变化"
-        hard_rejected = True
-    elif candidate.novelty_score < config.PARADIGM_MIN_NOVELTY:
-        candidate.rejection_reason = "新颖性不足，仍是现有范式内的小改动"
-        hard_rejected = True
-    elif candidate.scope_score < config.PARADIGM_MIN_SCOPE:
-        candidate.rejection_reason = "外延空间不足，只解决狭窄局部问题"
-        hard_rejected = True
-    elif candidate.incremental_penalty >= 7 and candidate.scope_score < 8:
-        candidate.rejection_reason = "增量优化惩罚触发，缺乏能力边界迁移"
-        hard_rejected = True
-    elif not admission_ok:
-        candidate.rejection_reason = admission_reason
-    elif (
-        candidate.total_score < config.PARADIGM_MIN_SCORE
-        and not (
-            candidate.is_formal_technical_report
-            and candidate.publisher_tier == "established"
-        )
-    ):
-        candidate.rejection_reason = "综合证据尚不足，进入观察池"
-
-    if candidate.rejection_reason:
-        # 技术边界不成立的工作直接淘汰；技术可能成立、但发布者或外部验证
-        # 尚不足的工作留在观察池，等待未来一周的新讨论重新触发评估。
-        candidate.status = "rejected" if hard_rejected else "observe"
-    elif candidate.total_score >= 80:
-        candidate.status = "breakout"
-    elif candidate.total_score >= 70:
-        candidate.status = "emerging"
+    assessment = finalize_candidate_rubric(candidate)
+    decision = assessment["decision"]
+    if decision == "report" and not gate_passed:
+        # 技术 Rubric 与发布者/外部承接是两道不同的门。未知团队不能靠
+        # 技术题高分绕过项目的联合准入边界。
+        assessment["decision"] = "observe"
+        assessment["decision_reason"] = admission_reason
+        decision = "observe"
+    if decision == "report":
+        candidate.status = "reportable"
+    elif decision == "incomplete":
+        candidate.status = "rubric_incomplete"
+        candidate.rejection_reason = assessment["decision_reason"]
+    elif decision == "observe":
+        candidate.status = "observe"
+        candidate.rejection_reason = assessment["decision_reason"]
     else:
-        candidate.status = "watch"
+        candidate.status = "rejected"
+        candidate.rejection_reason = assessment["decision_reason"]
     return candidate
 
 
 def is_reportable(candidate: ParadigmCandidate) -> bool:
-    return not candidate.rejection_reason and (
-        candidate.total_score >= config.PARADIGM_MIN_SCORE
-        or (
-            candidate.is_formal_technical_report
-            and candidate.publisher_tier == "established"
-        )
+    return (
+        not candidate.rejection_reason
+        and candidate.rubric_assessment.get("decision") == "report"
     )
-
-
-def _unit(value: float) -> float:
-    return min(max(value, 0.0), 10.0) / 10.0
 
 
 def effective_solidity_score(candidate: ParadigmCandidate) -> float:
@@ -125,15 +80,26 @@ def _momentum_score(candidate: ParadigmCandidate) -> float:
     independent = sum(
         1
         for item in countable
-        if item.evidence_type
-        in {
-            EvidenceType.INDEPENDENT_REPLICATION,
-            EvidenceType.IMPLEMENTATION,
-            EvidenceType.COMMUNITY_DISCUSSION,
-            EvidenceType.SECONDARY_INTERPRETATION,
-            EvidenceType.CITATION,
-        }
-        and item.source != "huggingface-papers"
+        if (
+            item.evidence_type
+            in {
+                EvidenceType.INDEPENDENT_REPLICATION,
+                EvidenceType.PRODUCT_ADOPTION,
+            }
+            or (
+                item.evidence_type == EvidenceType.IMPLEMENTATION
+                and item.raw.get("independence") == "independent"
+            )
+            or (
+                item.evidence_type
+                in {
+                    EvidenceType.COMMUNITY_DISCUSSION,
+                    EvidenceType.SECONDARY_INTERPRETATION,
+                }
+                and item.source != "huggingface-papers"
+                and item.raw.get("relationship") != "author_self_release"
+            )
+        )
     )
     engagement = 0.0
     for item in countable:
@@ -249,7 +215,18 @@ def _matches_established_organization(value: str) -> bool:
 
 
 def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
-    signal_count, engagement, sources, independent = _substantive_secondary(candidate)
+    signal_count, engagement, sources, independent = substantive_secondary(candidate)
+    official_uptake = any(
+        item.evidence_type == EvidenceType.IMPLEMENTATION
+        and item.raw.get("independence") in {"official", None}
+        and item.raw.get("relationship")
+        in {"paper_linked_repository", "name_and_mechanism_match"}
+        and (
+            float(item.metrics.get("forks", 0) or 0) >= 3
+            or float(item.metrics.get("stars", 0) or 0) >= 50
+        )
+        for item in candidate.evidence
+    )
     official_release = any(
         item.raw.get("publisher_tier") == "established"
         and item.raw.get("origin_kind")
@@ -261,9 +238,27 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
     if candidate.publisher_tier == "established" and official_release:
         return True, "已核验的前沿组织通过官方研究入口发布，进入优先解读"
     if candidate.publisher_tier == "established" and (
-        independent or signal_count >= 1 or engagement >= 10
+        independent
+        or signal_count >= 1
+        or engagement >= 10
+        or official_uptake
     ):
-        return True, "研究团队具有可核验势能，且已出现实质外部响应"
+        return True, "研究团队具有可核验势能，且已出现实质外部响应或代码承接"
+    verified_people = sum(
+        verified_priority_researcher(profile) is not None
+        for profile in candidate.researchers
+    )
+    if candidate.publisher_tier == "verified" and official_uptake:
+        if verified_people >= 1:
+            return (
+                True,
+                "关键研究者身份已由公开主页/学术 ID 核验，且官方实现已出现实质代码承接",
+            )
+    if candidate.publisher_tier == "verified" and verified_people >= 2:
+        return (
+            True,
+            "多位长期前沿研究者的身份与研究方向已核验；技术 Rubric 通过后进入解读",
+        )
     strong_secondary = independent or (
         signal_count >= config.PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS
         and len(sources) >= 2
@@ -275,71 +270,3 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
     if candidate.publisher_tier == "verified":
         return False, "研究者身份可核验，但尚无足够二次讨论或独立承接，进入观察池"
     return False, "发布者背景未核验且缺少实质二次讨论，暂不占用周报篇幅"
-
-
-def _substantive_secondary(
-    candidate: ParadigmCandidate,
-) -> tuple[int, float, set[str], bool]:
-    signals = []
-    engagement = 0.0
-    sources: set[str] = set()
-    independent = False
-    for item in candidate.evidence:
-        qualifies = False
-        if item.evidence_type in {
-            EvidenceType.INDEPENDENT_REPLICATION,
-            EvidenceType.PRODUCT_ADOPTION,
-        }:
-            qualifies = True
-            independent = True
-        elif (
-            item.evidence_type
-            in {EvidenceType.COMMUNITY_DISCUSSION, EvidenceType.SECONDARY_INTERPRETATION}
-            and item.source != "huggingface-papers"
-            and item.raw.get("relationship") != "author_self_release"
-            and not item.raw.get("indexed_discovery_only")
-        ):
-            qualifies = True
-            if (
-                item.source == "x-title-search"
-                and float(item.metrics.get("author_followers", 0) or 0) >= 10_000
-            ):
-                independent = True
-        elif (
-            item.evidence_type == EvidenceType.CITATION
-            and float(item.metrics.get("citations", 0) or 0) >= 3
-        ):
-            qualifies = True
-        elif (
-            item.evidence_type == EvidenceType.IMPLEMENTATION
-            and item.raw.get("independence") == "independent"
-        ):
-            qualifies = True
-            independent = True
-        elif item.evidence_type == EvidenceType.IMPLEMENTATION and (
-            float(item.metrics.get("forks", 0) or 0) >= 3
-            or float(item.metrics.get("stars", 0) or 0) >= 50
-        ):
-            # 一个真实相关仓库出现明显 fork/star 承接，本身已是社区采用信号；
-            # 仍不把它误写成“独立复现”。
-            qualifies = True
-        if not qualifies:
-            continue
-        signals.append(item)
-        sources.add(item.source)
-        for key in (
-            "likes",
-            "retweets",
-            "reposts",
-            "comments",
-            "replies",
-            "score",
-            "stars",
-            "forks",
-            "citations",
-        ):
-            try:
-                engagement += max(float(item.metrics.get(key, 0) or 0), 0.0)
-            except (TypeError, ValueError):
-                continue
-    return len(signals), engagement, sources, independent

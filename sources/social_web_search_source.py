@@ -1,4 +1,4 @@
-"""用 Tavily 免费网页搜索补足 X、Reddit 与小红书的公开索引盲区。"""
+"""用 Tavily 网页搜索发现社区页面与独立技术解读线索。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class SocialWebSearchClient:
 
     def __init__(self, max_requests: int | None = None):
         self.max_requests = (
-            config.TAVILY_MAX_REQUESTS_PER_RUN
+            config.TAVILY_REQUEST_SAFETY_LIMIT
             if max_requests is None
             else max(max_requests, 0)
         )
@@ -37,45 +37,72 @@ class SocialWebSearchClient:
         if (
             not config.TAVILY_SOCIAL_SEARCH_ENABLED
             or not config.TAVILY_API_KEY
-            or not config.TAVILY_SOCIAL_SEARCH_DOMAINS
         ):
+            candidate.community_coverage["tavily_social_web"] = (
+                "未配置 Tavily，未执行跨站公开索引搜索"
+            )
             return []
         title, identifier = _search_identity(candidate)
         if not title:
             return []
         if not await self._reserve_request():
+            candidate.community_coverage["tavily_social_web"] = (
+                "触发用户显式配置的 Tavily credit safety limit；本候选未执行搜索"
+            )
             return []
-        query = f'"{_clean_query(title)}"'
+        query = (
+            f'"{_clean_query(title)}" '
+            "(analysis OR discussion OR notes OR implementation OR replication)"
+        )
         if identifier:
             query = f'{query} OR "{_clean_query(identifier)}"'
+        search_days = max(
+            [
+                config.SOURCING_LOOKBACK_DAYS,
+                *[
+                    int(item.raw.get("discovery_lookback_days", 0) or 0)
+                    for item in candidate.evidence
+                ],
+            ]
+        )
+        request_payload = {
+            "query": query,
+            "search_depth": "basic",
+            "max_results": config.TAVILY_SOCIAL_MAX_RESULTS,
+            "topic": "general",
+            "time_range": _time_range(search_days),
+            "include_answer": False,
+            "include_raw_content": False,
+            "auto_parameters": False,
+            "exact_match": True,
+            "include_usage": True,
+        }
+        domains = config.TAVILY_DISCOVERY_DOMAINS
+        if domains:
+            request_payload["include_domains"] = domains
         response = await client.post(
             TAVILY_SEARCH_API,
             headers={
                 "Authorization": f"Bearer {config.TAVILY_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={
-                "query": query,
-                "search_depth": "basic",
-                "max_results": config.TAVILY_SOCIAL_MAX_RESULTS,
-                "topic": "general",
-                "time_range": _time_range(config.SOURCING_LOOKBACK_DAYS),
-                "include_answer": False,
-                "include_raw_content": False,
-                "include_domains": config.TAVILY_SOCIAL_SEARCH_DOMAINS,
-                "auto_parameters": False,
-                "exact_match": True,
-                "include_usage": True,
-            },
+            json=request_payload,
         )
         if response.status_code >= 400:
+            candidate.community_coverage["tavily_social_web"] = (
+                f"已发起 Tavily 搜索，但返回 HTTP {response.status_code}"
+            )
             logger.warning("Tavily 社交网页搜索失败: HTTP %s", response.status_code)
             return []
+        candidate.community_coverage["tavily_social_web"] = (
+            "已执行社区与独立技术博客的公开网页索引搜索；结果非平台全量，"
+            "未直接读取的页面只作为发现线索"
+        )
         return _parse_results(response.json(), candidate, title)
 
     async def _reserve_request(self) -> bool:
         async with self._budget_lock:
-            if self.requests_used >= self.max_requests:
+            if self.max_requests > 0 and self.requests_used >= self.max_requests:
                 if not self._budget_warning_emitted:
                     logger.warning(
                         "Tavily 本轮请求预算已用完 (%s)，其余候选不再消耗 credits",
@@ -95,9 +122,7 @@ def _parse_results(
     results: list[TechnicalEvidence] = []
     for item in payload.get("results", []):
         url = str(item.get("url", "")).strip()
-        platform = _platform_from_url(url)
-        if not platform:
-            continue
+        platform = _platform_from_url(url) or "web"
         title = str(item.get("title", "")).strip() or f"{platform} 公开讨论"
         summary = str(item.get("content", "")).strip()
         if not _result_is_related(candidate, work_title, f"{title} {summary} {url}"):
@@ -118,7 +143,11 @@ def _parse_results(
                 published_at=str(item.get("published_date", "")),
                 metrics={"search_relevance": float(item.get("score", 0) or 0)},
                 raw={
-                    "relationship": "web_index_exact_work_search",
+                    "relationship": (
+                        "indexed_secondary_candidate"
+                        if platform == "web"
+                        else "web_index_exact_work_search"
+                    ),
                     "indexed_discovery_only": True,
                     "metrics_unavailable": True,
                     "coverage": "partial_web_index",

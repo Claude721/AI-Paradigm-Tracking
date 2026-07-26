@@ -73,6 +73,7 @@ class ParadigmReportGenerator:
             lookback_days=config.SOURCING_LOOKBACK_DAYS,
             stats=json.dumps(_public_stats(stats), ensure_ascii=False),
             candidate_dossiers=json.dumps(dossiers, ensure_ascii=False),
+            mental_model_method=self.skill_loader.load("technical-mental-model"),
         )
         client, model = self._get_client()
         response = None
@@ -119,6 +120,7 @@ class ParadigmReportGenerator:
                 ensure_ascii=False,
             ),
             previous_draft=previous_draft[:16_000],
+            mental_model_method=self.skill_loader.load("technical-mental-model"),
         )
         client, model = self._get_client()
         response = None
@@ -150,13 +152,27 @@ class ParadigmReportGenerator:
 
     @staticmethod
     def _empty_report(date: str, stats: dict) -> str:
+        coverage = stats.get("frontier_coverage") or {}
+        incomplete = [
+            value.get("label", domain_id)
+            for domain_id, value in (coverage.get("domains") or {}).items()
+            if value.get("status") in {"query_failed", "not_executed"}
+        ]
+        coverage_note = (
+            "\n\n但本轮存在**召回覆盖未闭合**："
+            + "、".join(incomplete)
+            + " 的查询失败或未执行。因此这是一份运行不完整的空报告，"
+            "不能解释为这些领域没有创新；请结合随信附带的运行审计重试。"
+            if incomplete
+            else ""
+        )
         return f"""# AI 技术范式雷达
 
-> {date} · 最近 {config.SOURCING_LOOKBACK_DAYS} 天
+> {date} · 发现窗口 {stats.get('discovery_lookback_days', config.SOURCING_LOOKBACK_DAYS)} 天
 
 ## 本期研究 Memo
 
-本期共扫描 {stats.get('origin_count', 0)} 篇论文、Technical Report 与官方技术博客，但没有材料同时跨过**技术外延、发布者可信度和外部承接**三道门槛。技术范式不会按周出现，这一期不为了维持篇幅把局部 benchmark 改进或作者的宏大叙事包装成趋势。
+本期共扫描 {stats.get('origin_count', 0)} 篇论文、Technical Report 与官方技术博客，但没有材料同时跨过**技术外延、发布者可信度和外部承接**三道门槛。技术范式不会按周出现，这一期不为了维持篇幅把局部 benchmark 改进或作者的宏大叙事包装成趋势。{coverage_note}
 
 ## 接下来真正值得盯的信号
 
@@ -189,8 +205,21 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         "admission_reason": item.admission_reason,
         "is_formal_technical_report": item.is_formal_technical_report,
         "marketing_overclaim_risk": item.marketing_overclaim_risk,
+        "frontier_domains": sorted(
+            {
+                str(domain)
+                for evidence in item.evidence
+                for domain in (evidence.raw.get("frontier_domains") or [])
+                if domain
+            }
+        ),
         "evidence": [_evidence_dossier(value) for value in item.evidence[:20]],
-        "researchers": [_researcher_dossier(value) for value in item.researchers[:3]],
+        "researchers": [
+            _researcher_dossier(value)
+            for value in item.researchers[
+                : config.PARADIGM_RESEARCHER_PROFILE_LIMIT
+            ]
+        ],
     }
 
 
@@ -207,6 +236,7 @@ def _evidence_dossier(item: TechnicalEvidence) -> dict:
         "metrics": item.metrics,
         "historical": bool(item.raw.get("historical")),
         "relationship": item.raw.get("relationship", ""),
+        "metric_delta": item.raw.get("metric_delta", {}),
     }
 
 
