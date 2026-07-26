@@ -136,6 +136,9 @@ class ParadigmCandidate:
     background: str = ""
     design_philosophy: str = ""
     technical_explanation: str = ""
+    # 只在通过论文级技术门槛、进入深挖阶段后生成。它是总编辑的内部
+    # 认知脚手架，不是最终报告里的固定栏目。
+    mental_model: dict[str, Any] = field(default_factory=dict)
     application_value: str = ""
     secondary_discussion_summary: str = ""
     objective_momentum_signals: list[str] = field(default_factory=list)

@@ -192,7 +192,16 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         for item in payload["candidate_decisions"]:
             verdict = "进入报告" if item.get("reportable") else "留在观察池"
             reason = item.get("admission_reason") or item.get("rejection_reason") or ""
-            lines.append(f"- **{item.get('name', '未命名路线')}**：{verdict}；{reason}")
+            components = item.get("mental_model_components") or []
+            scaffold = (
+                f"；心智模型脚手架已形成 {len(components)} 个有效部件"
+                if components
+                else "；心智模型脚手架未形成"
+            )
+            lines.append(
+                f"- **{item.get('name', '未命名路线')}**："
+                f"{verdict}；{reason}{scaffold}"
+            )
     else:
         lines.append("- 没有形成范式级候选。")
     lines.extend(["", "## 运行事件", ""])

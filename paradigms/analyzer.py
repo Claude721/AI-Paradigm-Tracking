@@ -303,7 +303,17 @@ class ParadigmSynthesizer:
                 "source": item.source,
                 "title": item.title,
                 "url": item.url,
-                "summary": item.summary[:600],
+                # 原点材料需要保留足够的机制细节，社区证据只保留支持
+                # 相关性判断所需的短摘要。该扩容只发生在通过技术门槛
+                # 的少量候选上，不增加全量论文抽取成本。
+                "summary": item.summary[
+                    : (
+                        2400
+                        if item.evidence_type.value
+                        in {"primary_paper", "technical_blog"}
+                        else 700
+                    )
+                ],
                 "authors": item.authors,
                 "metrics": item.metrics,
                 "historical": bool(item.raw.get("historical")),
@@ -321,6 +331,7 @@ class ParadigmSynthesizer:
             design_philosophy=candidate.design_philosophy,
             mechanism=candidate.mechanism,
             technical_explanation=candidate.technical_explanation,
+            mental_model=json.dumps(candidate.mental_model, ensure_ascii=False),
             lineage_parent=candidate.lineage_parent,
             evidence=json.dumps(evidence_payload, ensure_ascii=False),
         )
@@ -331,7 +342,7 @@ class ParadigmSynthesizer:
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=2600,
+                max_tokens=3800,
                 response_format={"type": "json_object"},
             )
             payload = parse_json_object(response.choices[0].message.content or "{}")
@@ -363,6 +374,13 @@ class ParadigmSynthesizer:
             momentum = _string_list(payload.get("objective_momentum_signals"))
             if momentum:
                 candidate.objective_momentum_signals = momentum
+            mental_model = payload.get("mental_model")
+            if isinstance(mental_model, dict):
+                candidate.mental_model = {
+                    str(key): value
+                    for key, value in mental_model.items()
+                    if value not in ("", [], {}, None)
+                }
             for payload_name, attribute in (
                 ("scope_reassessment", "scope_score"),
                 ("solidity_reassessment", "solidity_score"),

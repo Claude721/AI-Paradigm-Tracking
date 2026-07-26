@@ -174,6 +174,7 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         "design_philosophy": item.design_philosophy,
         "mechanism": item.mechanism,
         "technical_explanation": item.technical_explanation,
+        "mental_model": item.mental_model,
         "application_value": item.application_value,
         "why_now": item.why_now,
         "lineage_path": item.lineage_path,

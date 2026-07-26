@@ -14,7 +14,7 @@ import httpx
 import config
 from agents.llm_utils import parse_json_object
 from database.paradigm_store import ParadigmStore
-from paradigms.analyzer import ParadigmAnalyzer
+from paradigms.analyzer import ParadigmAnalyzer, ParadigmSynthesizer
 from paradigms.clustering import cluster_extractions
 from paradigms.enrichment import EvidenceEnricher
 from paradigms.models import (
@@ -69,6 +69,15 @@ def candidate(evidence: list[TechnicalEvidence] | None = None) -> ParadigmCandid
         design_philosophy="先学习可行动的状态变化，再决定动作。",
         mechanism="从无标注视频中学习离散潜在动作并预测未来状态。",
         technical_explanation="把视频变化压缩成离散潜在动作，并在该空间预测未来状态。",
+        mental_model={
+            "anchor_and_tension": "像素预测能生成画面，却没有可供行动使用的紧凑状态。",
+            "system_objects": ["潜在动作：由视频变化学习出的离散状态转移变量"],
+            "training_flow": ["视频片段进入编码器，状态变化被压缩为潜在动作"],
+            "inference_flow": ["当前状态与候选动作进入动力学模型，得到未来状态"],
+            "learning_signal": "未来状态预测误差迫使潜在动作保留可预测的变化。",
+            "minimal_example": "用两帧杯子移动的视频表示一次状态变化。",
+            "counterfactual_and_boundary": "拿掉动作条件后只能预测平均未来。",
+        },
         application_value="让机器人从互联网视频中获得可迁移的动态先验。",
         lineage_parent="video prediction world models",
         lineage_path=["video prediction", "latent-action world models"],
@@ -420,6 +429,54 @@ class ParadigmPipelineTests(unittest.TestCase):
             {"Sparse attention routing", "Residual expert composition"},
         )
 
+    def test_synthesis_builds_internal_mental_model_for_deep_candidates(self) -> None:
+        payload = {
+            "mental_model": {
+                "anchor_and_tension": "旧方法能预测画面，却不能把变化对应到行动。",
+                "system_objects": ["潜在动作：状态转移的离散表示"],
+                "training_flow": ["编码相邻视频帧", "用预测误差学习潜在动作"],
+                "inference_flow": ["读取当前状态", "预测候选动作后的未来状态"],
+                "learning_signal": "未来状态预测误差",
+                "minimal_example": "杯子从桌面左侧移动到右侧。",
+                "counterfactual_and_boundary": "没有动作条件时只能学习平均变化。",
+                "unresolved_interfaces": ["潜在动作如何与机器人控制量对齐"],
+            }
+        }
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=json.dumps(payload))
+                )
+            ]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(return_value=response)
+                )
+            )
+        )
+        item = candidate()
+        item.mental_model = {}
+        item.evidence[0].summary = "机制细节" * 1000
+        asyncio.run(
+            ParadigmSynthesizer(client=client, model="test").run([item])
+        )
+        self.assertEqual(
+            item.mental_model["learning_signal"], "未来状态预测误差"
+        )
+        self.assertIn(
+            "潜在动作如何与机器人控制量对齐",
+            item.mental_model["unresolved_interfaces"],
+        )
+        prompt = client.chat.completions.create.await_args.kwargs["messages"][0][
+            "content"
+        ]
+        self.assertGreater(len(prompt), 2400)
+        self.assertEqual(
+            _candidate_dossier(item)["mental_model"], item.mental_model
+        )
+
     def test_report_delivery_signature_prevents_weekly_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ParadigmStore(Path(directory) / "radar.db")
@@ -586,11 +643,14 @@ class ParadigmPipelineTests(unittest.TestCase):
             design_philosophy="philosophy",
             mechanism="mechanism",
             technical_explanation="explanation",
+            mental_model="{}",
             lineage_parent="video prediction",
             evidence="[]",
         )
         self.assertIn('"trend_interpretation"', synthesis)
         self.assertIn('"excluded_evidence_indices"', synthesis)
+        self.assertIn('"mental_model"', synthesis)
+        self.assertIn('"training_flow"', synthesis)
         self.assertIn('证据列表：[]', synthesis)
 
         editorial = SkillLoader().render(
@@ -602,6 +662,8 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         self.assertIn("约 450 到 650 个中文字", editorial)
         self.assertIn("不展示总分", editorial)
+        self.assertIn("最小实例", editorial)
+        self.assertIn("训练过程与推理过程必须分开", editorial)
 
         revision = SkillLoader().render(
             "weekly_memo_revision",

@@ -167,6 +167,7 @@ class ParadigmOrchestrator:
                     "publisher_tier": candidate.publisher_tier,
                     "evidence_count": len(candidate.evidence),
                     "researcher_count": len(candidate.researchers),
+                    "mental_model_components": sorted(candidate.mental_model),
                     "admission_reason": candidate.admission_reason,
                     "rejection_reason": candidate.rejection_reason,
                     "community_coverage": candidate.community_coverage,

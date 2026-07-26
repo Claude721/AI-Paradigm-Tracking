@@ -123,6 +123,18 @@ class WeeklyPipelineTests(unittest.TestCase):
                 "gate_reason": "技术外延过窄",
             }
         )
+        audit.record_candidate(
+            {
+                "name": "Example Route",
+                "reportable": True,
+                "admission_reason": "存在独立承接",
+                "mental_model_components": [
+                    "anchor_and_tension",
+                    "training_flow",
+                    "inference_flow",
+                ],
+            }
+        )
         with tempfile.TemporaryDirectory() as directory:
             result = audit.write(
                 {"origin_count": 1, "analysis_count": 1},
@@ -131,10 +143,14 @@ class WeeklyPipelineTests(unittest.TestCase):
             payload = json.loads(
                 Path(result["audit_json_path"]).read_text(encoding="utf-8")
             )
+            markdown = Path(result["audit_markdown_path"]).read_text(
+                encoding="utf-8"
+            )
         self.assertEqual(payload["llm_summary"]["llm_total_tokens"], 150)
         self.assertEqual(payload["llm_summary"]["llm_reasoning_tokens"], 8)
         self.assertNotIn("prompt", payload["llm_calls"][0])
         self.assertNotIn("response", payload["llm_calls"][0])
+        self.assertIn("心智模型脚手架已形成 3 个有效部件", markdown)
 
     def test_required_email_failure_fails_the_task(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
