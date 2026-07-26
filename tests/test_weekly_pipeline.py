@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -14,6 +16,7 @@ import config
 import main as app_main
 from agents.sourcing_agent import SourcingAgent
 from notifications.email_notifier import _send_sync, send_report_email
+from run_audit import RunAudit
 from sources.base import RawProject
 
 
@@ -62,6 +65,8 @@ class WeeklyPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "deal_flow_2026-07-18.md"
             report.write_text("# Weekly report", encoding="utf-8")
+            audit = Path(directory) / "run_audit_latest.md"
+            audit.write_text("# Audit", encoding="utf-8")
 
             with (
                 patch.object(config, "SMTP_HOST", "smtp.example.com"),
@@ -75,7 +80,12 @@ class WeeklyPipelineTests(unittest.TestCase):
             ):
                 _send_sync(
                     report,
-                    {"high_value_count": 2, "raw_count": 10, "saved_count": 2},
+                    {
+                        "high_value_count": 2,
+                        "raw_count": 10,
+                        "saved_count": 2,
+                        "audit_attachments": [str(audit)],
+                    },
                 )
 
             server = smtp.return_value.__enter__.return_value
@@ -84,6 +94,47 @@ class WeeklyPipelineTests(unittest.TestCase):
             message = server.send_message.call_args.args[0]
             self.assertEqual(message.get_filename(), None)
             self.assertEqual(message.get_payload()[1].get_filename(), report.name)
+            self.assertEqual(
+                message.get_payload()[2].get_filename(), audit.name
+            )
+
+    def test_run_audit_records_usage_and_decisions_without_model_content(self) -> None:
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=120,
+                completion_tokens=30,
+                total_tokens=150,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=8),
+                prompt_tokens_details=SimpleNamespace(cached_tokens=20),
+            )
+        )
+        audit = RunAudit()
+        audit.record_llm(
+            stage="paradigm_extraction",
+            role="sub",
+            model="qwen3.7-plus",
+            subject="Example Work",
+            response=response,
+        )
+        audit.record_origin(
+            {
+                "title": "Example Work",
+                "initial_gate_passed": False,
+                "gate_reason": "技术外延过窄",
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result = audit.write(
+                {"origin_count": 1, "analysis_count": 1},
+                output_dir=directory,
+            )
+            payload = json.loads(
+                Path(result["audit_json_path"]).read_text(encoding="utf-8")
+            )
+        self.assertEqual(payload["llm_summary"]["llm_total_tokens"], 150)
+        self.assertEqual(payload["llm_summary"]["llm_reasoning_tokens"], 8)
+        self.assertNotIn("prompt", payload["llm_calls"][0])
+        self.assertNotIn("response", payload["llm_calls"][0])
 
     def test_required_email_failure_fails_the_task(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

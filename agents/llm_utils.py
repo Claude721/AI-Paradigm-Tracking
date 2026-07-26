@@ -173,7 +173,10 @@ def parse_json_object(content: str) -> dict:
         try:
             data = json.loads(content)
         except json.JSONDecodeError as e2:
-            logger.warning(f"JSON 修复后解析仍失败，原始内容:\n{content}")
+            logger.warning(
+                "JSON 修复后解析仍失败；响应长度=%s，不把模型正文写入日志",
+                len(content),
+            )
             raise e2
 
     if not isinstance(data, dict):

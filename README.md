@@ -62,14 +62,20 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-至少填写 DashScope Key 与 OpenAlex 免费 Key。Semantic Scholar Key 是可选增强项；没有学术邮箱时留空即可，人物轨迹仍会通过 OpenAlex、ORCID 与已核验个人主页补齐。
+至少填写 DashScope Key 与 OpenAlex 免费 Key。Semantic Scholar Key 是可选增强项；没有学术邮箱时保持 `SEMANTIC_SCHOLAR_ENABLED=false` 且 Key 留空，程序会完整跳过，不会匿名调用。人物轨迹仍会通过 OpenAlex、ORCID 与已核验个人主页补齐。
 
 ```bash
 python main.py             # 立即执行一次
 python main.py --schedule  # 每周五按配置持续运行
 python main.py --report    # 不联网，重建最近报告并按配置发送邮件
 python main.py --status    # 查看模型配置
+python main.py --doctor    # 零网络检查配置是否齐全
+python main.py --smoke-test # 小成本真实检查接口；SMTP 只登录、不发邮件
 ```
+
+第一次完整运行前先执行 `python main.py --smoke-test`。它不会运行流水线、不会创建报告或修改范式数据库，结果保存在 `logs/smoke_test_latest.json`，且不记录密钥和响应正文。配置过但鉴权失败的接口会让命令返回非零；没有配置的可选信源只会明确显示为跳过。
+
+完整运行还会生成 `logs/run_audit_latest.md`、`logs/run_audit_latest.json` 和 `logs/current_run.log`。其中包含信源返回量、漏斗、每条材料/路线的结构化去留理由，以及各阶段模型 token 用量；不会保存 prompt、模型回答正文或模型私有推理。启用邮件后，Markdown 审计和本轮日志会随报告一起发送。
 
 定时参数：
 

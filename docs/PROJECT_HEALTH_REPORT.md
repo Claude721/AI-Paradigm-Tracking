@@ -1,10 +1,10 @@
 # AI 技术范式雷达体检报告
 
-> 2026-07-19 第四次更新。两轮 GitHub Actions 均已成功运行并完成邮件投递；本轮完成海内外前沿机构、具名实验室与研究者 Watchlist 重构，只进行了官方页面调研、本地编译、模拟与单元测试，没有请求真实项目 API 或发送邮件。
+> 2026-07-26 第五次更新。本轮从本地 `.env` 出发完成小成本真实接口冒烟、定向修复和离线回归；没有运行真实完整流水线，也没有发送邮件。
 
 ## 当前结论
 
-发现、分析、跨周去重、云端定时和 SMTP 投递主链路已经跑通。第二版真实交付仍暴露了两个根因：一是正式编辑生成失败后进入字段拼装降级路径，导致英文摘要和上游字段直接出现在报告；二是准入逻辑只强调机制本身，对发布团队背景、独立讨论和历史路线的新进展约束不足，促使系统每周从低声量单篇论文中硬找“新范式”。
+发现、分析、跨周去重、云端定时和 SMTP 投递主链路已经跑通。第三轮排查进一步定位到四个运行级根因：Semantic Scholar 在无 Key 时仍匿名并发调用；OpenReview 批量 Notes 端点触发浏览器 Challenge；OpenAlex 错误排序/宽查询召回无关论文；候选数量直接放大 Qwen、GitHub 与 Tavily 调用，且缺少可审计漏斗。
 
 本轮把主链路进一步调整为“高优先级原点召回 → 多机制假说 → 技术/发布者/外部承接联合准入 → 历史路线刷新 → 人物多源核验 → 研究总编辑 Memo”：
 
@@ -22,10 +22,15 @@
 - 前沿发布者目录升级为 97 个组织/具名实验室、70 位重点研究者和 33 个官方研究入口。主动召回、已建立组织、监测组织与重点研究者四层分离；新增中国大厂与模型厂商、海外 World Model/机器人组织、清华/北大及海外具名实验室。
 - 机构匹配从双向子串改为完整字段/分段精确匹配，整所大学和 `Seed`、`GLM`、`AI Lab` 等歧义裸词不会自动加权。重点研究者必须再由公开主页或学术 ID 核验，并且只贡献 `verified` 线索。
 - GitHub Variables 默认采用 `merge`：旧自定义项会保留，但不再覆盖和冻结仓库的新版内置目录。用户追加的研究页面没有 owner 元数据，只允许同域抓取并降级为 `verified`，不能依赖网页自报站点名冒充知名机构。
+- Semantic Scholar 改为“双开关”：只有 `SEMANTIC_SCHOLAR_ENABLED=true` 且存在获批 Key 时才请求；本地无学术邮箱时完整跳过，不再匿名消耗共享额度。
+- OpenReview 改用公开 `/notes/search` 主题检索并按 venue 过滤，已定向返回 `Ctrl-World` 等相关工作；OpenAlex 改为结构化查询、相关性优先和日期次优先，已定向返回 VLA/embodied AI 相关论文。
+- GitHub Search 没有 Token 时不匿名请求；出现 401/403/429 后本轮熔断。Tavily 增加整轮 hard cap，默认最多 12 个 basic request。
+- 原始材料最多分析 30 条、路线最多深挖 16 条。超出预算的原点和路线进入持久化 FIFO 队列，即使下一周离开 7 天召回窗口也不会丢失。
+- 每轮生成结构化审计与独立本轮日志，包含信源返回量、材料/路线去留理由和模型各阶段 token 用量；不保存 prompt、模型正文或私有推理。成功时随邮件发送，云端失败时也作为 artifact 保留。
 
 ## 可靠性边界
 
-- 单一论文、博客、OpenReview、Semantic Scholar、GitHub、HN 或 Follow Builders 信源失败时继续降级运行。
+- 单一论文、博客、OpenReview、Semantic Scholar、GitHub、HN 或 Follow Builders 信源失败时继续降级运行；真实 smoke test 则会对“已经配置却鉴权失败”的接口返回非零，避免把降级误当成健康。
 - 必需邮件投递失败会让任务失败；失败任务不登记交付，并回滚本次数据库变化，修复后可完整重试。
 - GitHub Actions 只在任务成功后保存去重数据库，避免云端失败状态污染下一周。
 - 报告编辑质量失败与 SMTP 失败一样会触发整轮回滚，可在修复后安全重跑。
@@ -35,8 +40,10 @@
 ## 验证结果
 
 - Python 静态编译通过。
-- 40 项本地单元测试通过，除原有 Technical Report、跨周刷新、社区证据和编辑质量用例外，新增覆盖名单引用完整性、中外必备机构、别名精确匹配、短别名边界、监测层不自动背书、重点研究者公开身份核验、官方入口 owner/tier、跨域链接拒绝、中文技术报告链接与 merge/replace 兼容语义。
+- 49 项本地单元测试通过，新增覆盖 Semantic Scholar 零匿名请求、OpenReview 搜索端点、OpenAlex 相关性排序、Tavily 整轮预算、Hugging Face PDF 下载、未分析原点/待深挖路线持久化、运行审计和邮件审计附件。
 - GitHub Actions YAML 语法通过本地解析。
 - 工作流已升级为 Node 24 Actions：`checkout@v6`、`setup-python@v6`、`upload-artifact@v7`；关闭 checkout 凭据持久化以消除无用的 post-job Git 清理。
+- 真实小成本验证已通过 Qwen `qwen3.7-plus`、arXiv、Hugging Face Daily Papers、OpenAlex Works/Authors、官方研究页、Hacker News、Tavily 和 QQ SMTP 登录（未发信）。OpenReview 在修复后通过定向复测。Semantic Scholar、Reddit 与 X 因未配置而按设计跳过。
+- 当前唯一已知的本地凭据阻塞是 `GITHUB_TOKEN`：GitHub `/rate_limit` 明确返回 HTTP 401；Token 长度、前缀和空白格式正常，因此需要在 GitHub 重新生成后替换，而不是继续改代码。
 
-下一次真实验收应重点检查：重要组织的官方 Technical Report 是否进入候选且新机制没有漏拆；报告是否宁可空缺也不收入未知团队、低外部响应的局部工作；旧路线的本周新增讨论是否被准确写成更新；人物背景与公开入口是否可核验；正文是否完全摆脱英文摘要直出。
+下一次真实验收先替换本地 GitHub Token，再运行 `python main.py --smoke-test`。全部已配置接口通过后，才执行一次受预算保护的完整流水线，重点检查重要 Technical Report 是否进入候选、审计漏斗能否解释每次去留、人物公开入口是否充分，以及正文是否完全摆脱英文摘要直出。

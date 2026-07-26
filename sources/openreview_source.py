@@ -12,18 +12,36 @@ import config
 from paradigms.models import EvidenceType, TechnicalEvidence
 
 logger = logging.getLogger(__name__)
-OPENREVIEW_NOTES_API = "https://api2.openreview.net/notes"
+OPENREVIEW_SEARCH_API = "https://api2.openreview.net/notes/search"
+DEFAULT_SEARCHES = [
+    "world model",
+    "reasoning model",
+    "vision language action",
+    "agent memory planning",
+    "self supervised video",
+    "test time learning",
+]
 
 
 class OpenReviewSource:
     source_name = "openreview"
 
-    def __init__(self, lookback_days: int = 7, limit: int = 300):
+    def __init__(
+        self,
+        lookback_days: int = 7,
+        limit: int = 50,
+        venues: list[str] | None = None,
+        searches: list[str] | None = None,
+        concurrency: int = 4,
+    ):
         self.lookback_days = max(lookback_days, 1)
-        self.limit = min(max(limit, 1), 1000)
+        self.limit = min(max(limit, 1), 100)
+        self.venues = config.OPENREVIEW_VENUES if venues is None else venues
+        self.searches = searches or DEFAULT_SEARCHES
+        self.concurrency = max(concurrency, 1)
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
-        if not config.OPENREVIEW_VENUES:
+        if not self.venues:
             return []
         try:
             return await self.fetch()
@@ -32,18 +50,35 @@ class OpenReviewSource:
             return []
 
     async def fetch(self) -> list[TechnicalEvidence]:
-        async with httpx.AsyncClient(timeout=30) as client:
-            tasks = [
-                client.get(
-                    OPENREVIEW_NOTES_API,
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        async def search_one(client, venue: str, query: str):
+            async with semaphore:
+                return await client.get(
+                    OPENREVIEW_SEARCH_API,
                     params={
-                        "content.venueid": venue,
+                        # /notes 目前可能要求浏览器 Challenge；官方 search
+                        # 端点仍允许公开检索，并支持 venueid 过滤。
+                        "query": query,
+                        "venueid": venue,
                         "limit": self.limit,
                         "sort": "tmdate:desc",
                         "details": "replyCount",
                     },
                 )
-                for venue in config.OPENREVIEW_VENUES
+
+        async with httpx.AsyncClient(
+            timeout=30,
+            follow_redirects=True,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "AI-Paradigm-Radar/3.2",
+            },
+        ) as client:
+            tasks = [
+                search_one(client, venue, query)
+                for venue in self.venues
+                for query in self.searches
             ]
             responses = await asyncio.gather(*tasks, return_exceptions=True)
 

@@ -7,6 +7,7 @@ import json
 import logging
 
 from agents.llm_utils import build_client, parse_json_object
+from run_audit import run_audit
 from skills.loader import SkillLoader
 
 from .models import ParadigmExtraction, TechnicalEvidence
@@ -59,6 +60,7 @@ class ParadigmAnalyzer:
                 "publisher_evidence": evidence.raw.get("publisher_evidence", ""),
             },
         )
+        response = None
         try:
             client, model = self._get_client()
             response = await client.chat.completions.create(
@@ -80,9 +82,24 @@ class ParadigmAnalyzer:
                 for item in payloads[:6]
                 if isinstance(item, dict)
             ]
+            run_audit.record_llm(
+                stage="paradigm_extraction",
+                role="sub",
+                model=model,
+                subject=evidence.title,
+                response=response,
+            )
             return parsed or [self._failed_extraction(evidence, "抽取失败: 结果为空")]
         except Exception as exc:
             logger.warning("范式抽取失败 [%s]: %s", evidence.title[:60], exc)
+            run_audit.record_llm(
+                stage="paradigm_extraction",
+                role="sub",
+                model=self.model,
+                subject=evidence.title,
+                response=response,
+                error=exc,
+            )
             return [self._failed_extraction(evidence, f"抽取失败: {exc}")]
 
     @staticmethod
@@ -195,6 +212,7 @@ class ResearcherTrajectoryAnalyzer:
             public_bio=profile.public_bio_excerpt,
             prior_affiliations=profile.prior_affiliations,
         )
+        response = None
         try:
             client, model = self._get_client()
             response = await client.chat.completions.create(
@@ -226,8 +244,23 @@ class ResearcherTrajectoryAnalyzer:
                 profile.research_trajectory = (
                     f"{profile.research_trajectory} 当前状态：{note}"
                 ).strip()
+            run_audit.record_llm(
+                stage="researcher_trajectory",
+                role="main",
+                model=model,
+                subject=f"{candidate.name} / {profile.name}",
+                response=response,
+            )
         except Exception as exc:
             logger.warning("研究轨迹分析失败 [%s]: %s", profile.name, exc)
+            run_audit.record_llm(
+                stage="researcher_trajectory",
+                role="main",
+                model=self.model,
+                subject=f"{candidate.name} / {profile.name}",
+                response=response,
+                error=exc,
+            )
             profile.research_trajectory = "研究轨迹自动分析失败；保留代表作供人工复核。"
 
 
@@ -291,6 +324,7 @@ class ParadigmSynthesizer:
             lineage_parent=candidate.lineage_parent,
             evidence=json.dumps(evidence_payload, ensure_ascii=False),
         )
+        response = None
         try:
             client, model = self._get_client()
             response = await client.chat.completions.create(
@@ -351,5 +385,20 @@ class ParadigmSynthesizer:
                     for index, item in enumerate(candidate.evidence)
                     if index not in excluded
                 ]
+            run_audit.record_llm(
+                stage="paradigm_synthesis",
+                role="main",
+                model=model,
+                subject=candidate.name,
+                response=response,
+            )
         except Exception as exc:
             logger.warning("范式综合失败 [%s]: %s", candidate.name, exc)
+            run_audit.record_llm(
+                stage="paradigm_synthesis",
+                role="main",
+                model=self.model,
+                subject=candidate.name,
+                response=response,
+                error=exc,
+            )

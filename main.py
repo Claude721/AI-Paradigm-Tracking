@@ -8,6 +8,8 @@ Usage:
     python main.py --status     # 查看当前配置状态
     python main.py --schedule   # 启动定时任务模式（默认每周五 09:00）
     python main.py --report     # 仅重新生成今日报告（不重新拉取数据）
+    python main.py --doctor     # 零网络静态配置检查
+    python main.py --smoke-test # 小成本真实接口检查，不发送邮件
 """
 
 from __future__ import annotations
@@ -46,6 +48,16 @@ def setup_logging() -> None:
     file_handler.setFormatter(log_formatter)
     handlers.append(file_handler)
 
+    # 每次命令单独覆盖一份本轮日志，便于邮件附件和 Actions 审计；滚动日志
+    # 仍保留 30 天用于本机连续排查。
+    current_file_handler = logging.FileHandler(
+        filename=log_dir / "current_run.log",
+        mode="w",
+        encoding="utf-8",
+    )
+    current_file_handler.setFormatter(log_formatter)
+    handlers.append(current_file_handler)
+
     logging.basicConfig(
         level=getattr(logging, config.LOG_LEVEL, logging.INFO),
         handlers=handlers,
@@ -76,8 +88,8 @@ def _check_env() -> None:
         )
     if not config.GITHUB_TOKEN:
         logger.info(
-            "GITHUB_TOKEN 未配置，GitHub API 限额为 60 次/小时"
-            "（配置后可提升到 5000 次/小时）"
+            "GITHUB_TOKEN 未配置，技术范式流水线会跳过 GitHub Search，"
+            "不会匿名消耗共享限额"
         )
 
 
@@ -96,6 +108,9 @@ def _print_model_banner() -> None:
 
 async def _run_pipeline_once() -> dict:
     """执行一次流水线；由 run_pipeline 负责失败回滚。"""
+    from run_audit import run_audit
+
+    run_audit.reset()
     _check_env()
     _print_model_banner()
     if config.PIPELINE_MODE == "legacy":
@@ -117,6 +132,13 @@ async def _run_pipeline_once() -> dict:
         else:
             report_path = await orchestrator.report_gen.generate([], stats)
         stats["report_path"] = str(report_path)
+
+    audit_summary = run_audit.write(stats)
+    stats.update(audit_summary)
+    stats["audit_attachments"] = [
+        audit_summary["audit_markdown_path"],
+        "logs/current_run.log",
+    ]
 
     from notifications.email_notifier import send_report_email
     email_sent = await send_report_email(Path(report_path), stats)
@@ -147,6 +169,14 @@ async def run_pipeline() -> dict:
             return await _run_pipeline_once()
         except Exception:
             logger.exception("本次任务失败，正在回滚本次数据库状态")
+            from run_audit import run_audit
+
+            run_audit.event("pipeline", "failed", "本轮失败并回滚数据库状态")
+            run_audit.write(
+                run_audit.last_stats
+                or {"pipeline_mode": config.PIPELINE_MODE},
+                status="failed",
+            )
             if existed_before:
                 shutil.copy2(backup_path, db_path)
             else:
@@ -156,6 +186,9 @@ async def run_pipeline() -> dict:
 
 async def regenerate_report() -> dict:
     """仅重新生成报告（不拉取新数据）"""
+    from run_audit import run_audit
+
+    run_audit.reset()
     if config.PIPELINE_MODE == "legacy":
         from database.store import ProjectStore
         from reports.generator import ReportGenerator
@@ -182,6 +215,12 @@ async def regenerate_report() -> dict:
     logger.info(f"报告已重新生成: {report_path}")
     from notifications.email_notifier import send_report_email
     stats["report_path"] = str(report_path)
+    audit_summary = run_audit.write(stats)
+    stats.update(audit_summary)
+    stats["audit_attachments"] = [
+        audit_summary["audit_markdown_path"],
+        "logs/current_run.log",
+    ]
     stats["email_sent"] = await send_report_email(Path(report_path), stats)
     return stats
 
@@ -256,6 +295,26 @@ def main() -> None:
         action="store_true",
         help="只做配置体检，不请求任何外部 API",
     )
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="小成本真实检查各接口；不会运行完整流水线或发送邮件",
+    )
+    parser.add_argument(
+        "--smoke-skip-llm",
+        action="store_true",
+        help="smoke test 中跳过 Qwen 请求",
+    )
+    parser.add_argument(
+        "--smoke-skip-smtp",
+        action="store_true",
+        help="smoke test 中跳过 SMTP 连接与登录",
+    )
+    parser.add_argument(
+        "--smoke-skip-tavily",
+        action="store_true",
+        help="smoke test 中跳过 Tavily，避免重复消耗 basic request credit",
+    )
     args = parser.parse_args()
 
     if args.setup:
@@ -273,6 +332,20 @@ def main() -> None:
     elif args.doctor:
         from healthcheck import print_checks
         print_checks()
+    elif args.smoke_test:
+        setup_logging()
+        from smokecheck import print_smoke_results, run_smoke_checks, smoke_failed
+
+        results = asyncio.run(
+            run_smoke_checks(
+                include_llm=not args.smoke_skip_llm,
+                include_smtp=not args.smoke_skip_smtp,
+                include_tavily=not args.smoke_skip_tavily,
+            )
+        )
+        print_smoke_results(results)
+        if smoke_failed(results):
+            raise SystemExit(1)
     else:
         setup_logging()
         asyncio.run(run_pipeline())

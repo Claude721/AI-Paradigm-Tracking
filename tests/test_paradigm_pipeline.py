@@ -7,11 +7,12 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
 import config
+from agents.llm_utils import parse_json_object
 from database.paradigm_store import ParadigmStore
 from paradigms.analyzer import ParadigmAnalyzer
 from paradigms.clustering import cluster_extractions
@@ -32,10 +33,16 @@ from reports.paradigm_generator import (
 from skills.loader import SkillLoader
 from sources.paradigm_evidence_source import _is_relevant_repository
 from sources.arxiv_source import ArxivSource
-from sources.priority_research_source import _discover_index_links
+from sources.openalex_source import OpenAlexSource
+from sources.openreview_source import OpenReviewSource
+from sources.priority_research_source import _discover_index_links, _download_url
 from sources.reddit_evidence_source import RedditEvidenceClient
 from sources.researcher_profile_source import ResearcherProfileClient
-from sources.social_web_search_source import _parse_results as parse_tavily_results
+from sources.semantic_scholar_source import SemanticScholarClient
+from sources.social_web_search_source import (
+    SocialWebSearchClient,
+    _parse_results as parse_tavily_results,
+)
 
 
 def paper(suffix: str = "1") -> TechnicalEvidence:
@@ -75,6 +82,13 @@ def candidate(evidence: list[TechnicalEvidence] | None = None) -> ParadigmCandid
 
 
 class ParadigmPipelineTests(unittest.TestCase):
+    def test_invalid_llm_json_log_does_not_dump_model_content(self) -> None:
+        sensitive = '{"field":"DO_NOT_LOG_THIS", BROKEN}'
+        with self.assertLogs("agents.llm_utils", level="WARNING") as captured:
+            with self.assertRaises(json.JSONDecodeError):
+                parse_json_object(sensitive)
+        self.assertNotIn("DO_NOT_LOG_THIS", "\n".join(captured.output))
+
     def test_unknown_low_volume_work_stays_in_observation_pool(self) -> None:
         item = candidate()
         with patch.object(config, "PARADIGM_MIN_SCORE", 65):
@@ -672,6 +686,131 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertEqual(profiles[0].name, "A. Researcher")
         self.assertTrue(
             any("OpenAlex 检索失败" in note for note in profiles[0].contact_search_notes)
+        )
+
+    def test_semantic_scholar_without_approved_key_never_opens_client(self) -> None:
+        with (
+            patch.object(config, "SEMANTIC_SCHOLAR_ENABLED", False),
+            patch.object(config, "SEMANTIC_SCHOLAR_API_KEY", ""),
+            patch("sources.semantic_scholar_source.httpx.AsyncClient") as client_cls,
+        ):
+            result = asyncio.run(SemanticScholarClient().enrich_paper(paper()))
+        self.assertEqual(result, (None, []))
+        client_cls.assert_not_called()
+
+    def test_openalex_orders_search_by_relevance_before_date(self) -> None:
+        response = httpx.Response(
+            200,
+            json={"results": []},
+            request=httpx.Request("GET", "https://api.openalex.org/works"),
+        )
+        transport = MagicMock()
+        transport.get = AsyncMock(return_value=response)
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch.object(config, "OPENALEX_API_KEY", "configured"),
+            patch("sources.openalex_source.httpx.AsyncClient", return_value=context),
+        ):
+            asyncio.run(
+                OpenAlexSource(searches=['"world model"'], per_query=2).fetch()
+            )
+        params = transport.get.await_args.kwargs["params"]
+        self.assertEqual(
+            params["sort"], "relevance_score:desc,publication_date:desc"
+        )
+        self.assertEqual(params["search"], '"world model"')
+
+    def test_openreview_uses_public_search_endpoint_instead_of_challenged_notes(self) -> None:
+        response = httpx.Response(
+            200,
+            json={"notes": []},
+            request=httpx.Request(
+                "GET", "https://api2.openreview.net/notes/search"
+            ),
+        )
+        transport = MagicMock()
+        transport.get = AsyncMock(return_value=response)
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with patch(
+            "sources.openreview_source.httpx.AsyncClient", return_value=context
+        ):
+            asyncio.run(
+                OpenReviewSource(
+                    venues=["ICLR.cc/2026/Conference"],
+                    searches=["world model"],
+                    limit=2,
+                ).fetch()
+            )
+        call = transport.get.await_args
+        self.assertTrue(call.args[0].endswith("/notes/search"))
+        self.assertEqual(call.kwargs["params"]["query"], "world model")
+        self.assertEqual(
+            call.kwargs["params"]["venueid"], "ICLR.cc/2026/Conference"
+        )
+
+    def test_tavily_budget_is_shared_across_candidates(self) -> None:
+        response = httpx.Response(
+            200,
+            json={"results": []},
+            request=httpx.Request("POST", "https://api.tavily.com/search"),
+        )
+        transport = MagicMock()
+        transport.post = AsyncMock(return_value=response)
+        client = SocialWebSearchClient(max_requests=1)
+        with (
+            patch.object(config, "TAVILY_SOCIAL_SEARCH_ENABLED", True),
+            patch.object(config, "TAVILY_API_KEY", "configured"),
+            patch.object(config, "TAVILY_SOCIAL_SEARCH_DOMAINS", ["reddit.com"]),
+        ):
+            asyncio.run(client.search(transport, candidate()))
+            asyncio.run(client.search(transport, candidate()))
+        self.assertEqual(transport.post.await_count, 1)
+        self.assertEqual(client.requests_used, 1)
+
+    def test_unanalyzed_discovery_remains_eligible_next_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            origin = paper()
+            store.mark_evidence([origin], analyzed=False)
+            selected, stats = store.plan_origins([origin])
+            self.assertEqual(selected, [origin])
+            self.assertEqual(stats["new"], 1)
+
+            store.mark_evidence([origin], analyzed=True)
+            selected, stats = store.plan_origins([origin])
+            self.assertEqual(selected, [])
+            self.assertEqual(stats["unchanged_skip"], 1)
+
+    def test_unanalyzed_origin_survives_after_discovery_window_moves_on(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            origin = paper()
+            store.mark_evidence([origin], analyzed=False)
+            backlog = store.load_pending_origins(exclude_fingerprints=set())
+        self.assertEqual([item.fingerprint for item in backlog], [origin.fingerprint])
+
+    def test_pending_deep_candidate_is_not_treated_as_discussion_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            item = candidate()
+            item.status = "pending_deep"
+            store.mark_evidence(item.evidence, analyzed=True)
+            store.save_candidates([item])
+            pending = store.load_pending_deep_candidates()
+            refresh = store.load_refresh_candidates()
+        self.assertEqual([value.key for value in pending], [item.key])
+        self.assertEqual(refresh, [])
+
+    def test_huggingface_blob_pdf_uses_download_endpoint(self) -> None:
+        self.assertEqual(
+            _download_url(
+                "https://huggingface.co/Qwen/Qwen3-Technical-Report/blob/main/report.pdf"
+            ),
+            "https://huggingface.co/Qwen/Qwen3-Technical-Report/resolve/main/report.pdf",
         )
 
 

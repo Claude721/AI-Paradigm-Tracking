@@ -131,6 +131,12 @@ TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 OPENALEX_API_KEY: str = os.getenv("OPENALEX_API_KEY", "")
 SEMANTIC_SCHOLAR_API_KEY: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
 
+# Semantic Scholar 不再匿名调用。未获批 API Key 时必须保持关闭，避免共享匿名
+# 额度在候选并发增强时连续触发 429。
+SEMANTIC_SCHOLAR_ENABLED: bool = _env_bool(
+    "SEMANTIC_SCHOLAR_ENABLED", False
+)
+
 # Tavily 免费层作为 X / Reddit / 小红书的公开网页索引兜底。它只能证明
 # “搜索引擎发现了这些页面”，不能替代平台官方的完整互动量。
 TAVILY_SOCIAL_SEARCH_ENABLED: bool = _env_bool(
@@ -146,6 +152,10 @@ TAVILY_SOCIAL_SEARCH_DOMAINS: list[str] = [
 ]
 TAVILY_SOCIAL_MAX_RESULTS: int = max(
     1, min(_env_int("TAVILY_SOCIAL_MAX_RESULTS", 12), 20)
+)
+# 每轮最多消耗的 Tavily basic search credits。候选数再多也不会无限调用。
+TAVILY_MAX_REQUESTS_PER_RUN: int = max(
+    0, _env_int("TAVILY_MAX_REQUESTS_PER_RUN", 12)
 )
 
 # Reddit 官方 Data API 必须先获得 Reddit 批准并使用 OAuth。商业用途还需
@@ -190,6 +200,9 @@ PRIORITY_RESEARCH_PAGES: list[str] = _merge_watchlist(
 )
 PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE: int = max(
     1, min(_env_int("PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE", 4), 12)
+)
+PRIORITY_RESEARCH_CONCURRENCY: int = max(
+    1, min(_env_int("PRIORITY_RESEARCH_CONCURRENCY", 6), 12)
 )
 
 # “已建立”与“监测”严格分层。别名只做实体精确归一，不使用任意子串匹配；
@@ -251,6 +264,14 @@ PARADIGM_MIN_NOVELTY: float = _env_float("PARADIGM_MIN_NOVELTY", 6.0)
 PARADIGM_MIN_SCOPE: float = _env_float("PARADIGM_MIN_SCOPE", 6.0)
 PARADIGM_MAX_DISCOVERY_ITEMS: int = _env_int(
     "PARADIGM_MAX_DISCOVERY_ITEMS", 100
+)
+# 原始召回与昂贵 LLM 分析分开限额。正式 Technical Report/官方发布按优先级
+# 排在前面；普通论文不会因为召回池达到 100 条就全部调用主模型。
+PARADIGM_MAX_ANALYSIS_ITEMS: int = max(
+    1, _env_int("PARADIGM_MAX_ANALYSIS_ITEMS", 30)
+)
+PARADIGM_MAX_DEEP_CANDIDATES: int = max(
+    1, _env_int("PARADIGM_MAX_DEEP_CANDIDATES", 16)
 )
 PARADIGM_MAX_REPORT_ITEMS: int = _env_int("PARADIGM_MAX_REPORT_ITEMS", 12)
 PARADIGM_ALLOW_UPDATES: bool = _env_bool("PARADIGM_ALLOW_UPDATES", True)

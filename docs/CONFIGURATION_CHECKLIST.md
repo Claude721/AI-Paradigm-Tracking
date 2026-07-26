@@ -64,10 +64,18 @@ Semantic Scholar（可选）：
 3. 填写：
 
 ```env
+SEMANTIC_SCHOLAR_ENABLED=true
 SEMANTIC_SCHOLAR_API_KEY=你的Semantic-Scholar-Key
 ```
 
-项目已经按照官方默认额度限制为每秒最多一个请求。Key 未获批时直接留空；引用增强可能更容易被限流，但人物身份仍会通过 OpenAlex、ORCID 与已核验个人主页补齐。
+项目已经按照官方默认额度限制为每秒最多一个请求。Key 未获批时使用：
+
+```env
+SEMANTIC_SCHOLAR_ENABLED=false
+SEMANTIC_SCHOLAR_API_KEY=
+```
+
+此时程序会完整跳过 Semantic Scholar，绝不会退回匿名请求；人物身份改由 OpenAlex、ORCID 与已核验个人主页补齐。
 
 GitHub：
 
@@ -82,7 +90,7 @@ GITHUB_TOKEN=你的GitHub-Token
 官方研究 Feed 推荐起步值：
 
 ```env
-RESEARCH_FEED_URLS=https://research.google/blog/rss/,https://deepmind.google/discover/blog/rss/,https://developer.nvidia.com/blog/feed,https://feeds.feedburner.com/nvidiablog,https://bair.berkeley.edu/blog/feed.xml
+RESEARCH_FEED_URLS=https://research.google/blog/rss/,https://bair.berkeley.edu/blog/feed.xml,https://openai.com/news/rss.xml
 ```
 
 只填写 RSS/Atom XML 地址，不能填写普通博客首页。单个 Feed 失效时系统会跳过，不影响其他 Feed。
@@ -93,6 +101,7 @@ RESEARCH_FEED_URLS=https://research.google/blog/rss/,https://deepmind.google/dis
 RESEARCH_WATCHLIST_MODE=merge
 PRIORITY_RESEARCH_PAGES=
 PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE=4
+PRIORITY_RESEARCH_CONCURRENCY=6
 ESTABLISHED_RESEARCH_ORGANIZATIONS=
 MONITORED_RESEARCH_ORGANIZATIONS=
 PRIORITY_RESEARCHERS=
@@ -124,9 +133,10 @@ TAVILY_API_KEY=tvly-你的Key
 TAVILY_SOCIAL_SEARCH_ENABLED=true
 TAVILY_SOCIAL_SEARCH_DOMAINS=x.com,twitter.com,reddit.com,xiaohongshu.com
 TAVILY_SOCIAL_MAX_RESULTS=12
+TAVILY_MAX_REQUESTS_PER_RUN=12
 ```
 
-在 Tavily 创建普通账号即可，不要求学术邮箱，也不要求信用卡。免费计划每月 1,000 credits；项目对每个候选采用一次 `basic` 组合搜索（1 credit），不会分别为三个平台重复消耗。搜索结果只能说明页面被公开索引，不能证明完整覆盖或用相关度替代点赞、评论等声量指标。
+在 Tavily 创建普通账号即可，不要求学术邮箱，也不要求信用卡。免费计划额度以 Tavily 控制台当前显示为准；项目对每个候选采用一次 `basic` 组合搜索，不会分别为三个平台重复消耗。`TAVILY_MAX_REQUESTS_PER_RUN` 是整轮硬预算，候选再多也不会超过它。搜索结果只能说明页面被公开索引，不能证明完整覆盖或用相关度替代点赞、评论等声量指标。
 
 Reddit 若要获得帖子分数、评论量和讨论正文，需要先向 Reddit 申请 Data API 访问。获批后配置：
 
@@ -194,6 +204,8 @@ PARADIGM_MIN_SCORE=65
 PARADIGM_MIN_NOVELTY=6
 PARADIGM_MIN_SCOPE=6
 PARADIGM_MAX_DISCOVERY_ITEMS=100
+PARADIGM_MAX_ANALYSIS_ITEMS=30
+PARADIGM_MAX_DEEP_CANDIDATES=16
 PARADIGM_MAX_REPORT_ITEMS=12
 PARADIGM_MAX_REFRESH_ITEMS=40
 PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS=2
@@ -201,9 +213,9 @@ PARADIGM_MIN_SECONDARY_ENGAGEMENT=50
 PARADIGM_ALLOW_UPDATES=true
 ```
 
-这里的分数只做内部排序。真正的准入顺序是：技术硬门槛 → 发布者/团队核验 → 独立讨论或承接。`PARADIGM_MAX_REFRESH_ITEMS` 控制每周重新检索新讨论的观察池规模；后两项只约束发布者背景尚不明确的候选，不会把作者本人的宣传帖计入独立讨论。
+这里的分数只做内部排序。真正的准入顺序是：技术硬门槛 → 发布者/团队核验 → 独立讨论或承接。`PARADIGM_MAX_ANALYSIS_ITEMS` 限制本轮机制抽取数量，`PARADIGM_MAX_DEEP_CANDIDATES` 限制调用外部证据与主模型深挖的路线数量；被预算延后的材料仍会保留到下轮。`PARADIGM_MAX_REFRESH_ITEMS` 控制每周重新检索新讨论的观察池规模；后两项只约束发布者背景尚不明确的候选，不会把作者本人的宣传帖计入独立讨论。
 
-第一次运行可能产生较多 Qwen 调用。如需先做低成本 smoke test，可临时把 `PARADIGM_MAX_DISCOVERY_ITEMS` 改为 `10`；确认成功后恢复为 `100` 再做正式首跑。
+第一次运行前必须先做专用 smoke test。它每个接口只取极少结果、模型只要求回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。
 
 ## E. 时间窗口与自动任务
 
@@ -230,38 +242,29 @@ SCHEDULE_TIMEZONE=Asia/Shanghai
 ```bash
 source venv/bin/activate
 python main.py --doctor
+python main.py --smoke-test
 ```
 
-只有以下项目全部为就绪后再首跑：
+`--doctor` 只检查“有没有配置”；`--smoke-test` 才真实检查“凭据和接口能不能用”。结果同时写入 `logs/smoke_test_latest.json`，其中不含密钥或响应正文。只有配置过的接口失败时命令才返回非零；明确未配置的可选接口显示 `skipped`。
+
+只有以下项目通过或明确跳过后再首跑：
 
 - [ ] 两个 Qwen 模型均为 `qwen3.7-plus`
 - [ ] OpenAlex 显示就绪
-- [ ] Semantic Scholar 显示就绪或明确接受降级运行
+- [ ] Semantic Scholar 有 Key 时通过；没有 Key 时显示“不会匿名请求”并跳过
 - [ ] OpenReview venue 数量正确
 - [ ] 研究 Feed 数量大于 0
 - [ ] 高优先级官方研究页面数量大于 0
 - [ ] GitHub Token 就绪
 - [ ] SMTP 显示配置完整
 
-建议先运行 10 篇 smoke test：
-
-```env
-PARADIGM_MAX_DISCOVERY_ITEMS=10
-```
+如果只想复核网络信源、不重复调用 Qwen 或 SMTP 登录：
 
 ```bash
-python main.py
+python main.py --smoke-test --smoke-skip-llm --smoke-skip-smtp --smoke-skip-tavily
 ```
 
-确认数据库、报告和邮件都成功后，把上限恢复为 100，再运行正式首轮：
-
-```env
-PARADIGM_MAX_DISCOVERY_ITEMS=100
-```
-
-```bash
-python main.py
-```
+上面的复核命令不会重复消耗 Qwen、SMTP 或 Tavily；第一次完整 smoke 应直接运行 `python main.py --smoke-test`，让 Tavily 做 1 个 basic request。全部关键项通过后再执行 `python main.py`；如果 `EMAIL_PUSH_ENABLED=true`，手动完整运行也会发送邮件。
 
 检查结果：
 

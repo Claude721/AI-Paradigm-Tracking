@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from urllib.parse import urlparse
@@ -18,6 +19,16 @@ TAVILY_SEARCH_API = "https://api.tavily.com/search"
 class SocialWebSearchClient:
     """搜索公开索引；结果是讨论线索，不是平台全量声量统计。"""
 
+    def __init__(self, max_requests: int | None = None):
+        self.max_requests = (
+            config.TAVILY_MAX_REQUESTS_PER_RUN
+            if max_requests is None
+            else max(max_requests, 0)
+        )
+        self.requests_used = 0
+        self._budget_lock = asyncio.Lock()
+        self._budget_warning_emitted = False
+
     async def search(
         self,
         client: httpx.AsyncClient,
@@ -31,6 +42,8 @@ class SocialWebSearchClient:
             return []
         title, identifier = _search_identity(candidate)
         if not title:
+            return []
+        if not await self._reserve_request():
             return []
         query = f'"{_clean_query(title)}"'
         if identifier:
@@ -59,6 +72,19 @@ class SocialWebSearchClient:
             logger.warning("Tavily 社交网页搜索失败: HTTP %s", response.status_code)
             return []
         return _parse_results(response.json(), candidate, title)
+
+    async def _reserve_request(self) -> bool:
+        async with self._budget_lock:
+            if self.requests_used >= self.max_requests:
+                if not self._budget_warning_emitted:
+                    logger.warning(
+                        "Tavily 本轮请求预算已用完 (%s)，其余候选不再消耗 credits",
+                        self.max_requests,
+                    )
+                    self._budget_warning_emitted = True
+                return False
+            self.requests_used += 1
+            return True
 
 
 def _parse_results(

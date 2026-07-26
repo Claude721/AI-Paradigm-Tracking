@@ -11,6 +11,16 @@ on:
         options:
           - "7"
           - "30"
+      reset_state:
+        description: 忽略旧数据库，从空状态开始本轮
+        required: true
+        default: false
+        type: boolean
+      smoke_only:
+        description: 只做小成本接口冒烟，不生成报告或发送邮件
+        required: true
+        default: true
+        type: boolean
   schedule:
     # 避开整点的 Actions 高峰；使用上海时区，无需手算 UTC。
     - cron: "15 9 * * 5"
@@ -41,6 +51,7 @@ jobs:
       MAIN_AGENT_MODEL: qwen3.7-plus
       MAIN_AGENT_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
       OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+      SEMANTIC_SCHOLAR_ENABLED: ${{ vars.SEMANTIC_SCHOLAR_ENABLED || 'false' }}
       SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
       GITHUB_TOKEN: ${{ github.token }}
       OPENREVIEW_VENUES: ${{ vars.OPENREVIEW_VENUES }}
@@ -48,15 +59,19 @@ jobs:
       RESEARCH_WATCHLIST_MODE: ${{ vars.RESEARCH_WATCHLIST_MODE }}
       PRIORITY_RESEARCH_PAGES: ${{ vars.PRIORITY_RESEARCH_PAGES }}
       PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE: ${{ vars.PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE }}
+      PRIORITY_RESEARCH_CONCURRENCY: ${{ vars.PRIORITY_RESEARCH_CONCURRENCY }}
       ESTABLISHED_RESEARCH_ORGANIZATIONS: ${{ vars.ESTABLISHED_RESEARCH_ORGANIZATIONS }}
       MONITORED_RESEARCH_ORGANIZATIONS: ${{ vars.MONITORED_RESEARCH_ORGANIZATIONS }}
       PRIORITY_RESEARCHERS: ${{ vars.PRIORITY_RESEARCHERS }}
       TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER_TOKEN }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      TAVILY_MAX_REQUESTS_PER_RUN: ${{ vars.TAVILY_MAX_REQUESTS_PER_RUN }}
       REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
       REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
       REDDIT_API_ACCESS_APPROVED: ${{ vars.REDDIT_API_ACCESS_APPROVED }}
       REDDIT_USER_AGENT: ${{ vars.REDDIT_USER_AGENT }}
+      PARADIGM_MAX_ANALYSIS_ITEMS: ${{ vars.PARADIGM_MAX_ANALYSIS_ITEMS }}
+      PARADIGM_MAX_DEEP_CANDIDATES: ${{ vars.PARADIGM_MAX_DEEP_CANDIDATES }}
       SOURCING_LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '7' }}
       EMAIL_PUSH_ENABLED: "true"
       EMAIL_PUSH_REQUIRED: "true"
@@ -87,39 +102,92 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: 恢复上一次去重状态
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
         id: restore-state
         env:
           GH_TOKEN: ${{ github.token }}
+          RESET_STATE: ${{ github.event_name == 'workflow_dispatch' && inputs.reset_state || 'false' }}
         run: |
-          artifact_url="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=paradigm-radar-state&per_page=100" --jq '.artifacts | map(select(.expired == false)) | sort_by(.created_at) | last | .archive_download_url // empty')"
-          if [ -n "$artifact_url" ]; then
-            gh api "$artifact_url" > /tmp/paradigm-radar-state.zip
-            unzip -o /tmp/paradigm-radar-state.zip
-            echo "restored=true" >> "$GITHUB_OUTPUT"
-          else
+          if [ "$RESET_STATE" = "true" ]; then
+            echo "用户要求重置状态，本轮不恢复旧数据库"
             echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          artifact_url="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=paradigm-radar-state&per_page=100" --jq '.artifacts | map(select(.expired == false)) | sort_by(.created_at) | last | .archive_download_url // empty')"
+          if [ -z "$artifact_url" ]; then
+            echo "没有可恢复的状态 artifact"
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mkdir -p /tmp/paradigm-radar-restore
+          gh api "$artifact_url" > /tmp/paradigm-radar-state.zip
+          unzip -oq /tmp/paradigm-radar-state.zip -d /tmp/paradigm-radar-restore
+
+          state_commit="$(jq -r '.commit_sha // empty' /tmp/paradigm-radar-restore/state-meta.json 2>/dev/null || true)"
+          if [ "$state_commit" != "$GITHUB_SHA" ]; then
+            echo "检测到代码版本变化，本轮从空数据库开始"
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ ! -f /tmp/paradigm-radar-restore/paradigm_radar.db ]; then
+            echo "状态 artifact 缺少数据库文件，本轮从空状态开始"
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mkdir -p database
+          cp /tmp/paradigm-radar-restore/paradigm_radar.db database/paradigm_radar.db
+          echo "已恢复同一代码版本的去重状态"
+          echo "restored=true" >> "$GITHUB_OUTPUT"
 
       - name: 配置体检
         run: python main.py --doctor
 
+      - name: 小成本真实接口冒烟
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_only }}
+        run: python main.py --smoke-test
+
       - name: 抓取、分析并发送邮件
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
         run: python main.py
 
+      - name: 记录状态对应的代码版本
+        if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
+        run: |
+          printf '{"commit_sha":"%s","run_id":"%s"}\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > database/state-meta.json
+
       - name: 保存跨周去重状态
-        if: success()
+        if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         uses: actions/upload-artifact@v7
         with:
           name: paradigm-radar-state
-          path: database/paradigm_radar.db
+          path: |
+            database/paradigm_radar.db
+            database/state-meta.json
           retention-days: 90
           if-no-files-found: error
 
       - name: 保存本期报告
-        if: success()
+        if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         uses: actions/upload-artifact@v7
         with:
           name: paradigm-radar-report-${{ github.run_id }}
           path: reports/output/*.md
           retention-days: 90
           if-no-files-found: error
+
+      - name: 保存运行日志与筛选审计
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: paradigm-radar-audit-${{ github.run_id }}
+          path: |
+            logs/current_run.log
+            logs/run_audit_latest.md
+            logs/run_audit_latest.json
+            logs/smoke_test_latest.json
+          retention-days: 90
+          if-no-files-found: warn

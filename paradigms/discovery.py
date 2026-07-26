@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 class DiscoveryBatch:
     origins: list[TechnicalEvidence]
     supporting: list[TechnicalEvidence]
+    source_counts: dict[str, int]
 
 
 class ParadigmDiscovery:
@@ -72,6 +73,18 @@ class ParadigmDiscovery:
         for batch in native_batches:
             origins.extend(batch)
 
+        source_counts = {
+            "arxiv": len(arxiv_raw),
+            "huggingface_daily_papers": len(hf_raw),
+            "follow_builders": len(follow_raw),
+        }
+        source_counts.update(
+            {
+                source.source_name: len(batch)
+                for source, batch in zip(self.evidence_sources, native_batches)
+            }
+        )
+
         origins = _merge_origins(origins)
         origins = sorted(
             origins,
@@ -86,7 +99,11 @@ class ParadigmDiscovery:
             len(origins),
             len(supporting),
         )
-        return DiscoveryBatch(origins=origins, supporting=supporting)
+        return DiscoveryBatch(
+            origins=origins,
+            supporting=supporting,
+            source_counts=source_counts,
+        )
 
 
 def _raw_to_origin(item: RawProject) -> TechnicalEvidence:

@@ -38,8 +38,14 @@ def collect_checks() -> list[Check]:
         Check(
             "Semantic Scholar",
             "引用/作者/代表作",
-            "ready" if config.SEMANTIC_SCHOLAR_API_KEY else "degraded",
-            "已配置 Key" if config.SEMANTIC_SCHOLAR_API_KEY else "可无 Key 低频使用，但限流与稳定性较弱",
+            "ready"
+            if config.SEMANTIC_SCHOLAR_ENABLED
+            and config.SEMANTIC_SCHOLAR_API_KEY
+            else "degraded",
+            "已显式启用并配置 Key"
+            if config.SEMANTIC_SCHOLAR_ENABLED
+            and config.SEMANTIC_SCHOLAR_API_KEY
+            else "未启用或未配置获批 Key；运行时完全跳过，不会匿名请求",
         ),
         Check(
             "OpenReview",
@@ -50,7 +56,7 @@ def collect_checks() -> list[Check]:
         Check(
             "官方研究 RSS/Atom",
             "研究博客发现",
-            "ready" if config.RESEARCH_FEED_URLS else "missing",
+            "ready" if config.RESEARCH_FEED_URLS else "degraded",
             f"已配置 {len(config.RESEARCH_FEED_URLS)} 个 Feed" if config.RESEARCH_FEED_URLS else "尚未配置 RESEARCH_FEED_URLS",
         ),
         Check(
@@ -83,14 +89,25 @@ def collect_checks() -> list[Check]:
             "GitHub",
             "实现/复现证据",
             "ready" if config.GITHUB_TOKEN else "degraded",
-            "Token 已配置" if config.GITHUB_TOKEN else "无 Token 时限额较低",
+            "Token 已配置；仍需用 --smoke-test 验证是否有效"
+            if config.GITHUB_TOKEN
+            else "未配置时跳过 Search API，不会匿名调用",
+        ),
+        Check(
+            "Follow Builders",
+            "KOL/播客/博客辅助信号",
+            "ready" if config.FOLLOW_BUILDERS_ENABLED else "degraded",
+            "公共 JSON Feed 已启用"
+            if config.FOLLOW_BUILDERS_ENABLED
+            else "已关闭；不会读取 KOL、播客与博客 Feed",
         ),
         Check("Hacker News Algolia", "社区讨论", "ready", "无需 Key；本检查未发请求"),
         Check(
             "Tavily 跨站公开索引",
             "X/Reddit/小红书讨论发现",
             "ready" if config.TAVILY_API_KEY else "degraded",
-            "已配置；只作为部分索引线索，不代表平台总声量"
+            f"已配置；整轮最多 {config.TAVILY_MAX_REQUESTS_PER_RUN} 次请求；"
+            "只作为部分索引线索，不代表平台总声量"
             if config.TAVILY_API_KEY
             else "未配置 TAVILY_API_KEY，运行时跳过跨站公开索引",
         ),

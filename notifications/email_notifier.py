@@ -75,7 +75,9 @@ def _send_sync(report_path: Path, stats: dict) -> None:
             f"扫描论文/技术博客：{stats.get('origin_count', 0)}\n"
             f"首次捕捉范式：{stats.get('new_paradigms', 0)}\n"
             f"实质进展更新：{stats.get('updated_paradigms', 0)}\n\n"
-            "完整证据、人物轨迹和公开专业联系方式见附件。"
+            f"LLM 调用：{stats.get('llm_call_count', 0)} 次\n"
+            f"LLM 合计 tokens：{stats.get('llm_total_tokens', 0)}\n\n"
+            "完整证据、人物轨迹、公开专业联系方式和运行审计见附件。"
         )
     else:
         body = (
@@ -93,6 +95,14 @@ def _send_sync(report_path: Path, stats: dict) -> None:
         subtype="markdown",
         filename=report_path.name,
     )
+    for attachment in _audit_attachments(stats):
+        subtype = "markdown" if attachment.suffix.casefold() == ".md" else "plain"
+        message.add_attachment(
+            attachment.read_bytes(),
+            maintype="text",
+            subtype=subtype,
+            filename=attachment.name,
+        )
 
     if config.SMTP_USE_SSL:
         with smtplib.SMTP_SSL(
@@ -107,3 +117,16 @@ def _send_sync(report_path: Path, stats: dict) -> None:
             server.starttls()
         server.login(config.SMTP_USERNAME, config.SMTP_PASSWORD)
         server.send_message(message)
+
+
+def _audit_attachments(stats: dict) -> list[Path]:
+    """只附加本轮显式登记且大小可控的审计文件。"""
+    results = []
+    for value in stats.get("audit_attachments", []):
+        path = Path(str(value))
+        try:
+            if path.is_file() and path.stat().st_size <= 2_000_000:
+                results.append(path)
+        except OSError:
+            continue
+    return results

@@ -92,20 +92,23 @@ class ParadigmStore:
         placeholders = ",".join("?" for _ in fingerprints)
         with self._connect() as conn:
             rows = conn.execute(
-                f"SELECT fingerprint, content_signature FROM evidence_state "
+                f"SELECT fingerprint, content_signature, last_analyzed_at FROM evidence_state "
                 f"WHERE fingerprint IN ({placeholders})",
                 fingerprints,
             ).fetchall()
-        existing = {fingerprint: signature for fingerprint, signature in rows}
+        existing = {
+            fingerprint: (signature, last_analyzed_at)
+            for fingerprint, signature, last_analyzed_at in rows
+        }
         selected = []
         stats = {"new": 0, "changed": 0, "unchanged_skip": 0}
         for item in origins:
             signature = _content_signature(item)
             previous = existing.get(item.fingerprint)
-            if previous is None:
+            if previous is None or previous[1] is None:
                 selected.append(item)
                 stats["new"] += 1
-            elif previous != signature:
+            elif previous[0] != signature:
                 selected.append(item)
                 stats["changed"] += 1
             else:
@@ -147,6 +150,34 @@ class ParadigmStore:
                         analyzed_at,
                     ),
                 )
+
+    def load_pending_origins(
+        self,
+        exclude_fingerprints: set[str] | None = None,
+        limit: int = 200,
+    ) -> list[TechnicalEvidence]:
+        """恢复已发现但尚未做机制抽取的原始材料，避免跨出窗口后丢失。"""
+        excluded = exclude_fingerprints or set()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload_json FROM evidence_state
+                WHERE last_analyzed_at IS NULL
+                  AND evidence_type IN ('primary_paper', 'technical_blog')
+                ORDER BY first_seen_at ASC
+                LIMIT ?
+                """,
+                (limit + len(excluded),),
+            ).fetchall()
+        results = []
+        for row in rows:
+            item = technical_evidence_from_dict(json.loads(row[0]))
+            if item.fingerprint in excluded:
+                continue
+            results.append(item)
+            if len(results) >= limit:
+                break
+        return results
 
     def prepare_report(
         self, candidates: list[ParadigmCandidate]
@@ -206,7 +237,7 @@ class ParadigmStore:
             rows = conn.execute(
                 """
                 SELECT payload_json FROM paradigms
-                WHERE status != 'rejected'
+                WHERE status NOT IN ('rejected', 'pending_deep')
                 ORDER BY last_seen_at DESC
                 LIMIT ?
                 """,
@@ -223,6 +254,33 @@ class ParadigmStore:
             if len(candidates) >= target_limit:
                 break
         return candidates
+
+    def load_pending_deep_candidates(
+        self,
+        exclude_keys: set[str] | None = None,
+        limit: int = 200,
+    ) -> list[ParadigmCandidate]:
+        """按 FIFO 恢复已抽取、但尚未完成外部证据深挖的路线。"""
+        excluded = exclude_keys or set()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload_json FROM paradigms
+                WHERE status = 'pending_deep'
+                ORDER BY first_seen_at ASC
+                LIMIT ?
+                """,
+                (limit + len(excluded),),
+            ).fetchall()
+        results = []
+        for row in rows:
+            candidate = candidate_from_dict(json.loads(row[0]))
+            if candidate.key in excluded:
+                continue
+            results.append(candidate)
+            if len(results) >= limit:
+                break
+        return results
 
     def save_candidates(self, candidates: list[ParadigmCandidate]) -> None:
         now = datetime.now(timezone.utc).isoformat()

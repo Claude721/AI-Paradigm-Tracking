@@ -11,6 +11,7 @@ from pathlib import Path
 import config
 from agents.llm_utils import build_client
 from paradigms.models import ParadigmCandidate, ResearcherProfile, TechnicalEvidence
+from run_audit import run_audit
 from skills.loader import SkillLoader
 
 logger = logging.getLogger(__name__)
@@ -74,13 +75,32 @@ class ParadigmReportGenerator:
             candidate_dossiers=json.dumps(dossiers, ensure_ascii=False),
         )
         client, model = self._get_client()
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=7600,
-        )
-        return _strip_code_fence(response.choices[0].message.content or "")
+        response = None
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=7600,
+            )
+            run_audit.record_llm(
+                stage="weekly_memo",
+                role="main",
+                model=model,
+                subject=f"{date} / {len(candidates)} routes",
+                response=response,
+            )
+            return _strip_code_fence(response.choices[0].message.content or "")
+        except Exception as exc:
+            run_audit.record_llm(
+                stage="weekly_memo",
+                role="main",
+                model=model,
+                subject=f"{date} / {len(candidates)} routes",
+                response=response,
+                error=exc,
+            )
+            raise
 
     async def _revise_editorial_report(
         self,
@@ -101,13 +121,32 @@ class ParadigmReportGenerator:
             previous_draft=previous_draft[:16_000],
         )
         client, model = self._get_client()
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=7600,
-        )
-        return _strip_code_fence(response.choices[0].message.content or "")
+        response = None
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=7600,
+            )
+            run_audit.record_llm(
+                stage="weekly_memo_revision",
+                role="main",
+                model=model,
+                subject=f"{date} / {'; '.join(violations)}",
+                response=response,
+            )
+            return _strip_code_fence(response.choices[0].message.content or "")
+        except Exception as exc:
+            run_audit.record_llm(
+                stage="weekly_memo_revision",
+                role="main",
+                model=model,
+                subject=f"{date} / {'; '.join(violations)}",
+                response=response,
+                error=exc,
+            )
+            raise
 
     @staticmethod
     def _empty_report(date: str, stats: dict) -> str:

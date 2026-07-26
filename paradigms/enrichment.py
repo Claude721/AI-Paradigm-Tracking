@@ -88,8 +88,8 @@ class EvidenceEnricher:
         candidate.evidence = list(
             {item.fingerprint: item for item in candidate.evidence}.values()
         )
-        # Semantic Scholar 可匿名但经常受共享限流影响。无论其是否成功，
-        # 都用当前论文作者建立人物种子，并通过 OpenAlex/ORCID 补齐身份。
+        # Semantic Scholar 只有在显式启用且配置获批 Key 时才调用。无论其是否
+        # 启用，都用当前论文作者建立人物种子，并通过 OpenAlex/ORCID 补齐身份。
         candidate.researchers = await self.researchers.enrich(
             lead, candidate.researchers
         )

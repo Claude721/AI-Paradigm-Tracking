@@ -32,13 +32,26 @@ class PriorityResearchPageSource:
 
     source_name = "priority-research-page"
 
-    def __init__(self, lookback_days: int = 7, per_page: int | None = None):
+    def __init__(
+        self,
+        lookback_days: int = 7,
+        per_page: int | None = None,
+        pages: list[str] | None = None,
+        concurrency: int | None = None,
+    ):
         self.lookback_days = max(lookback_days, 1)
         configured = config.PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE
         self.per_page = max(per_page if per_page is not None else configured, 1)
+        self.pages = config.PRIORITY_RESEARCH_PAGES if pages is None else pages
+        self.concurrency = max(
+            concurrency
+            if concurrency is not None
+            else config.PRIORITY_RESEARCH_CONCURRENCY,
+            1,
+        )
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
-        if not config.PRIORITY_RESEARCH_PAGES:
+        if not self.pages:
             return []
         try:
             return await self.fetch()
@@ -48,16 +61,23 @@ class PriorityResearchPageSource:
 
     async def fetch(self) -> list[TechnicalEvidence]:
         headers = {"User-Agent": "AI-Paradigm-Radar/3.1"}
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        async def bounded_get(client: httpx.AsyncClient, url: str):
+            async with semaphore:
+                return await client.get(url)
+
         async with httpx.AsyncClient(
             timeout=30, follow_redirects=True, headers=headers
         ) as client:
             index_responses = await asyncio.gather(
-                *(client.get(url) for url in config.PRIORITY_RESEARCH_PAGES),
+                *(bounded_get(client, url) for url in self.pages),
                 return_exceptions=True,
             )
             discovered: list[tuple[str, _ResearchLink]] = []
             for index_url, response in zip(
-                config.PRIORITY_RESEARCH_PAGES, index_responses
+                self.pages, index_responses
             ):
                 if isinstance(response, Exception):
                     logger.warning("官方研究入口读取失败 %s: %s", index_url, response)
@@ -71,15 +91,24 @@ class PriorityResearchPageSource:
                 allowed_links = [
                     link for link in links if source_link_allowed(index_url, link.url)
                 ]
-                for link in allowed_links[: self.per_page]:
+                recent_links = [
+                    link
+                    for link in allowed_links
+                    if not link.published_at
+                    or not _parse_date(link.published_at)
+                    or _parse_date(link.published_at) >= cutoff
+                ]
+                for link in recent_links[: self.per_page]:
                     discovered.append((index_url, link))
 
             detail_responses = await asyncio.gather(
-                *(client.get(link.url) for _, link in discovered),
+                *(
+                    bounded_get(client, _download_url(link.url))
+                    for _, link in discovered
+                ),
                 return_exceptions=True,
             )
 
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
         results: list[TechnicalEvidence] = []
         for (index_url, link), response in zip(discovered, detail_responses):
             if isinstance(response, Exception):
@@ -88,7 +117,7 @@ class PriorityResearchPageSource:
                 response.raise_for_status()
             except Exception:
                 continue
-            if _is_pdf_response(response, link.url):
+            if _is_pdf_response(response, str(response.url)):
                 try:
                     title, body, authors = _extract_pdf_document(response.content)
                 except Exception as exc:
@@ -335,6 +364,14 @@ def _is_pdf_response(response: httpx.Response, url: str) -> bool:
     return "application/pdf" in content_type or urlparse(url).path.casefold().endswith(
         ".pdf"
     )
+
+
+def _download_url(url: str) -> str:
+    """把 Hugging Face 的 HTML blob 页面改成真实文件下载地址。"""
+    parsed = urlparse(url)
+    if parsed.hostname == "huggingface.co" and "/blob/" in parsed.path:
+        return url.replace("/blob/", "/resolve/", 1)
+    return url
 
 
 def _extract_pdf_document(content: bytes) -> tuple[str, str, list[str]]:

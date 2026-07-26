@@ -26,9 +26,19 @@ class SemanticScholarClient:
         self._rate_lock = asyncio.Lock()
         self._last_request_at = 0.0
 
+    @property
+    def configured(self) -> bool:
+        """只有显式启用且存在获批 Key 时才允许请求。"""
+        return bool(
+            config.SEMANTIC_SCHOLAR_ENABLED
+            and config.SEMANTIC_SCHOLAR_API_KEY
+        )
+
     async def enrich_paper(
         self, evidence: TechnicalEvidence
     ) -> tuple[TechnicalEvidence | None, list[ResearcherProfile]]:
+        if not self.configured:
+            return None, []
         params = {
             "query": evidence.title,
             "limit": 5,

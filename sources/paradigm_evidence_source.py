@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from urllib.parse import quote
@@ -23,6 +24,10 @@ class CommunityEvidenceClient:
     def __init__(self):
         self.social_web = SocialWebSearchClient()
         self.reddit = RedditEvidenceClient()
+        self._github_lock = asyncio.Lock()
+        self._github_last_request_at = 0.0
+        self._github_circuit_open = False
+        self._github_failure_logged = False
 
     async def search(self, candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
@@ -46,7 +51,11 @@ class CommunityEvidenceClient:
 
     def coverage(self) -> dict[str, str]:
         return {
-            "github": "已尝试官方 API 搜索；单次失败会降级",
+            "github": (
+                "已配置 Token，并以搜索 API 限额串行查询；限流后本轮自动熔断"
+                if config.GITHUB_TOKEN
+                else "未配置 GitHub Token；本轮不调用匿名 Search API"
+            ),
             "hackernews": "已尝试 Algolia 搜索；单次失败会降级",
             "tavily_social_web": (
                 "已配置并尝试公开网页索引搜索 X、Reddit 与小红书；结果非平台全量"
@@ -68,13 +77,14 @@ class CommunityEvidenceClient:
     async def _github(
         self, client: httpx.AsyncClient, candidate: ParadigmCandidate
     ) -> list[TechnicalEvidence]:
+        if not config.GITHUB_TOKEN or self._github_circuit_open:
+            return []
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "AI-Paradigm-Radar/2.0",
         }
-        if config.GITHUB_TOKEN:
-            headers["Authorization"] = f"Bearer {config.GITHUB_TOKEN}"
+        headers["Authorization"] = f"Bearer {config.GITHUB_TOKEN}"
         primary_id = next(
             (
                 value
@@ -85,18 +95,34 @@ class CommunityEvidenceClient:
             "",
         )
         query_term = primary_id or candidate.name
-        response = await client.get(
-            "https://api.github.com/search/repositories",
-            headers=headers,
-            params={
-                "q": f'"{query_term}" in:name,description,readme',
-                "sort": "updated",
-                "order": "desc",
-                "per_page": 5,
-            },
-        )
+        # GitHub Search API 有独立且明显低于 Core API 的分钟限额。所有候选共享
+        # 一个串行节流器，避免并发候选在 Actions 中触发 secondary rate limit。
+        async with self._github_lock:
+            elapsed = time.monotonic() - self._github_last_request_at
+            if elapsed < 2.2:
+                await asyncio.sleep(2.2 - elapsed)
+            response = await client.get(
+                "https://api.github.com/search/repositories",
+                headers=headers,
+                params={
+                    "q": f'"{query_term}" in:name,description,readme',
+                    "sort": "updated",
+                    "order": "desc",
+                    "per_page": 5,
+                },
+            )
+            self._github_last_request_at = time.monotonic()
         if response.status_code >= 400:
-            logger.warning("GitHub 范式证据搜索失败: HTTP %s", response.status_code)
+            if response.status_code in {401, 403, 429}:
+                self._github_circuit_open = True
+            if not self._github_failure_logged:
+                logger.warning(
+                    "GitHub 范式证据搜索失败: HTTP %s；remaining=%s；本轮%s",
+                    response.status_code,
+                    response.headers.get("x-ratelimit-remaining", "unknown"),
+                    "停止后续 GitHub 搜索" if self._github_circuit_open else "继续降级",
+                )
+                self._github_failure_logged = True
             return []
         results = []
         cutoff = datetime.now(timezone.utc) - timedelta(

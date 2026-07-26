@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+import config
+
 from .models import ParadigmCandidate, ParadigmExtraction, normalize_paradigm_name
 
 
 def cluster_extractions(extractions: list[ParadigmExtraction]) -> list[ParadigmCandidate]:
-    accepted = [item for item in extractions if item.is_candidate]
+    accepted = [item for item in extractions if _passes_initial_gate(item)]
     groups: dict[str, list[ParadigmExtraction]] = defaultdict(list)
 
     for item in accepted:
@@ -17,6 +19,36 @@ def cluster_extractions(extractions: list[ParadigmExtraction]) -> list[ParadigmC
         groups[best_key or key].append(item)
 
     return [_build_candidate(key, items) for key, items in groups.items()]
+
+
+def _passes_initial_gate(item: ParadigmExtraction) -> bool:
+    """在社区搜索和主模型综合前挡住模型自报的局部小改动。"""
+    return not initial_gate_reason(item)
+
+
+def initial_gate_reason(item: ParadigmExtraction) -> str:
+    """返回未进入昂贵证据深挖的明确原因；空字符串表示通过。"""
+    if not item.is_candidate:
+        return item.rejection_reason or "机制抽取 Agent 判断不构成范式候选"
+    formal_report = (
+        item.evidence.raw.get("origin_kind") == "technical_report"
+        and item.evidence.raw.get("publisher_tier") == "established"
+    )
+    if formal_report:
+        return ""
+    if item.novelty_score < config.PARADIGM_MIN_NOVELTY:
+        return "新颖性没有跨过内部技术硬门槛"
+    if item.scope_score < config.PARADIGM_MIN_SCOPE:
+        return "技术外延过窄，仍是现有范式下的局部改进"
+    if item.incremental_penalty >= 7 and item.scope_score < 8:
+        return "增量改动惩罚过高，且没有足够大的能力边界变化"
+    if not item.canonical_name:
+        return "没有形成可归一的技术路线名称"
+    if not item.mechanism:
+        return "没有抽取出可复核的新机制"
+    if not item.problem_shift:
+        return "没有说明问题定义或能力边界发生了什么变化"
+    return ""
 
 
 def _find_similar_group(
