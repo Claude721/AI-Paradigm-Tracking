@@ -188,6 +188,45 @@ def _render_markdown(payload: dict[str, Any]) -> str:
             )
     else:
         lines.append("- 本轮未写入结构化领域覆盖；不能把零候选解释为零创新。")
+    recall_lanes = coverage.get("recall_lanes") or {}
+    lines.extend(["", "## 独立召回车道", ""])
+    if recall_lanes:
+        lane_labels = {
+            "covered": "成功并命中",
+            "searched_zero_hits": "成功但零命中",
+            "query_failed": "执行失败",
+        }
+        for name, value in recall_lanes.items():
+            lines.append(
+                f"- {name}："
+                f"{lane_labels.get(value.get('status'), value.get('status'))}；"
+                f"{value.get('hits', 0)} 条"
+            )
+    else:
+        lines.append("- 本轮没有记录术语、人物、报告和精确补录车道状态。")
+    official = coverage.get("official_pages") or {}
+    lines.extend(["", "## 官方研究入口健康度", ""])
+    if official:
+        lines.extend(
+            [
+                f"- 已检查：{official.get('checked_pages', 0)}/"
+                f"{official.get('total_pages', 0)}",
+                f"- 请求失败：{official.get('request_failed', 0)}；"
+                f"解析零链接：{official.get('parse_zero_links', 0)}；"
+                f"详情失败：{official.get('detail_failures', 0)}",
+                f"- 形成原点：{official.get('evidence', 0)}",
+            ]
+        )
+        for url, value in (official.get("pages") or {}).items():
+            if value.get("status") in {"request_failed", "parse_zero_links"} or int(
+                value.get("detail_failures", 0) or 0
+            ):
+                lines.append(
+                    f"  - {url}：{value.get('status')}；"
+                    f"详情失败 {value.get('detail_failures', 0)}"
+                )
+    else:
+        lines.append("- 本轮没有记录逐入口状态，不能确认公司研究页是否真实可解析。")
     lines.extend(
         [
             "",

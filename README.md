@@ -39,6 +39,7 @@ Product Hunt、普通 GitHub Trending 和产品热榜不再决定候选，只在
 系统先区分作者写下的宏大问题与论文真正做出的 intervention。模型不再凭整体印象直接输出“新颖性 7 分”，而是根据版本化 Rubric 回答带证据的二分/选择题；架构、算法、学习范式、数据、推理、Agent 闭环、具身、World Model、AI4S、系统与评测分别使用不同问题。程序按选项规则确定性计算初筛和最终决策：
 
 - 已核验前沿组织发布的正式 Technical Report 优先进入解读，并逐项检查其中可独立承接的新机制。
+- 大型 Technical Report 采用“两阶段抽取”：先建立紧凑机制索引，再逐机制回答类型 Rubric；单项格式失败不会清空整份报告，失败项保留到下轮重试。
 - 普通论文不能只凭一个机构署名晋级；但多位长期前沿研究者的身份与方向被公开主页/学术 ID 核验后，本身构成发布势能，仍需先通过技术 Rubric。
 - 发布者背景一般或无法核验时，需要跨来源的有内容讨论、独立复现、产品承接或高关注研究者的二次解读。
 - 作者本人在 X 或个人主页发布工作可用于核验身份、机构与既往轨迹，但不能把自己的宣传转化为“社区已经验证”。
@@ -47,7 +48,7 @@ Product Hunt、普通 GitHub Trending 和产品热榜不再决定候选，只在
 
 Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，可长期增删问题、调整 option 权重与阶段阈值。每周分析数量由实际召回和 Rubric 结果共同决定，不固定取前 100、30 或 16 个；Rubric 分数与回答只进入审计，不进入最终报告。
 
-行业发现范围位于 [`taxonomy/frontier_landscape.json`](taxonomy/frontier_landscape.json)。每次审计都会逐领域显示已查询/零命中/失败，避免“报告为零”掩盖信源覆盖故障。数据库为空或覆盖地图升级时自动回看 60 天；正常周更采用至少 14 天重叠窗口并由数据库去重。T‑Rex 被保留为离线黄金样例，用于约束触觉具身召回、正文与人物补水、官方仓库/独立讨论分账及跨周路线合并，但生产逻辑没有把它写成论文白名单。
+行业发现范围位于 [`taxonomy/frontier_landscape.json`](taxonomy/frontier_landscape.json)。发现层不是一张关键词表，而是并行运行领域术语、重点研究者完整姓名、正式文档类型、官方研究索引、Hugging Face 策展和人工精确补录等独立车道。每次审计同时显示逐领域状态、每条召回车道和逐个官方入口健康度，避免“报告为零”掩盖某家公司页面解析失败。数据库为空或覆盖地图升级时自动回看 60 天；正常周更重叠扫描 30 天并由数据库去重。T‑Rex 与 Kimi‑K3 被保留为两类离线黄金样例，但生产逻辑没有把论文标题写成白名单。
 
 ## 每周交付物
 
@@ -87,7 +88,8 @@ python main.py --smoke-test # 小成本真实检查接口；SMTP 只登录、不
 
 ```env
 SOURCING_LOOKBACK_DAYS=7
-PARADIGM_RECALL_OVERLAP_DAYS=14
+PARADIGM_RECALL_OVERLAP_DAYS=30
+PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED=true
 PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
 SCHEDULE_DAY_OF_WEEK=fri
 SCHEDULE_HOUR=9
@@ -95,7 +97,7 @@ SCHEDULE_MINUTE=0
 SCHEDULE_TIMEZONE=Asia/Shanghai
 ```
 
-如需观察最近一个月，将 `SOURCING_LOOKBACK_DAYS` 改为 `30`。默认周更实际重叠扫描 14 天，只交付数据库中未处理或发生实质变化的内容；这能修复上周接口失败、Actions 延迟或索引晚到，且不会重复调用 LLM 分析已经处理的材料。
+如需把交付范围改为最近一个月，将 `SOURCING_LOOKBACK_DAYS` 改为 `30`。默认周报仍只交付 7 天新增，但发现层重叠扫描 30 天，只把数据库中未处理或发生实质变化的材料送入分析；这能修复接口失败、Actions 延迟、索引晚到和发布页稍后补挂完整报告，不会重复调用 LLM 分析已经处理的材料。
 
 ## 邮件推送
 

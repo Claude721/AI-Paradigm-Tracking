@@ -14,6 +14,7 @@ import httpx
 
 import config
 from paradigms.models import ResearcherProfile, TechnicalEvidence
+from paradigms.reputation import resolve_organization
 
 logger = logging.getLogger(__name__)
 OPENALEX_AUTHORS = "https://api.openalex.org/authors"
@@ -351,37 +352,55 @@ def _seed_profiles(
         for name, values in (evidence.raw.get("author_affiliations") or {}).items()
         if name and isinstance(values, list)
     }
+    individual_authors = [
+        name
+        for name in evidence.authors
+        if name and not _is_collective_author(name)
+    ]
+    has_collective_signature = len(individual_authors) != len(evidence.authors)
     selected: list[str] = []
     # 研究负责人选择是分层配额，不是论文作者列表的机械截断：
     # 先保留最可能主导方法的前三位，再保留末位/资深作者和名单中的长期
     # 前沿研究者，最后补入项目页明确标注的其他贡献角色。
-    selected.extend(evidence.authors[:3])
-    if len(evidence.authors) > 1:
-        selected.append(evidence.authors[-1])
+    selected.extend(individual_authors[:3])
+    if (
+        len(individual_authors) > 1
+        and not has_collective_signature
+        and len(individual_authors) <= 50
+    ):
+        selected.append(individual_authors[-1])
     priority_names = {
         re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", value.casefold())
         for value in config.PRIORITY_RESEARCHERS
     }
     selected.extend(
         name
-        for name in evidence.authors
+        for name in individual_authors
         if re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", name.casefold())
         in priority_names
     )
-    selected.extend(roles)
+    selected.extend(name for name in roles if not _is_collective_author(name))
     selected = list(dict.fromkeys(name for name in selected if name))[:limit]
 
     for name in selected:
         if not name:
             continue
         index = evidence.authors.index(name) if name in evidence.authors else -1
+        individual_index = (
+            individual_authors.index(name) if name in individual_authors else -1
+        )
         role = roles.get(name, "")
         if not role:
-            if index == 0:
+            if individual_index == 0 and index == 0:
                 role = "第一作者"
-            elif index == len(evidence.authors) - 1 and index > 0:
+            elif individual_index == 0:
+                role = "第一位具名作者/贡献角色待核验"
+            elif (
+                individual_index == len(individual_authors) - 1
+                and individual_index > 0
+            ):
                 role = "末位作者/资深作者线索"
-            elif 0 < index < 3:
+            elif 0 < individual_index < 3:
                 role = "前列作者/共同一作待核验"
             else:
                 role = "共同作者"
@@ -455,6 +474,19 @@ def _seed_profiles(
             _note(profile, "已从论文官方项目页获得公开职业邮箱")
         _note(profile, "已从当前论文作者列表建立身份种子")
     return list(by_name.values())[:limit]
+
+
+def _is_collective_author(name: str) -> bool:
+    """团队/联盟署名用于机构归属，不能伪装成需要找联系方式的个人。"""
+    normalized = re.sub(r"\s+", " ", name).strip().casefold()
+    if resolve_organization(name) is not None:
+        return True
+    return bool(
+        re.search(
+            r"(?:\bteam\b|\bconsortium\b|\bcollaboration\b|研究团队|课题组)$",
+            normalized,
+        )
+    )
 
 
 def _note(profile: ResearcherProfile, value: str) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import xml.etree.ElementTree as ET
@@ -10,7 +11,13 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 import config
-from paradigms.landscape import arxiv_query_plan, classify_frontier_domains
+from paradigms.landscape import (
+    arxiv_priority_author_query_plan,
+    arxiv_query_plan,
+    classify_frontier_domains,
+)
+from paradigms.publication import classify_publication
+from paradigms.reputation import resolve_organization
 
 from .base import BaseSource, RawProject
 
@@ -18,10 +25,24 @@ logger = logging.getLogger(__name__)
 
 ARXIV_API = "https://export.arxiv.org/api/query"
 
-ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom"}
+ARXIV_NS = {
+    "atom": "http://www.w3.org/2005/Atom",
+    "arxiv": "http://arxiv.org/schemas/atom",
+}
 
 # 保留公开常量供体检和测试读取；事实来源是版本化覆盖地图。
 SEARCH_QUERIES = [item["query"] for item in arxiv_query_plan()]
+TECHNICAL_REPORT_QUERY = (
+    '(ti:"technical report" OR ti:"system report" OR ti:"research report" '
+    'OR ti:"whitepaper" OR ti:"white paper" OR ti:"system card" '
+    'OR ti:"model card" OR abs:"technical report" '
+    'OR co:"technical report" OR co:"tech report" OR co:"system report" '
+    'OR co:"whitepaper" OR co:"white paper" OR co:"system card" '
+    'OR co:"model card") AND '
+    "(cat:cs.AI OR cat:cs.CL OR cat:cs.LG OR cat:cs.CV OR cat:cs.RO "
+    "OR cat:cs.DC OR cat:cs.AR OR cat:eess.SY OR cat:q-bio.BM "
+    "OR cat:q-bio.GN OR cat:physics.comp-ph OR cat:cond-mat.mtrl-sci)"
+)
 
 
 class ArxivSource(BaseSource):
@@ -42,13 +63,11 @@ class ArxivSource(BaseSource):
         )
         self.executed_query_groups: set[str] = set()
         self.failed_query_groups: set[str] = set()
+        self.executed_recall_lanes: set[str] = set()
+        self.failed_recall_lanes: set[str] = set()
+        self.recall_lane_hits: dict[str, int] = {}
 
     async def fetch(self) -> list[RawProject]:
-        report_query = (
-            '(ti:"technical report" OR ti:"system report" OR abs:"technical report") AND '
-            "(cat:cs.AI OR cat:cs.CL OR cat:cs.LG OR cat:cs.CV OR cat:cs.RO "
-            "OR cat:cs.DC OR cat:q-bio.BM OR cat:physics.comp-ph)"
-        )
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             results: list[RawProject] = []
             for query_spec in arxiv_query_plan():
@@ -69,33 +88,59 @@ class ArxivSource(BaseSource):
                     )
                     results.extend(batch)
                     self.executed_query_groups.add(group)
+                    self._record_lane(f"landscape:{group}", len(batch))
                 except Exception as exc:
                     self.failed_query_groups.add(group)
+                    self.failed_recall_lanes.add(f"landscape:{group}")
                     logger.warning("arXiv 覆盖查询失败 [%s]: %s", group, exc)
 
+            if config.PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED:
+                for query_spec in arxiv_priority_author_query_plan(
+                    config.PRIORITY_RESEARCHERS
+                ):
+                    lane = str(query_spec["group"])
+                    try:
+                        batch = await self._fetch_query(
+                            client,
+                            str(query_spec["query"]),
+                            query_group="priority_researchers",
+                            result_limit=(
+                                max(self.max_results - len(results), 0)
+                                if self.max_results
+                                else None
+                            ),
+                        )
+                        results.extend(batch)
+                        self._record_lane(lane, len(batch))
+                    except Exception as exc:
+                        self.failed_recall_lanes.add(lane)
+                        logger.warning("arXiv 重点研究者召回失败 [%s]: %s", lane, exc)
+
             try:
-                results.extend(
-                    await self._fetch_query(
-                        client,
-                        report_query,
-                        force_technical_report=True,
-                        query_group="technical_reports",
-                        result_limit=(
-                            max(self.max_results - len(results), 0)
-                            if self.max_results
-                            else None
-                        ),
-                    )
+                batch = await self._fetch_query(
+                    client,
+                    TECHNICAL_REPORT_QUERY,
+                    force_technical_report=True,
+                    query_group="technical_reports",
+                    result_limit=(
+                        max(self.max_results - len(results), 0)
+                        if self.max_results
+                        else None
+                    ),
                 )
+                results.extend(batch)
+                self._record_lane("technical_documents", len(batch))
             except Exception as exc:
+                self.failed_recall_lanes.add("technical_documents")
                 logger.warning("arXiv Technical Report 专项查询失败: %s", exc)
 
             if self.seed_arxiv_ids:
                 try:
-                    results.extend(
-                        await self._fetch_seed_ids(client, self.seed_arxiv_ids)
-                    )
+                    batch = await self._fetch_seed_ids(client, self.seed_arxiv_ids)
+                    results.extend(batch)
+                    self._record_lane("explicit_seeds", len(batch))
                 except Exception as exc:
+                    self.failed_recall_lanes.add("explicit_seeds")
                     logger.warning("arXiv 精确补录查询失败: %s", exc)
 
         if self.failed_query_groups and not self.executed_query_groups:
@@ -109,6 +154,28 @@ class ArxivSource(BaseSource):
             reverse=True,
         )
         return deduped[: self.max_results] if self.max_results else deduped
+
+    def recall_coverage(self) -> dict[str, dict[str, object]]:
+        lanes = set(self.recall_lane_hits) | self.failed_recall_lanes
+        return {
+            lane: {
+                "status": (
+                    "query_failed"
+                    if lane in self.failed_recall_lanes
+                    else (
+                        "searched_zero_hits"
+                        if self.recall_lane_hits.get(lane, 0) == 0
+                        else "covered"
+                    )
+                ),
+                "hits": self.recall_lane_hits.get(lane, 0),
+            }
+            for lane in sorted(lanes)
+        }
+
+    def _record_lane(self, lane: str, hits: int) -> None:
+        self.executed_recall_lanes.add(lane)
+        self.recall_lane_hits[lane] = self.recall_lane_hits.get(lane, 0) + hits
 
     async def _fetch_query(
         self,
@@ -161,9 +228,9 @@ class ArxivSource(BaseSource):
     async def _fetch_seed_ids(
         self, client: httpx.AsyncClient, arxiv_ids: list[str]
     ) -> list[RawProject]:
-        response = await client.get(
-            ARXIV_API,
-            params={
+        response = await self._get_with_retry(
+            client,
+            {
                 "id_list": ",".join(arxiv_ids),
                 "max_results": len(arxiv_ids),
             },
@@ -183,9 +250,9 @@ class ArxivSource(BaseSource):
         *,
         start: int = 0,
     ) -> httpx.Response:
-        response = await client.get(
-            ARXIV_API,
-            params={
+        return await self._get_with_retry(
+            client,
+            {
                 "search_query": query,
                 "start": start,
                 "max_results": max_results,
@@ -195,8 +262,37 @@ class ArxivSource(BaseSource):
                 "sortOrder": "descending",
             },
         )
-        response.raise_for_status()
-        return response
+
+    async def _get_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        params: dict[str, object],
+    ) -> httpx.Response:
+        """arXiv export 偶发超时；做一次短退避重试，并保留最终故障给覆盖审计。"""
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                response = await client.get(ARXIV_API, params=params)
+                if response.status_code == 429 or response.status_code >= 500:
+                    response.raise_for_status()
+                response.raise_for_status()
+                return response
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                last_error = exc
+                retryable_status = (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and (
+                        exc.response.status_code == 429
+                        or exc.response.status_code >= 500
+                    )
+                )
+                if attempt == 1 or (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and not retryable_status
+                ):
+                    raise
+                await asyncio.sleep(0.75)
+        raise RuntimeError("arXiv 请求重试后仍失败") from last_error
 
     def _page_state(
         self, xml_text: str, *, ignore_lookback: bool = False
@@ -256,6 +352,7 @@ class ArxivSource(BaseSource):
                 c.get("term", "")
                 for c in entry.findall("atom:category", ARXIV_NS)
             ]
+            arxiv_comment = entry.findtext("arxiv:comment", "", ARXIV_NS).strip()
             matched_domains = classify_frontier_domains(
                 title, summary, " ".join(categories)
             )
@@ -269,10 +366,35 @@ class ArxivSource(BaseSource):
                 }
                 for author in authors
             )
-            is_report = (
-                force_technical_report
-                or "technical report" in title.casefold()
-                or "system report" in title.casefold()
+            classification = classify_publication(
+                title=title,
+                summary=summary,
+                metadata=arxiv_comment,
+                url=link,
+                authors=authors,
+                discovered_by_report_query=force_technical_report,
+            )
+            origin_kind = classification.origin_kind
+            classification_reason = classification.reason
+            is_report = origin_kind == "technical_report"
+            team_organization = next(
+                (
+                    organization
+                    for author in authors
+                    if (organization := resolve_organization(author)) is not None
+                ),
+                None,
+            )
+            organization_name = (
+                str(team_organization["name"]) if team_organization else ""
+            )
+            publisher_tier = (
+                str(team_organization["tier"]) if team_organization else "unknown"
+            )
+            publisher_evidence = (
+                f"arXiv 团队署名与内置机构别名精确匹配：{organization_name}"
+                if team_organization
+                else ""
             )
 
             results.append(
@@ -290,8 +412,15 @@ class ArxivSource(BaseSource):
                         "all_authors": authors,
                         "updated_at": updated_str,
                         "type": "paper",
-                        "origin_kind": "technical_report" if is_report else "research_paper",
+                        "organization": organization_name,
+                        "publisher_tier": publisher_tier,
+                        "publisher_evidence": publisher_evidence,
+                        "origin_kind": origin_kind,
                         "origin_priority": 3 if is_report else (2 if priority_author else 1),
+                        "arxiv_comment": arxiv_comment,
+                        "origin_classification_reason": classification_reason,
+                        "document_format": classification.document_format,
+                        "system_layer_count": classification.system_layer_count,
                         "query_group": query_group,
                         "query_domain_ids": declared_domains,
                         "frontier_domains": matched_domains or declared_domains,
@@ -337,3 +466,22 @@ def _normalize_seed_ids(values: list[str]) -> list[str]:
 
 def _normalized_name(value: str) -> str:
     return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", value.casefold())
+
+
+def _infer_origin_kind(
+    *,
+    title: str,
+    summary: str,
+    arxiv_comment: str,
+    authors: list[str],
+    forced: bool = False,
+) -> tuple[str, str]:
+    """兼容旧测试/调用；实际规则统一由 publication 模块维护。"""
+    result = classify_publication(
+        title=title,
+        summary=summary,
+        metadata=arxiv_comment,
+        authors=authors,
+        discovered_by_report_query=forced,
+    )
+    return result.origin_kind, result.reason

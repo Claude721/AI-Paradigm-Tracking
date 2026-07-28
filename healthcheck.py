@@ -28,10 +28,11 @@ def collect_checks() -> list[Check]:
         _landscape_check(),
         Check("arXiv", "论文发现", "ready", "官方 API，无需 Key；本检查未发请求"),
         Check(
-            "arXiv HTML / 项目页",
+            "arXiv HTML / 官方 PDF / 项目页",
             "深挖正文与人物入口",
             "ready",
-            "高优先级原点在初筛前读取，其他候选在深挖时读取；无需 Key",
+            "高优先级原点在初筛前读取，HTML 不可用时回退官方 PDF；"
+            "其他候选在深挖时读取；无需 Key",
         ),
         Check(
             "Hugging Face Daily Papers",
@@ -94,6 +95,20 @@ def collect_checks() -> list[Check]:
             "ready" if config.PRIORITY_RESEARCHERS else "missing",
             f"已配置 {len(config.PRIORITY_RESEARCHERS)} 个姓名别名；"
             "必须再有公开 ID 或主页才生效",
+        ),
+        Check(
+            "重点研究者无术语召回",
+            "新术语发现冗余",
+            (
+                "ready"
+                if config.PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED
+                else "degraded"
+            ),
+            (
+                "已启用独立 arXiv 作者车道；姓名只提高召回，不自动背书"
+                if config.PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED
+                else "已关闭；新术语只能依赖领域词、官方入口与策展源"
+            ),
         ),
         Check(
             "GitHub",

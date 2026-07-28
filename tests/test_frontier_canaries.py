@@ -7,11 +7,13 @@ from pathlib import Path
 from database.paradigm_store import ParadigmStore
 from paradigms.clustering import cluster_extractions, is_priority_review
 from paradigms.landscape import (
+    arxiv_priority_author_query_plan,
     arxiv_query_plan,
     classify_frontier_domains,
     coverage_report,
     load_landscape,
 )
+from paradigms.publication import classify_publication
 from paradigms.models import (
     EvidenceType,
     ParadigmCandidate,
@@ -22,7 +24,7 @@ from paradigms.models import (
 from paradigms.rubric import evaluate_rubric, objective_answers
 from paradigms.scoring import is_reportable, score_candidate
 from sources.arxiv_document_source import parse_arxiv_html, parse_project_page
-from sources.arxiv_source import ArxivSource
+from sources.arxiv_source import ArxivSource, TECHNICAL_REPORT_QUERY
 from sources.researcher_profile_source import _seed_profiles
 from sources.social_web_search_source import _parse_results
 
@@ -42,6 +44,28 @@ T_REX_ATOM = """<?xml version="1.0" encoding="utf-8"?>
     <category term="cs.RO"/>
     <category term="cs.AI"/>
     <link href="https://arxiv.org/abs/2606.17055v2" type="text/html"/>
+  </entry>
+</feed>
+"""
+
+KIMI_K3_ATOM = """<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry>
+    <id>https://arxiv.org/abs/2607.24653v1</id>
+    <updated>2026-07-27T16:49:54Z</updated>
+    <published>2026-07-27T16:49:54Z</published>
+    <title>Kimi K3: Open Frontier Intelligence</title>
+    <summary>We introduce Kimi K3, a 2.8T-parameter native multimodal
+    Mixture-of-Experts language model with Kimi Delta Attention, a one
+    million token context window, post-training reinforcement learning,
+    algorithm-system co-design, deployment innovations, extensive
+    evaluations, and released model weights.</summary>
+    <author><name>Kimi Team</name></author>
+    <category term="cs.CL"/>
+    <category term="cs.LG"/>
+    <arxiv:comment>K3 tech report</arxiv:comment>
+    <link href="https://arxiv.org/abs/2607.24653v1" type="text/html"/>
   </entry>
 </feed>
 """
@@ -126,6 +150,7 @@ class FrontierCoverageTests(unittest.TestCase):
             "mechanistic interpretability",
         ):
             self.assertIn(marker, queries)
+        self.assertIn('co:"tech report"', TECHNICAL_REPORT_QUERY.casefold())
 
     def test_trex_is_recalled_in_bootstrap_window_and_prioritized(self) -> None:
         source = ArxivSource(lookback_days=60, seed_arxiv_ids=[])
@@ -139,6 +164,162 @@ class FrontierCoverageTests(unittest.TestCase):
         self.assertIn("embodied_robotics", item.extra["frontier_domains"])
         self.assertEqual(item.extra["origin_priority"], 2)
         self.assertEqual(item.extra["updated_at"], "2026-06-18T17:59:59Z")
+
+    def test_kimi_k3_is_recalled_as_multi_mechanism_system_report(self) -> None:
+        source = ArxivSource(lookback_days=14, seed_arxiv_ids=[])
+        parsed = source._parse_atom_feed(
+            KIMI_K3_ATOM,
+            query_group="core_models",
+            domain_ids=[
+                "foundation_models",
+                "reasoning_agents",
+                "multimodal_generation",
+            ],
+        )
+        self.assertEqual(len(parsed), 1)
+        item = parsed[0]
+        self.assertEqual(item.extra["origin_kind"], "technical_report")
+        self.assertEqual(item.extra["origin_priority"], 3)
+        self.assertEqual(
+            item.extra["origin_classification_reason"],
+            "explicit_document_metadata:tech report",
+        )
+        self.assertEqual(item.extra["arxiv_comment"], "K3 tech report")
+        self.assertEqual(item.extra["organization"], "Moonshot AI")
+        self.assertEqual(item.extra["publisher_tier"], "established")
+        self.assertIn("foundation_models", item.extra["frontier_domains"])
+        self.assertIn("reasoning_agents", item.extra["frontier_domains"])
+        self.assertIn("multimodal_generation", item.extra["frontier_domains"])
+
+    def test_system_report_fallback_does_not_require_report_in_title(self) -> None:
+        without_comment = KIMI_K3_ATOM.replace(
+            "<arxiv:comment>K3 tech report</arxiv:comment>",
+            "",
+        )
+        item = ArxivSource(
+            lookback_days=14,
+            seed_arxiv_ids=[],
+        )._parse_atom_feed(without_comment)[0]
+        self.assertEqual(item.extra["origin_kind"], "technical_report")
+        self.assertEqual(
+            item.extra["origin_classification_reason"],
+            "inferred_system_scope_report",
+        )
+
+    def test_priority_researcher_lane_does_not_depend_on_known_technical_terms(self) -> None:
+        plans = arxiv_priority_author_query_plan(
+            ["Fei-Fei Li", "Yann LeCun"],
+            chunk_size=1,
+        )
+        self.assertEqual(len(plans), 2)
+        self.assertIn('au:"Fei-Fei Li"', plans[0]["query"])
+        self.assertNotIn("world model", plans[0]["query"].casefold())
+
+        novel_atom = T_REX_ATOM.replace(
+            "T-Rex: Tactile-Reactive Dexterous Manipulation",
+            "Project Banyan: Event-Synchronous Skill Weaving",
+        ).replace(
+            "We introduce a vision-language-action system with asynchronous tactile feedback for dexterous robot manipulation.",
+            "We present a new computational process for learning reusable behaviors.",
+        )
+        item = ArxivSource(
+            lookback_days=60,
+            seed_arxiv_ids=[],
+        )._parse_atom_feed(
+            novel_atom,
+            query_group="priority_researchers",
+        )[0]
+        self.assertEqual(item.extra["frontier_domains"], [])
+        self.assertEqual(item.extra["origin_priority"], 2)
+
+    def test_report_search_hit_does_not_force_an_ordinary_paper_into_report_mode(self) -> None:
+        ordinary = T_REX_ATOM.replace(
+            "T-Rex: Tactile-Reactive Dexterous Manipulation",
+            "Calibration for Small Robot Policies",
+        ).replace(
+            "We introduce a vision-language-action system with asynchronous tactile feedback for dexterous robot manipulation.",
+            "We compare against a technical report and improve calibration on one benchmark.",
+        ).replace(
+            "<author><name>Zhuoyang Liu</name></author>\n"
+            "    <author><name>Zekai Wang</name></author>\n"
+            "    <author><name>Fei-Fei Li</name></author>",
+            "",
+        )
+        item = ArxivSource(
+            lookback_days=60,
+            seed_arxiv_ids=[],
+        )._parse_atom_feed(
+            ordinary,
+            force_technical_report=True,
+            query_group="technical_reports",
+        )[0]
+        self.assertEqual(item.extra["origin_kind"], "research_paper")
+        self.assertEqual(
+            item.extra["origin_classification_reason"],
+            "report_query_unconfirmed",
+        )
+
+    def test_brand_named_official_document_uses_system_scope_not_title_suffix(self) -> None:
+        body = " ".join(
+            [
+                "We release Project Banyan, a foundation model with model weights.",
+                "Architecture and attention routing.",
+                "Pretraining data mixture and post-training reinforcement learning.",
+                "Infrastructure deployment and serving.",
+                "Evaluation benchmark capabilities and parameter context length.",
+            ]
+        ) * 80
+        result = classify_publication(
+            title="Project Banyan",
+            url="https://lab.example/publications/project-banyan.pdf",
+            summary=body,
+            official=True,
+        )
+        self.assertEqual(result.origin_kind, "technical_report")
+        self.assertEqual(result.reason, "official_document_with_system_scope")
+
+    def test_kimi_k3_canary_crosses_publisher_and_admission_logic(self) -> None:
+        raw = ArxivSource(
+            lookback_days=14,
+            seed_arxiv_ids=[],
+        )._parse_atom_feed(
+            KIMI_K3_ATOM,
+            query_group="core_models",
+            domain_ids=["foundation_models"],
+        )[0]
+        evidence = TechnicalEvidence(
+            source="arxiv",
+            evidence_type=EvidenceType.PRIMARY_PAPER,
+            title=raw.name,
+            url=raw.url,
+            summary=raw.readme_summary,
+            published_at=raw.created_at,
+            authors=raw.extra["all_authors"],
+            organization=raw.extra["organization"],
+            identifiers={"arxiv": "2607.24653"},
+            raw=raw.extra,
+        )
+        assessment = _max_assessment(["architecture", "systems"], "final")
+        candidate = ParadigmCandidate(
+            key="kda-attnres",
+            name="线性注意力与深层残差路由协同扩展",
+            route_family="超大稀疏模型的稳定高效扩展",
+            thesis="同时重写注意力状态更新和深层残差聚合。",
+            problem_shift="从单独扩大 MoE 转向注意力、残差和系统协同设计。",
+            mechanism="KDA、AttnRes 与 Stable LatentMoE 共同稳定超大规模训练。",
+            innovation_types=["architecture", "systems"],
+            evidence=[evidence],
+            screening_rubric=_max_assessment(
+                ["architecture", "systems"],
+                "screening",
+            ),
+            rubric_assessment=assessment,
+        )
+        score_candidate(candidate)
+        self.assertEqual(candidate.publisher_tier, "established")
+        self.assertTrue(candidate.is_formal_technical_report)
+        self.assertTrue(is_reportable(candidate))
+        self.assertIn("优先解读", candidate.admission_reason)
 
     def test_trex_falls_outside_normal_week_but_exact_seed_can_backfill(self) -> None:
         weekly = ArxivSource(lookback_days=7, seed_arxiv_ids=[])
@@ -218,6 +399,31 @@ class FrontierCoverageTests(unittest.TestCase):
             <= set(by_name)
         )
         self.assertEqual(by_name["Zekai Wang"].role, "共同第一作者")
+
+    def test_collective_team_author_is_publisher_not_person_profile(self) -> None:
+        evidence = TechnicalEvidence(
+            source="arxiv",
+            evidence_type=EvidenceType.PRIMARY_PAPER,
+            title="Frontier System Report",
+            url="https://arxiv.org/abs/2607.24653",
+            authors=[
+                "Kimi Team",
+                "Tongtong Bai",
+                "Yifan Bai",
+                "Yiping Bao",
+                "Senior Author",
+            ],
+            organization="Moonshot AI",
+        )
+        profiles = _seed_profiles(evidence, [], 5)
+        by_name = {profile.name: profile for profile in profiles}
+        self.assertNotIn("Kimi Team", by_name)
+        self.assertNotIn("Senior Author", by_name)
+        self.assertIn("Tongtong Bai", by_name)
+        self.assertEqual(
+            by_name["Tongtong Bai"].role,
+            "第一位具名作者/贡献角色待核验",
+        )
 
     def test_project_page_maps_author_profiles_roles_and_public_email(self) -> None:
         parsed = parse_project_page(

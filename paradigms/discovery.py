@@ -45,11 +45,12 @@ class ParadigmDiscovery:
         )
         self.hf = HuggingFacePapersSource(lookback_days=lookback)
         self.follow_builders = FollowBuildersSource()
+        self.priority_pages = PriorityResearchPageSource(lookback_days=lookback)
         self.evidence_sources = [
             OpenAlexSource(lookback_days=lookback),
             OpenReviewSource(lookback_days=lookback),
             ResearchFeedSource(lookback_days=lookback),
-            PriorityResearchPageSource(lookback_days=lookback),
+            self.priority_pages,
         ]
 
     async def run(self) -> DiscoveryBatch:
@@ -128,6 +129,8 @@ class ParadigmDiscovery:
             executed_groups=self.arxiv.executed_query_groups,
             failed_groups=self.arxiv.failed_query_groups,
         )
+        coverage["recall_lanes"] = self.arxiv.recall_coverage()
+        coverage["official_pages"] = self.priority_pages.coverage()
         return DiscoveryBatch(
             origins=origins,
             supporting=supporting,

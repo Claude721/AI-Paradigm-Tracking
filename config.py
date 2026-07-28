@@ -121,6 +121,10 @@ LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "")
 LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
 LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "")
 LLM_MODEL: str = os.getenv("LLM_MODEL", "")
+LLM_REQUEST_TIMEOUT_SECONDS: int = max(
+    30,
+    _env_int("LLM_REQUEST_TIMEOUT_SECONDS", 180),
+)
 
 # Ollama 便捷配置（仅当 provider=ollama 时作为 LLM_MODEL/LLM_BASE_URL 的补充）
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "")
@@ -304,6 +308,11 @@ PARADIGM_REPORT_SAFETY_LIMIT: int = max(
     0, _env_int("PARADIGM_REPORT_SAFETY_LIMIT", 0)
 )
 PARADIGM_ALLOW_UPDATES: bool = _env_bool("PARADIGM_ALLOW_UPDATES", True)
+# 重点研究者 arXiv 车道与领域关键词车道独立运行。姓名只提高召回优先级，
+# 后续仍需公开身份、技术 Rubric 和外部承接核验。
+PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED: bool = _env_bool(
+    "PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED", True
+)
 PARADIGM_REFRESH_SAFETY_LIMIT: int = max(
     0, _env_int("PARADIGM_REFRESH_SAFETY_LIMIT", 0)
 )
@@ -316,12 +325,12 @@ PARADIGM_MIN_SECONDARY_ENGAGEMENT: int = _env_int(
 
 # 周报/月度回顾的抓取时间窗口
 SOURCING_LOOKBACK_DAYS: int = max(_env_int("SOURCING_LOOKBACK_DAYS", 7), 1)
-# 定时周更保留一个重叠发现窗口。数据库负责按证据指纹去重，因此扫描 14 天
-# 不会重复分析上一周已处理的论文，却能覆盖某个信源上周失败、Actions 延迟
-# 或论文索引晚到造成的漏项。手动 30/60/90 天窗口不受缩短。
+# 定时周更保留一个月重叠发现窗口。数据库负责按证据指纹去重，因此扫描 30 天
+# 不会重复分析已处理论文，却能覆盖索引晚到、官方文章稍后补挂完整报告、Actions
+# 延迟或某条召回车道短期失败。手动 60/90 天窗口不受缩短。
 PARADIGM_RECALL_OVERLAP_DAYS: int = max(
     SOURCING_LOOKBACK_DAYS,
-    _env_int("PARADIGM_RECALL_OVERLAP_DAYS", 14),
+    _env_int("PARADIGM_RECALL_OVERLAP_DAYS", 30),
 )
 # 正常周更只看本周新增；数据库为空或用户显式 reset 时使用较长冷启动窗口，
 # 以免项目第一次上线时错过最近形成、但已超出 7/30 天的关键节点。

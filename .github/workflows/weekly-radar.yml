@@ -51,6 +51,7 @@ jobs:
       LLM_MODEL: qwen3.7-plus
       LLM_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
       LLM_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      LLM_REQUEST_TIMEOUT_SECONDS: ${{ vars.LLM_REQUEST_TIMEOUT_SECONDS || '180' }}
       SUB_AGENT_PROVIDER: dashscope
       SUB_AGENT_MODEL: qwen3.7-plus
       SUB_AGENT_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
@@ -85,7 +86,8 @@ jobs:
       PARADIGM_REPORT_SAFETY_LIMIT: ${{ vars.PARADIGM_REPORT_SAFETY_LIMIT || '0' }}
       PARADIGM_REFRESH_SAFETY_LIMIT: ${{ vars.PARADIGM_REFRESH_SAFETY_LIMIT || '0' }}
       SOURCING_LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '7' }}
-      PARADIGM_RECALL_OVERLAP_DAYS: ${{ vars.PARADIGM_RECALL_OVERLAP_DAYS || '14' }}
+      PARADIGM_RECALL_OVERLAP_DAYS: ${{ vars.PARADIGM_RECALL_OVERLAP_DAYS || '30' }}
+      PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED: ${{ vars.PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED || 'true' }}
       PARADIGM_BOOTSTRAP_LOOKBACK_DAYS: ${{ vars.PARADIGM_BOOTSTRAP_LOOKBACK_DAYS || '60' }}
       PARADIGM_SEED_ARXIV_IDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seed_arxiv_ids || '' }}
       PARADIGM_RESEARCHER_PROFILE_LIMIT: ${{ vars.PARADIGM_RESEARCHER_PROFILE_LIMIT || '6' }}

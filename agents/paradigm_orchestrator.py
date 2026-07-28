@@ -73,6 +73,46 @@ class ParadigmOrchestrator:
                 f"查询失败 {batch.coverage.get('query_failures', [])}"
             ),
         )
+        recall_lanes = batch.coverage.get("recall_lanes") or {}
+        failed_lanes = [
+            name
+            for name, value in recall_lanes.items()
+            if value.get("status") == "query_failed"
+        ]
+        zero_lanes = [
+            name
+            for name, value in recall_lanes.items()
+            if value.get("status") == "searched_zero_hits"
+        ]
+        run_audit.event(
+            "recall_lanes",
+            "warning" if failed_lanes else "passed",
+            (
+                f"独立召回车道 {len(recall_lanes)} 条；"
+                f"失败 {failed_lanes}；成功但零命中 {zero_lanes}"
+            ),
+        )
+        official_coverage = batch.coverage.get("official_pages") or {}
+        official_warning = bool(
+            int(official_coverage.get("checked_pages", 0) or 0)
+            < int(official_coverage.get("total_pages", 0) or 0)
+            or
+            official_coverage.get("request_failed")
+            or official_coverage.get("parse_zero_links")
+            or official_coverage.get("detail_failures")
+        )
+        run_audit.event(
+            "official_page_coverage",
+            "warning" if official_warning else "passed",
+            (
+                f"官方入口 {official_coverage.get('checked_pages', 0)}/"
+                f"{official_coverage.get('total_pages', 0)}；"
+                f"请求失败 {official_coverage.get('request_failed', 0)}；"
+                f"解析零链接 {official_coverage.get('parse_zero_links', 0)}；"
+                f"详情失败 {official_coverage.get('detail_failures', 0)}；"
+                f"形成原点 {official_coverage.get('evidence', 0)}"
+            ),
+        )
         origins, incremental = self.store.plan_origins(batch.origins)
         stats.update({f"origin_{key}": value for key, value in incremental.items()})
         pending_origins = self.store.load_pending_origins(
@@ -147,11 +187,18 @@ class ParadigmOrchestrator:
                         ),
                     }
                 )
+            failed_origin_fingerprints = {
+                item.evidence.fingerprint
+                for item in extractions
+                if not item.canonical_name
+                and not item.rubric_assessment
+                and bool(item.rejection_reason)
+            }
             successful_origins = list(
                 {
                     item.evidence.fingerprint: item.evidence
                     for item in extractions
-                    if not item.rejection_reason.startswith("抽取失败:")
+                    if item.evidence.fingerprint not in failed_origin_fingerprints
                 }.values()
             )
             self.store.mark_evidence(successful_origins, analyzed=True)

@@ -32,9 +32,22 @@ def load_rubric(path: Path | str | None = None) -> dict[str, Any]:
     return _load_path(str(target))
 
 
-def rubric_prompt(stage: str) -> str:
+def rubric_prompt(
+    stage: str,
+    innovation_types: Iterable[str] | None = None,
+) -> str:
     """返回给 Agent 的紧凑 Rubric；不包含程序自动回答的客观题。"""
     rubric = load_rubric()
+    requested_types = (
+        [innovation_types]
+        if isinstance(innovation_types, str)
+        else innovation_types
+    )
+    selected_types = (
+        normalize_innovation_types(requested_types, rubric)
+        if requested_types is not None
+        else list(rubric["type_criteria"])
+    )
     payload = {
         "version": rubric["version"],
         "stage": stage,
@@ -43,7 +56,7 @@ def rubric_prompt(stage: str) -> str:
             "每题必须使用该题 options 中的键；无法从材料确认时回答 unknown。"
             "evidence 写支持该选择的中文事实或实验，不得只写结论，不要输出任何数字分数。"
         ),
-        "innovation_types": list(rubric["type_criteria"]),
+        "innovation_types": selected_types,
         "common_criteria": [
             _prompt_criterion(item)
             for item in rubric["common_criteria"]
@@ -56,6 +69,7 @@ def rubric_prompt(stage: str) -> str:
                 if stage in item["stages"]
             ]
             for name, criteria in rubric["type_criteria"].items()
+            if name in selected_types
         },
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

@@ -18,6 +18,7 @@ from database.paradigm_store import ParadigmStore
 from paradigms.analyzer import (
     ParadigmAnalyzer,
     ParadigmSynthesizer,
+    _author_prompt_summary,
     _validate_mental_model,
 )
 from paradigms.clustering import cluster_extractions
@@ -41,10 +42,19 @@ from sources.paradigm_evidence_source import (
     CommunityEvidenceClient,
     _is_relevant_repository,
 )
+from sources.arxiv_document_source import (
+    ArxivDocumentClient,
+    _distributed_text_excerpt,
+)
 from sources.arxiv_source import ArxivSource
 from sources.openalex_source import OpenAlexSource
 from sources.openreview_source import OpenReviewSource
-from sources.priority_research_source import _discover_index_links, _download_url
+from sources.priority_research_source import (
+    PriorityResearchPageSource,
+    _ArticleParser,
+    _discover_index_links,
+    _download_url,
+)
 from sources.reddit_evidence_source import RedditEvidenceClient
 from sources.researcher_profile_source import ResearcherProfileClient
 from sources.semantic_scholar_source import SemanticScholarClient
@@ -520,8 +530,8 @@ class ParadigmPipelineTests(unittest.TestCase):
     def test_technical_report_can_extract_multiple_independent_mechanisms(self) -> None:
         evidence = paper()
         evidence.raw = {"origin_kind": "technical_report"}
-        payload = {
-            "hypotheses": [
+        index_payload = {
+            "mechanisms": [
                 {
                     "canonical_name": "Sparse attention routing",
                     "route_family": "Efficient frontier architectures",
@@ -530,7 +540,7 @@ class ParadigmPipelineTests(unittest.TestCase):
                     "mechanism": "m1",
                     "keywords": ["sparse attention"],
                     "innovation_types": ["architecture"],
-                    "rubric_answers": rubric_answers(["architecture"]),
+                    "source_evidence": ["Architecture section"],
                 },
                 {
                     "canonical_name": "Residual expert composition",
@@ -540,21 +550,45 @@ class ParadigmPipelineTests(unittest.TestCase):
                     "mechanism": "m2",
                     "keywords": ["expert composition"],
                     "innovation_types": ["architecture"],
-                    "rubric_answers": rubric_answers(["architecture"]),
+                    "source_evidence": ["Residual section"],
                 },
             ]
         }
-        response = SimpleNamespace(
+        index_response = SimpleNamespace(
             choices=[
                 SimpleNamespace(
-                    message=SimpleNamespace(content=json.dumps(payload))
+                    message=SimpleNamespace(content=json.dumps(index_payload))
+                )
+            ]
+        )
+        assessment_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "assessment": {
+                                    "innovation_types": ["architecture"],
+                                    "rubric_answers": rubric_answers(
+                                        ["architecture"]
+                                    ),
+                                }
+                            }
+                        )
+                    )
                 )
             ]
         )
         client = SimpleNamespace(
             chat=SimpleNamespace(
                 completions=SimpleNamespace(
-                    create=AsyncMock(return_value=response)
+                    create=AsyncMock(
+                        side_effect=[
+                            index_response,
+                            assessment_response,
+                            assessment_response,
+                        ]
+                    )
                 )
             )
         )
@@ -566,6 +600,193 @@ class ParadigmPipelineTests(unittest.TestCase):
             {item.canonical_name for item in extracted},
             {"Sparse attention routing", "Residual expert composition"},
         )
+        self.assertEqual(client.chat.completions.create.await_count, 3)
+
+    def test_technical_report_mechanism_count_is_not_silently_capped_at_six(self) -> None:
+        evidence = paper()
+        evidence.raw = {"origin_kind": "technical_report"}
+        mechanisms = [
+            {
+                "canonical_name": f"Mechanism {index}",
+                "route_family": "Frontier systems",
+                "thesis": "t",
+                "problem_shift": "p",
+                "mechanism": "m",
+                "keywords": [f"mechanism-{index}"],
+                "innovation_types": ["architecture"],
+                "source_evidence": [f"Section {index}"],
+            }
+            for index in range(1, 8)
+        ]
+        index_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "report_disposition": "mechanisms_found",
+                                "disposition_reason": "存在七项独立机制。",
+                                "mechanisms": mechanisms,
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+        assessment_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "assessment": {
+                                    "innovation_types": ["architecture"],
+                                    "rubric_answers": rubric_answers(
+                                        ["architecture"]
+                                    ),
+                                }
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(
+                        side_effect=[
+                            index_response,
+                            *[assessment_response for _ in range(7)],
+                        ]
+                    )
+                )
+            )
+        )
+        extracted = asyncio.run(
+            ParadigmAnalyzer(client=client, model="test").extract(evidence)
+        )
+        self.assertEqual(len(extracted), 7)
+
+    def test_technical_report_mechanism_failure_is_isolated(self) -> None:
+        evidence = paper()
+        evidence.raw = {"origin_kind": "technical_report"}
+        mechanisms = [
+            {
+                "canonical_name": name,
+                "route_family": "Frontier systems",
+                "thesis": "t",
+                "problem_shift": "p",
+                "mechanism": "m",
+                "keywords": [name],
+                "innovation_types": ["architecture"],
+                "source_evidence": ["Architecture section"],
+            }
+            for name in ("Mechanism A", "Mechanism B")
+        ]
+        index_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps({"mechanisms": mechanisms})
+                    )
+                )
+            ]
+        )
+        valid_assessment = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "assessment": {
+                                    "innovation_types": ["architecture"],
+                                    "rubric_answers": rubric_answers(
+                                        ["architecture"]
+                                    ),
+                                }
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+        invalid_assessment = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content='{"assessment": BROKEN}')
+                )
+            ]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(
+                        side_effect=[
+                            index_response,
+                            valid_assessment,
+                            invalid_assessment,
+                            invalid_assessment,
+                        ]
+                    )
+                )
+            )
+        )
+        extracted = asyncio.run(
+            ParadigmAnalyzer(client=client, model="test").extract(evidence)
+        )
+        self.assertEqual(
+            [item.canonical_name for item in extracted if item.canonical_name],
+            ["Mechanism A"],
+        )
+        self.assertTrue(
+            any(
+                item.rejection_reason.startswith(
+                    "Technical Report 部分机制评估失败"
+                )
+                for item in extracted
+            )
+        )
+        self.assertTrue(evidence.raw["technical_report_partial_failure"])
+
+    def test_report_with_no_independent_mechanism_is_a_valid_research_result(self) -> None:
+        evidence = paper()
+        evidence.title = "Model Safety System Card"
+        evidence.raw = {"origin_kind": "technical_report"}
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "report_disposition": "no_independent_mechanism",
+                                "disposition_reason": (
+                                    "正文只汇总既有安全评测，没有新的训练或推理机制。"
+                                ),
+                                "mechanisms": [],
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(return_value=response)
+                )
+            )
+        )
+        extracted = asyncio.run(
+            ParadigmAnalyzer(client=client, model="test").extract(evidence)
+        )
+        self.assertEqual(len(extracted), 1)
+        self.assertFalse(extracted[0].is_candidate)
+        self.assertEqual(
+            extracted[0].rubric_assessment["decision"],
+            "reject",
+        )
+        self.assertNotIn("索引失败", extracted[0].rejection_reason)
 
     def test_synthesis_builds_internal_mental_model_for_deep_candidates(self) -> None:
         payload = {
@@ -836,6 +1057,33 @@ class ParadigmPipelineTests(unittest.TestCase):
             self.assertEqual(list(Path(directory).glob("*.md")), [])
         self.assertEqual(client.chat.completions.create.await_count, 2)
 
+    def test_empty_report_discloses_failed_recall_lane_and_official_page(self) -> None:
+        content = ParadigmReportGenerator._empty_report(
+            "2026-07-28",
+            {
+                "origin_count": 0,
+                "frontier_coverage": {
+                    "domains": {},
+                    "recall_lanes": {
+                        "priority_researchers_1": {
+                            "status": "query_failed",
+                            "hits": 0,
+                        }
+                    },
+                    "official_pages": {
+                        "total_pages": 2,
+                        "checked_pages": 2,
+                        "request_failed": 1,
+                        "parse_zero_links": 0,
+                        "detail_failures": 0,
+                    },
+                },
+            },
+        )
+        self.assertIn("运行不完整的空报告", content)
+        self.assertIn("priority_researchers_1", content)
+        self.assertIn("官方入口", content)
+
     def test_paradigm_skill_renders_json_contract(self) -> None:
         prompt = SkillLoader().render(
             "paradigm_extraction",
@@ -944,6 +1192,79 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertEqual(links[0].title, "Kimi K3")
         self.assertEqual(links[0].published_at, "2026-07-14")
 
+    def test_priority_page_recovers_card_date_from_hydration_data(self) -> None:
+        html = r"""
+        <a href="/blog/frontier-model" aria-label="Frontier Model"></a>
+        <script>
+        self.__next_f.push("{\\"title\\":\\"Frontier Model\\",
+        \\"href\\":\\"/blog/frontier-model\\",\\"date\\":\\"2026/07/27\\"}")
+        </script>
+        """
+        links = _discover_index_links(html, "https://research.example/blog/")
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].title, "Frontier Model")
+        self.assertEqual(links[0].published_at, "2026-07-27")
+
+    def test_priority_page_discovers_unknown_brand_name_by_publication_structure(self) -> None:
+        html = '<a href="/research/project-banyan">Project Banyan</a>'
+        links = _discover_index_links(html, "https://lab.example/research/")
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].title, "Project Banyan")
+
+    def test_priority_page_reads_jsonld_without_visible_anchor_or_keyword(self) -> None:
+        html = """
+        <script type="application/ld+json">
+        {
+          "@type": "ScholarlyArticle",
+          "headline": "Project Cedar",
+          "url": "/research/project-cedar",
+          "datePublished": "2026-07-27"
+        }
+        </script>
+        """
+        links = _discover_index_links(html, "https://lab.example/research/")
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].title, "Project Cedar")
+        self.assertEqual(links[0].published_at, "2026-07-27")
+
+    def test_article_parser_exposes_linked_full_report_and_modified_date(self) -> None:
+        parser = _ArticleParser("https://lab.example/news/project-cedar")
+        parser.feed(
+            """
+            <meta property="article:published_time" content="2026-06-01">
+            <meta property="article:modified_time" content="2026-07-27">
+            <meta name="citation_pdf_url" content="/reports/cedar.pdf">
+            <a href="/reports/cedar-system-card.pdf">Read the full report</a>
+            """
+        )
+        self.assertEqual(parser.modified_at, "2026-07-27")
+        self.assertIn(
+            ("citation PDF", "https://lab.example/reports/cedar.pdf"),
+            parser.links,
+        )
+        self.assertIn(
+            (
+                "Read the full report",
+                "https://lab.example/reports/cedar-system-card.pdf",
+            ),
+            parser.links,
+        )
+
+    def test_priority_source_coverage_distinguishes_page_parse_failure(self) -> None:
+        source = PriorityResearchPageSource(
+            pages=["https://lab.example/research"],
+        )
+        source.page_coverage = {
+            "https://lab.example/research": {
+                "status": "parse_zero_links",
+                "detail_failures": 0,
+                "evidence": 0,
+            }
+        }
+        coverage = source.coverage()
+        self.assertEqual(coverage["parse_zero_links"], 1)
+        self.assertEqual(coverage["request_failed"], 0)
+
     def test_arxiv_report_query_failure_does_not_drop_regular_feed(self) -> None:
         source = ArxivSource(max_results=5, lookback_days=7)
         empty_feed = (
@@ -957,6 +1278,193 @@ class ParadigmPipelineTests(unittest.TestCase):
             ]
         )
         self.assertEqual(asyncio.run(source.fetch()), [])
+
+    def test_arxiv_transport_timeout_retries_once(self) -> None:
+        source = ArxivSource(max_results=5, lookback_days=7)
+        request = httpx.Request("GET", "https://export.arxiv.org/api/query")
+        response = httpx.Response(200, text="<feed/>", request=request)
+        client = SimpleNamespace(
+            get=AsyncMock(
+                side_effect=[
+                    httpx.ReadTimeout("temporary timeout", request=request),
+                    response,
+                ]
+            )
+        )
+        with patch(
+            "sources.arxiv_source.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            received = asyncio.run(source._request(client, "all:model", 1))
+        self.assertEqual(received.status_code, 200)
+        self.assertEqual(client.get.await_count, 2)
+
+    def test_large_system_report_author_prompt_is_bounded(self) -> None:
+        authors = ["Kimi Team", *[f"Researcher {index}" for index in range(400)]]
+        summary = _author_prompt_summary(authors)
+        self.assertIn("共 401 位作者", summary)
+        self.assertIn("Kimi Team", summary)
+        self.assertLess(len(summary), 500)
+
+    def test_priority_arxiv_html_404_falls_back_to_official_pdf(self) -> None:
+        evidence = paper()
+        evidence.raw = {
+            "origin_kind": "technical_report",
+            "origin_priority": 3,
+        }
+        html_request = httpx.Request(
+            "GET",
+            "https://arxiv.org/html/2607.00001",
+        )
+        pdf_request = httpx.Request(
+            "GET",
+            "https://arxiv.org/pdf/2607.00001",
+        )
+        transport = SimpleNamespace(
+            get=AsyncMock(
+                side_effect=[
+                    httpx.Response(404, request=html_request),
+                    httpx.Response(200, content=b"%PDF-mock", request=pdf_request),
+                ]
+            )
+        )
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch(
+                "sources.arxiv_document_source.httpx.AsyncClient",
+                return_value=context,
+            ),
+            patch(
+                "sources.arxiv_document_source.parse_arxiv_pdf",
+                return_value="系统报告正文，包含架构、训练与部署机制。",
+            ),
+        ):
+            coverage = asyncio.run(ArxivDocumentClient().hydrate(evidence))
+        self.assertEqual(
+            evidence.raw["document_source_kind"],
+            "arxiv_pdf_fallback",
+        )
+        self.assertIn("系统报告正文", evidence.raw["document_excerpt"])
+        self.assertIn("官方 PDF", coverage["primary_document"])
+
+    def test_official_article_linked_pdf_hydrates_before_screening(self) -> None:
+        evidence = TechnicalEvidence(
+            source="priority-research-page",
+            evidence_type=EvidenceType.TECHNICAL_BLOG,
+            title="Project Cedar",
+            url="https://lab.example/research/project-cedar",
+            summary="官方发布页。",
+            raw={
+                "origin_kind": "technical_report",
+                "origin_priority": 3,
+                "linked_research_documents": [
+                    {
+                        "title": "Full report",
+                        "url": "https://lab.example/reports/cedar.pdf",
+                    }
+                ],
+            },
+        )
+        request = httpx.Request(
+            "GET",
+            "https://lab.example/reports/cedar.pdf",
+        )
+        transport = SimpleNamespace(
+            get=AsyncMock(
+                return_value=httpx.Response(
+                    200,
+                    content=b"%PDF-mock",
+                    headers={"content-type": "application/pdf"},
+                    request=request,
+                )
+            )
+        )
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch(
+                "sources.arxiv_document_source.httpx.AsyncClient",
+                return_value=context,
+            ),
+            patch(
+                "sources.arxiv_document_source.parse_arxiv_pdf",
+                return_value="完整系统报告正文，包含架构、训练与部署。",
+            ),
+        ):
+            coverage = asyncio.run(ArxivDocumentClient().hydrate(evidence))
+        self.assertEqual(
+            evidence.raw["document_source_kind"],
+            "official_linked_pdf",
+        )
+        self.assertIn("完整系统报告正文", evidence.raw["document_excerpt"])
+        self.assertIn("官方发布页链接", coverage["primary_document"])
+
+    def test_linked_brand_pdf_can_upgrade_release_after_full_text_is_read(self) -> None:
+        evidence = TechnicalEvidence(
+            source="priority-research-page",
+            evidence_type=EvidenceType.TECHNICAL_BLOG,
+            title="Project Cedar",
+            url="https://lab.example/research/project-cedar",
+            summary="We release Project Cedar.",
+            authors=["Cedar Team"],
+            raw={
+                "origin_kind": "official_model_release",
+                "origin_priority": 2,
+                "linked_research_documents": [
+                    {
+                        "title": "Download PDF",
+                        "url": "https://lab.example/files/cedar.pdf",
+                    }
+                ],
+            },
+        )
+        request = httpx.Request("GET", "https://lab.example/files/cedar.pdf")
+        transport = SimpleNamespace(
+            get=AsyncMock(
+                return_value=httpx.Response(
+                    200,
+                    content=b"%PDF-mock",
+                    headers={"content-type": "application/pdf"},
+                    request=request,
+                )
+            )
+        )
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        report_text = (
+            "We release a foundation model with model weights. "
+            "Architecture attention experts. Pretraining training data. "
+            "Post-training reinforcement learning. Infrastructure deployment serving. "
+            "Evaluation benchmark capability. Parameter context length. "
+        ) * 30
+        with (
+            patch(
+                "sources.arxiv_document_source.httpx.AsyncClient",
+                return_value=context,
+            ),
+            patch(
+                "sources.arxiv_document_source.parse_arxiv_pdf",
+                return_value=report_text,
+            ),
+        ):
+            asyncio.run(ArxivDocumentClient().hydrate(evidence))
+        self.assertEqual(evidence.raw["origin_kind"], "technical_report")
+        self.assertEqual(evidence.raw["origin_priority"], 3)
+        self.assertEqual(
+            evidence.raw["origin_classification_reason"],
+            "official_document_with_system_scope",
+        )
+
+    def test_long_document_excerpt_samples_late_sections(self) -> None:
+        text = "HEAD " * 3000 + "MIDDLE " * 3000 + "TAIL_MECHANISM " * 1000
+        excerpt = _distributed_text_excerpt(text, limit=12_000)
+        self.assertLessEqual(len(excerpt), 12_000)
+        self.assertIn("HEAD", excerpt)
+        self.assertIn("TAIL_MECHANISM", excerpt)
 
     def test_researcher_seed_survives_without_semantic_scholar_or_openalex(self) -> None:
         evidence = paper()

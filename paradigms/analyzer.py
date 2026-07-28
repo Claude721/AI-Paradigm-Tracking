@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 
+import config
 from agents.llm_utils import build_client, parse_json_object
 from run_audit import run_audit
 from skills.loader import SkillLoader
@@ -45,6 +46,9 @@ class ParadigmAnalyzer:
         return [extraction for batch in batches for extraction in batch]
 
     async def extract(self, evidence: TechnicalEvidence) -> list[ParadigmExtraction]:
+        if evidence.raw.get("origin_kind") == "technical_report":
+            return await self._extract_technical_report(evidence)
+
         screening_material = evidence.summary
         document_excerpt = str(evidence.raw.get("document_excerpt", ""))
         if document_excerpt:
@@ -62,7 +66,7 @@ class ParadigmAnalyzer:
                     else 10_000
                 )
             ],
-            authors=", ".join(evidence.authors),
+            authors=_author_prompt_summary(evidence.authors),
             organization=evidence.organization,
             identifiers=evidence.identifiers,
             origin_kind=evidence.raw.get("origin_kind", "research_paper"),
@@ -103,7 +107,7 @@ class ParadigmAnalyzer:
                 payloads = hypotheses if isinstance(hypotheses, list) else [payload]
                 parsed = [
                     self._from_payload(evidence, item)
-                    for item in payloads[:6]
+                    for item in payloads
                     if isinstance(item, dict)
                 ]
                 if not parsed:
@@ -148,6 +152,274 @@ class ParadigmAnalyzer:
                 evidence, f"抽取失败: {last_error or '未知错误'}"
             )
         ]
+
+    async def _extract_technical_report(
+        self,
+        evidence: TechnicalEvidence,
+    ) -> list[ParadigmExtraction]:
+        """系统报告先建立机制索引，再逐机制回答 Rubric，隔离长 JSON 故障。"""
+        evidence.raw.pop("technical_report_partial_failure", None)
+        document_excerpt = str(evidence.raw.get("document_excerpt", ""))
+        report_material = evidence.summary
+        if document_excerpt:
+            source_kind = str(
+                evidence.raw.get("document_source_kind") or "official_document"
+            )
+            report_material = (
+                f"{report_material}\n\n[官方报告正文节选：{source_kind}]\n"
+                f"{document_excerpt}"
+            )
+        index_prompt = self.skill_loader.render(
+            "technical_report_index",
+            source=evidence.source,
+            title=evidence.title,
+            report_material=report_material[:50_000],
+            authors=_author_prompt_summary(evidence.authors),
+            organization=evidence.organization,
+            identifiers=evidence.identifiers,
+            frontier_domains=evidence.raw.get("frontier_domains", []),
+            publisher_context={
+                "organization": evidence.organization,
+                "publisher_tier": evidence.raw.get("publisher_tier", "unknown"),
+                "publisher_evidence": evidence.raw.get("publisher_evidence", ""),
+            },
+        )
+        mechanisms, index_error, disposition_reason = await self._request_report_index(
+            evidence,
+            index_prompt,
+        )
+        if not mechanisms:
+            if not index_error and disposition_reason:
+                return [
+                    ParadigmExtraction(
+                        evidence=evidence,
+                        is_candidate=False,
+                        canonical_name="",
+                        thesis="",
+                        problem_shift="",
+                        mechanism="",
+                        rejection_reason=disposition_reason,
+                        rubric_assessment={
+                            "decision": "reject",
+                            "decision_reason": disposition_reason,
+                            "answer_coverage": 1.0,
+                            "answers": [],
+                        },
+                    )
+                ]
+            return [
+                self._failed_extraction(
+                    evidence,
+                    f"Technical Report 机制索引失败: {index_error or '结果为空'}",
+                )
+            ]
+
+        semaphore = asyncio.Semaphore(min(self.concurrency, 2))
+
+        async def guarded(index: int, seed: dict):
+            async with semaphore:
+                return await self._assess_report_mechanism(
+                    evidence,
+                    seed,
+                    index=index,
+                )
+
+        assessed = await asyncio.gather(
+            *(guarded(index, seed) for index, seed in enumerate(mechanisms, 1))
+        )
+        successful = [item for item, _ in assessed if item is not None]
+        failures = [
+            f"机制 {index}: {error}"
+            for index, (item, error) in enumerate(assessed, 1)
+            if item is None
+        ]
+        if failures:
+            evidence.raw["technical_report_partial_failure"] = True
+            successful.append(
+                self._failed_extraction(
+                    evidence,
+                    "Technical Report 部分机制评估失败；"
+                    + "；".join(failures),
+                )
+            )
+        if successful:
+            return successful
+        return [
+            self._failed_extraction(
+                evidence,
+                "Technical Report 全部机制评估失败",
+            )
+        ]
+
+    async def _request_report_index(
+        self,
+        evidence: TechnicalEvidence,
+        prompt: str,
+    ) -> tuple[list[dict], str, str]:
+        last_error: Exception | None = None
+        for attempt in range(2):
+            response = None
+            try:
+                client, model = self._get_client()
+                repair_note = (
+                    ""
+                    if attempt == 0
+                    else "\n上一轮结构无效。请缩短每个字段，只返回一个合法 JSON 对象。"
+                )
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt + repair_note}],
+                    temperature=0.1,
+                    max_tokens=6000,
+                    response_format={"type": "json_object"},
+                )
+                payload = parse_json_object(
+                    response.choices[0].message.content or "{}"
+                )
+                raw_mechanisms = payload.get("mechanisms")
+                if not isinstance(raw_mechanisms, list):
+                    raise ValueError("缺少 mechanisms 数组")
+                mechanisms = [
+                    item
+                    for item in raw_mechanisms
+                    if isinstance(item, dict)
+                    and str(item.get("canonical_name", "")).strip()
+                    and str(item.get("problem_shift", "")).strip()
+                    and str(item.get("mechanism", "")).strip()
+                ]
+                disposition = str(
+                    payload.get("report_disposition", "")
+                ).strip()
+                disposition_reason = str(
+                    payload.get("disposition_reason", "")
+                ).strip()
+                if (
+                    not mechanisms
+                    and disposition == "no_independent_mechanism"
+                    and disposition_reason
+                ):
+                    run_audit.record_llm(
+                        stage="technical_report_index",
+                        role="sub",
+                        model=model,
+                        subject=evidence.title,
+                        response=response,
+                    )
+                    return [], "", disposition_reason
+                if not mechanisms:
+                    raise ValueError("没有形成完整机制种子")
+                run_audit.record_llm(
+                    stage="technical_report_index",
+                    role="sub",
+                    model=model,
+                    subject=evidence.title,
+                    response=response,
+                )
+                return mechanisms, "", ""
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Technical Report 机制索引第 %s 次失败 [%s]: %s",
+                    attempt + 1,
+                    evidence.title[:60],
+                    exc,
+                )
+                run_audit.record_llm(
+                    stage="technical_report_index",
+                    role="sub",
+                    model=self.model,
+                    subject=f"{evidence.title} / attempt-{attempt + 1}",
+                    response=response,
+                    error=exc,
+                )
+        return [], str(last_error or "未知错误"), ""
+
+    async def _assess_report_mechanism(
+        self,
+        evidence: TechnicalEvidence,
+        seed: dict,
+        *,
+        index: int,
+    ) -> tuple[ParadigmExtraction | None, str]:
+        prompt = self.skill_loader.render(
+            "technical_report_mechanism",
+            report_title=evidence.title,
+            report_summary=evidence.summary[:3000],
+            organization=evidence.organization,
+            mechanism_seed=json.dumps(seed, ensure_ascii=False),
+            rubric_definition=rubric_prompt(
+                "screening",
+                seed.get("innovation_types"),
+            ),
+        )
+        last_error: Exception | None = None
+        for attempt in range(2):
+            response = None
+            try:
+                client, model = self._get_client()
+                repair_note = (
+                    ""
+                    if attempt == 0
+                    else "\n上一轮 JSON 或 Rubric 不完整。只修正本机制，输出合法 JSON。"
+                )
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt + repair_note}],
+                    temperature=0.1,
+                    max_tokens=3500,
+                    response_format={"type": "json_object"},
+                )
+                payload = parse_json_object(
+                    response.choices[0].message.content or "{}"
+                )
+                assessment_payload = payload.get("assessment")
+                if isinstance(assessment_payload, dict):
+                    payload = assessment_payload
+                merged = {
+                    **seed,
+                    "innovation_types": payload.get(
+                        "innovation_types",
+                        seed.get("innovation_types", ["other"]),
+                    ),
+                    "rubric_answers": payload.get("rubric_answers"),
+                }
+                parsed = self._from_payload(evidence, merged)
+                if parsed.rubric_assessment.get("decision") == "incomplete":
+                    raise ValueError(
+                        parsed.rubric_assessment.get(
+                            "decision_reason",
+                            "Rubric 回答不完整",
+                        )
+                    )
+                run_audit.record_llm(
+                    stage="technical_report_mechanism",
+                    role="sub",
+                    model=model,
+                    subject=f"{evidence.title} / mechanism-{index}",
+                    response=response,
+                )
+                return parsed, ""
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Technical Report 机制 %s 第 %s 次评估失败 [%s]: %s",
+                    index,
+                    attempt + 1,
+                    evidence.title[:60],
+                    exc,
+                )
+                run_audit.record_llm(
+                    stage="technical_report_mechanism",
+                    role="sub",
+                    model=self.model,
+                    subject=(
+                        f"{evidence.title} / mechanism-{index} / "
+                        f"attempt-{attempt + 1}"
+                    ),
+                    response=response,
+                    error=exc,
+                )
+        return None, str(last_error or "未知错误")
 
     @staticmethod
     def _failed_extraction(
@@ -213,6 +485,36 @@ def _string_list(value) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _author_prompt_summary(authors: list[str]) -> str:
+    """大型系统报告保留关键署名结构，不把数百个人名灌进模型上下文。"""
+    cleaned = list(dict.fromkeys(name.strip() for name in authors if name.strip()))
+    if len(cleaned) <= 16:
+        return ", ".join(cleaned)
+    collective = [
+        name
+        for name in cleaned
+        if name.casefold().endswith(
+            (" team", " consortium", " collaboration")
+        )
+    ]
+    priority_names = {
+        "".join(character for character in value.casefold() if character.isalnum())
+        for value in config.PRIORITY_RESEARCHERS
+    }
+    priority = [
+        name
+        for name in cleaned
+        if "".join(
+            character for character in name.casefold() if character.isalnum()
+        )
+        in priority_names
+    ]
+    visible = list(
+        dict.fromkeys([*collective, *cleaned[:6], *priority, *cleaned[-2:]])
+    )
+    return f"{', '.join(visible)}（共 {len(cleaned)} 位作者，完整名单保留在证据中）"
 
 
 class ResearcherTrajectoryAnalyzer:

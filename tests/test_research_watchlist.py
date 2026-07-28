@@ -22,6 +22,9 @@ from sources.priority_research_source import _looks_like_research_link, _origin_
 class ResearchWatchlistTest(unittest.TestCase):
     def test_catalog_references_are_consistent(self) -> None:
         self.assertTrue(ESTABLISHED_ORGANIZATION_IDS <= ORGANIZATIONS_BY_ID.keys())
+        source_urls = {item["url"] for item in RESEARCH_SOURCES}
+        self.assertIn("https://wayve.ai/science/", source_urls)
+        self.assertIn("https://www.tri.global/publications", source_urls)
         self.assertTrue(all(item["owner"] in ORGANIZATIONS_BY_ID for item in RESEARCH_SOURCES))
 
     def test_required_domestic_and_global_organizations_exist(self) -> None:
@@ -91,9 +94,12 @@ class ResearchWatchlistTest(unittest.TestCase):
         self.assertTrue(any("重点研究者身份" in item for item in candidate.publisher_evidence))
 
     def test_builtin_source_has_owner_but_custom_source_does_not(self) -> None:
-        _, owner, tier = source_identity("https://www.moonshot.ai/")
+        _, owner, tier = source_identity("https://www.kimi.com/blog/")
         self.assertEqual(owner["id"], "moonshot")
         self.assertEqual(tier, "established")
+        _, owner, tier = source_identity("https://www.moonshot.ai/")
+        self.assertEqual(owner["id"], "moonshot")
+        self.assertEqual(tier, "verified")
         source, owner, tier = source_identity("https://example.com/research")
         self.assertIsNone(source)
         self.assertIsNone(owner)
@@ -107,6 +113,9 @@ class ResearchWatchlistTest(unittest.TestCase):
         custom = "https://custom.example/research"
         self.assertTrue(source_link_allowed(custom, "https://custom.example/report"))
         self.assertFalse(source_link_allowed(custom, "https://arxiv.org/abs/2607.00001"))
+        kimi = "https://www.kimi.com/blog/"
+        self.assertTrue(source_link_allowed(kimi, "https://github.com/MoonshotAI/Kimi-K3"))
+        self.assertTrue(source_link_allowed(kimi, "https://arxiv.org/abs/2607.24653"))
 
     def test_chinese_research_links_and_report_kind(self) -> None:
         self.assertTrue(

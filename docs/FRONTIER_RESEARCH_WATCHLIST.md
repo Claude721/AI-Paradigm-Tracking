@@ -1,6 +1,6 @@
 # AI 前沿机构与研究者 Watchlist
 
-> 调研与核验日期：2026-07-26。机器可读的完整默认目录位于 `research_watchlist.py`；本文件解释为什么纳入、如何分层，以及哪些名字不能构成自动背书。
+> 调研与核验日期：2026-07-28。机器可读的完整默认目录位于 `research_watchlist.py`；本文件解释为什么纳入、如何分层，以及哪些名字不能构成自动背书。
 
 ## 1. 名单不是“名气榜”
 
@@ -17,11 +17,11 @@
 
 ## 2. 每周主动读取的官方入口
 
-第一层是高信号研究索引。海外覆盖 [OpenAI Research](https://openai.com/research/index/)、[Anthropic Research](https://www.anthropic.com/research)、[Google DeepMind Research](https://deepmind.google/research/)、[Meta Research Publications](https://ai.meta.com/research/publications/)、[Microsoft AI Frontiers](https://www.microsoft.com/en-us/research/lab/ai-frontiers/publications/)、[NVIDIA GEAR](https://research.nvidia.com/labs/gear/publications/)、[Mistral Research](https://mistral.ai/news/?category=research)、[Cohere Research](https://cohere.com/research)、[Ai2](https://allenai.org/news)、[World Labs](https://www.worldlabs.ai/blog)、[Physical Intelligence](https://www.pi.website/research)、[Runway Research](https://runwayml.com/research/publications) 与 [Sakana Publications](https://pub.sakana.ai/)。
+第一层是高信号研究索引。海外覆盖 [OpenAI Research](https://openai.com/research/index/)、[Anthropic Research](https://www.anthropic.com/research)、[Google DeepMind Research](https://deepmind.google/research/)、[Meta Research Publications](https://ai.meta.com/research/publications/)、[Microsoft AI Frontiers](https://www.microsoft.com/en-us/research/lab/ai-frontiers/publications/)、[NVIDIA GEAR](https://research.nvidia.com/labs/gear/publications/)、[Mistral Research](https://mistral.ai/news/?category=research)、[Cohere Research](https://cohere.com/research)、[Ai2](https://allenai.org/news)、[World Labs](https://www.worldlabs.ai/blog)、[Physical Intelligence](https://www.pi.website/research)、[Wayve Science](https://wayve.ai/science/)、[Toyota Research Institute Publications](https://www.tri.global/publications)、[Runway Research](https://runwayml.com/research/publications) 与 [Sakana Publications](https://pub.sakana.ai/)。
 
 AI4S 作为独立技术栈覆盖 [FutureHouse Research](https://www.futurehouse.org/research)、[Arc Institute Publications](https://arcinstitute.org/publications)、[Microsoft Research AI for Science](https://www.microsoft.com/en-us/research/lab/microsoft-research-ai-for-science/)、[Isomorphic Labs Articles](https://www.isomorphiclabs.com/articles) 与 [Lila Sciences 技术页](https://www.lila.ai/tech)。FutureHouse、Arc 与 Microsoft AI for Science 已有连续、可审计研究产出；Isomorphic 与 Lila 目前作为 `verified` 主动入口，不能仅凭公司叙事自动晋级。
 
-中国侧覆盖 [Baidu ERNIE Blog](https://ernie.baidu.com/blog/)、[ByteDance Seed Research](https://seed.bytedance.com/en/research)、[Qwen Publications](https://qwenlm.github.io/publication/)、[Moonshot AI](https://www.moonshot.ai/)、[Z.ai Blog](https://z.ai/blog)、[DeepSeek Transparency](https://www.deepseek.com/en/transparency/)、[StepFun Research](https://chat.stepfun.com/research/en)、[MiniMax Blog](https://www.minimax.io/blog) 与 [ModelBest](https://modelbest.cn/)。
+中国侧覆盖 [Baidu ERNIE Blog](https://ernie.baidu.com/blog/)、[ByteDance Seed Research](https://seed.bytedance.com/en/research)、[Qwen Publications](https://qwenlm.github.io/publication/)、[Kimi Research](https://www.kimi.com/blog/)、[Moonshot AI](https://www.moonshot.ai/)、[Z.ai Blog](https://z.ai/blog)、[DeepSeek Transparency](https://www.deepseek.com/en/transparency/)、[StepFun Research](https://chat.stepfun.com/research/en)、[MiniMax Blog](https://www.minimax.io/blog) 与 [ModelBest](https://modelbest.cn/)。
 
 Google Research、Apple、Amazon、IBM、xAI、腾讯 ARC、华为诺亚、BAIR、Stanford CRFM、CMU RI 和 NYU CILVR 也会被主动读取，但默认 tier 是 `verified`：它们的页面要么覆盖面很宽，要么偏模型发布/动态页面，要么普通论文数量很大，不能仅凭入口直接晋级。Z.ai、Qwen 新站、腾讯 ARC 和华为诺亚的动态页面可能需要专用解析器；通用抓取失败时，arXiv/OpenAlex 仍是第二条召回路径。
 

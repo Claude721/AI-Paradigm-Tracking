@@ -48,6 +48,51 @@ def arxiv_query_plan(path: str = "") -> list[dict[str, Any]]:
     return plan
 
 
+def arxiv_priority_author_query_plan(
+    names: Iterable[str],
+    *,
+    chunk_size: int = 16,
+    path: str = "",
+) -> list[dict[str, Any]]:
+    """用重点研究者建立与术语无关的第二召回车道。
+
+    新范式往往尚未使用覆盖地图里的既有名词，但重点研究者姓名相对稳定。这里
+    只负责召回，人物身份和技术价值仍在后续独立核验，不能凭姓名直接入选。
+    """
+
+    normalized: dict[str, str] = {}
+    for value in names:
+        cleaned = re.sub(r"\s+", " ", str(value)).strip()
+        key = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", cleaned.casefold())
+        if cleaned and key:
+            normalized.setdefault(key, cleaned)
+    authors = list(normalized.values())
+    if not authors:
+        return []
+
+    categories = _unique(
+        category
+        for domain in load_landscape(path)["domains"]
+        for category in domain["arxiv_categories"]
+    )
+    category_query = " OR ".join(f"cat:{category}" for category in categories)
+    size = max(int(chunk_size), 1)
+    return [
+        {
+            "group": f"priority_researchers_{index // size + 1}",
+            "query": (
+                "("
+                + " OR ".join(
+                    f'au:"{_escape(name)}"' for name in authors[index : index + size]
+                )
+                + f") AND ({category_query})"
+            ),
+            "authors": authors[index : index + size],
+        }
+        for index in range(0, len(authors), size)
+    ]
+
+
 def openalex_search_plan(path: str = "") -> list[str]:
     """OpenAlex 搜索语法较宽松；每个领域保留一条独立检索以便去重。"""
     return [

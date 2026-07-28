@@ -43,6 +43,7 @@
 
 | Variable | 填写内容 |
 |---|---|
+| `LLM_REQUEST_TIMEOUT_SECONDS` | 推荐 `180`；单次模型请求硬上限，业务层另有一次可审计重试 |
 | `OPENREVIEW_VENUES` | 逗号分隔的 venue id |
 | `SEMANTIC_SCHOLAR_ENABLED` | 没有获批 Key 时填 `false`；只有同时创建 Key Secret 时才填 `true` |
 | `RESEARCH_FEED_URLS` | 已验证的官方 RSS/Atom 地址，逗号分隔 |
@@ -57,7 +58,8 @@
 | `REDDIT_USER_AGENT` | 例如 `python:ai-paradigm-radar:v1.0 (by /u/你的用户名)`；不含密钥，可放 Variable |
 | `TAVILY_REQUEST_SAFETY_LIMIT` | Tavily credit 熔断；默认 `0`，搜索全部通过 Rubric 的深挖候选 |
 | `TAVILY_DISCOVERY_DOMAINS` | 默认留空执行全网发现；只有要限制 Tavily 站点时才填逗号分隔域名 |
-| `PARADIGM_RECALL_OVERLAP_DAYS` | 推荐 `14`；周更重叠扫描并由数据库去重，修复单周接口失败或索引晚到 |
+| `PARADIGM_RECALL_OVERLAP_DAYS` | 推荐 `30`；周报仍只交付 7 天新增，发现层重叠扫描一个月并由数据库去重 |
+| `PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED` | 推荐 `true`；启用与领域术语独立的重点研究者 arXiv 召回车道 |
 | `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS` | 推荐 `60`；状态数据库为空或覆盖地图版本变化时使用 |
 | `PARADIGM_RESEARCHER_PROFILE_LIMIT` | 推荐 `6`；覆盖前三位、末位/资深作者和重点研究者 |
 | `PARADIGM_*_SAFETY_LIMIT` | 可选运行熔断；默认/推荐 `0`，表示数量完全由 Rubric 结果决定 |

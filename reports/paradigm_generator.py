@@ -158,12 +158,37 @@ class ParadigmReportGenerator:
             for domain_id, value in (coverage.get("domains") or {}).items()
             if value.get("status") in {"query_failed", "not_executed"}
         ]
+        failed_lanes = [
+            name
+            for name, value in (coverage.get("recall_lanes") or {}).items()
+            if value.get("status") == "query_failed"
+        ]
+        official = coverage.get("official_pages") or {}
+        official_incomplete = (
+            int(official.get("checked_pages", 0) or 0)
+            < int(official.get("total_pages", 0) or 0)
+            or bool(official.get("request_failed"))
+            or bool(official.get("parse_zero_links"))
+            or bool(official.get("detail_failures"))
+        )
+        incomplete_parts = []
+        if incomplete:
+            incomplete_parts.append("领域：" + "、".join(incomplete))
+        if failed_lanes:
+            incomplete_parts.append("召回车道：" + "、".join(failed_lanes))
+        if official_incomplete:
+            incomplete_parts.append(
+                "官方入口："
+                f"请求失败 {official.get('request_failed', 0)}、"
+                f"解析零链接 {official.get('parse_zero_links', 0)}、"
+                f"详情失败 {official.get('detail_failures', 0)}"
+            )
         coverage_note = (
             "\n\n但本轮存在**召回覆盖未闭合**："
-            + "、".join(incomplete)
-            + " 的查询失败或未执行。因此这是一份运行不完整的空报告，"
+            + "；".join(incomplete_parts)
+            + "。因此这是一份运行不完整的空报告，"
             "不能解释为这些领域没有创新；请结合随信附带的运行审计重试。"
-            if incomplete
+            if incomplete_parts
             else ""
         )
         return f"""# AI 技术范式雷达
