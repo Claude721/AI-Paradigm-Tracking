@@ -168,6 +168,13 @@ def collect_checks() -> list[Check]:
             if config.TWITTER_BEARER_TOKEN
             else "未配置时自动跳过，不影响主流程",
         ),
+        Check(
+            "真实接口 Smoke 契约",
+            "云端部署验收",
+            "ready",
+            f"逐项总时限 {config.SMOKE_CHECK_TIMEOUT_SECONDS}s；"
+            "OpenAlex/OpenReview 只发单页最小请求；关键失败与辅助源降级分账",
+        ),
         _email_check(),
         _schedule_check(),
     ]

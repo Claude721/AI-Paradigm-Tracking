@@ -1,6 +1,14 @@
 # AI 技术范式雷达体检报告
 
-> 2026-07-28 第十次更新。本轮从 T‑Rex 与 Kimi‑K3 横向扩展召回故障树，把领域术语、重点研究者、正式文档、官方页面与人工补录拆成独立车道，并补齐逐入口审计；没有运行真实完整流水线，也没有发送邮件。
+> 2026-07-29 第十一次更新。本轮依据 GitHub Actions Smoke 实际失败日志，重构最小请求契约、阻断分级、学术索引分页和 429 审计；没有运行新的真实 API 请求、完整流水线或邮件发送。
+
+## 2026-07-29 GitHub Smoke 失败复盘
+
+线上 Smoke 共 17 项，真正的阻断点只有 OpenReview；但日志揭示了两个比红叉更重要的工程错误。第一，Smoke 直接复用了生产分页器：OpenAlex 以每页 3 条遍历出 2649 条结果，单项耗时 306.7 秒；OpenReview 则为了验证连通性翻到 `offset=100`，随后触发 429。第二，Smoke 把生产中本来允许降级的 OpenReview 临时限流当成整套系统不可部署，而必需配置缺失反而可能显示为 skipped。也就是说，旧 Smoke 同时混淆了**连通性验证与召回完整性**、**关键契约与辅助信源**。
+
+修复后，OpenAlex Works 与 OpenReview 的 Smoke 都只发一个最小请求，并由 `SMOKE_CHECK_TIMEOUT_SECONDS=30` 提供逐项总时限。结果语义分为 passed、degraded、failed、skipped：LLM、arXiv、OpenAlex、官方研究页、GitHub、已配置的 Tavily 和 SMTP 等关键契约失败才阻断；OpenReview/RSS/HN 等可降级源的临时 429 保留黄色记录，不伪装成健康，也不违背完整流水线本就允许单源降级的原则。
+
+这次事故还反推出生产侧风险：OpenAlex 全文 search 的相关性尾部可能长期包含摘要弱命中，旧“连续两页无领域词才停止”并不能真正耗尽。OpenAlex 现被明确收窄为**已知路线高精度车道**，只保留标题或 OpenAlex 主题明确命中查询机制的工作；未知术语继续由重点研究者、正式报告、官方页面和人工 seed 等独立车道承担。生产 OpenReview 降低并发并对 429 做有界退避。两者的查询完成数、HTTP 请求数、结果数与 429 次数都会进入运行审计和空报告覆盖判断。
 
 ## T‑Rex 漏项揭示的系统问题
 
@@ -21,7 +29,7 @@
 - 人物核验默认覆盖前三位、末位/资深作者和重点名单作者；报告必须区分共同一作、普通合作者与资深研究网络。
 - 正式准入分开计算技术 Rubric、发布者/研究者势能、官方实现承接和独立二次响应。官方仓库不能伪装成独立验证，未知团队也不能只靠作者自述越过门槛。
 - 跨周路线以问题、机制、路线词和领域做保守对齐；已拒绝与尚未深挖的路线不会劫持未来新候选。讨论互动量只有跨越有意义量级时才触发更新。
-- OpenAlex 仍不使用固定候选数；但在相关性排序后连续两页没有覆盖地图内有效结果时停止翻页，避免 60 天冷启动无界下载。
+- OpenAlex 仍不使用固定候选数；但在相关性排序后连续两页没有标题/主题层面的查询短语强命中时停止翻页，避免摘要弱命中让 60 天冷启动无界下载。未知术语不由这条高精度车道承担。
 - `tests/test_frontier_canaries.py` 固化从召回到准入的 T‑Rex 黄金链路，并补充 World Model、AI4S、软件/系统、语音、自动驾驶、词边界噪声及跨周路由反例。
 
 ## Kimi‑K3 金丝雀揭示的系统问题
@@ -86,7 +94,7 @@ Kimi‑K3 的实际标题是 *Kimi K3: Open Frontier Intelligence*，标题本�
 
 ## 可靠性边界
 
-- 单一论文、博客、OpenReview、Semantic Scholar、GitHub、HN 或 Follow Builders 信源失败时继续降级运行；真实 smoke test 则会对“已经配置却鉴权失败”的接口返回非零，避免把降级误当成健康。
+- 单一论文、博客、OpenReview、Semantic Scholar、HN 或 Follow Builders 信源失败时继续降级运行；真实 Smoke 对关键接口契约返回非零，对生产中本就可降级的辅助信源标记 `degraded`。两者都进入结构化审计，既不把临时 429 误判为系统不可部署，也不把降级伪装成健康。
 - 必需邮件投递失败会让任务失败；失败任务不登记交付，并回滚本次数据库变化，修复后可完整重试。
 - GitHub Actions 只在任务成功后保存去重数据库，避免云端失败状态污染下一周。
 - 报告编辑质量失败与 SMTP 失败一样会触发整轮回滚，可在修复后安全重跑。
@@ -96,10 +104,10 @@ Kimi‑K3 的实际标题是 *Kimi K3: Open Frontier Intelligence*，标题本�
 ## 验证结果
 
 - Python 静态编译通过。
-- 100 项本地单元测试通过，新增覆盖 Rubric 类型题、离散答案确定性计分、模型数字分无效、低分辨率到高分辨率的心智模型结构、T‑Rex 与 Kimi‑K3 双金丝雀、无术语重点研究者车道、品牌化官方发布、JSON-LD、详情页 Full Report、跨全文取样、报告机制数量不截断、无机制 System Card、逐入口审计、高势能边界复核、行业覆盖、人物贡献、官方/独立证据分账、重叠召回、地图版本化基线更新、OpenAlex 自适应证据耗尽和社区失败可见性，以及原有接口、持久化与邮件回归。
+- 109 项本地单元测试通过，新增覆盖 Rubric 类型题、离散答案确定性计分、模型数字分无效、低分辨率到高分辨率的心智模型结构、T‑Rex 与 Kimi‑K3 双金丝雀、无术语重点研究者车道、品牌化官方发布、JSON-LD、详情页 Full Report、跨全文取样、报告机制数量不截断、无机制 System Card、逐入口审计、高势能边界复核、行业覆盖、人物贡献、官方/独立证据分账、重叠召回、地图版本化基线更新、OpenAlex 高精度相关性耗尽、OpenReview 429 退避、Smoke 单请求契约/逐项时限/阻断分级、官方页面取样与生产熔断分账和社区失败可见性，以及原有接口、持久化与邮件回归。
 - GitHub Actions YAML 语法通过本地解析。
 - 工作流已升级为 Node 24 Actions：`checkout@v6`、`setup-python@v6`、`upload-artifact@v7`；关闭 checkout 凭据持久化以消除无用的 post-job Git 清理。
 - 真实小成本验证已通过 Qwen `qwen3.7-plus`、arXiv、Hugging Face Daily Papers、OpenAlex Works/Authors、官方研究页、Hacker News、Tavily 和 QQ SMTP 登录（未发信）。本轮又以 Kimi‑K3 验证了 arXiv 自然检索、comment 专项检索、Kimi Research 页面、Moonshot 团队归属和官方 PDF 回退。OpenReview 在修复后通过定向复测。Semantic Scholar、Reddit 与 X 因未配置而按设计跳过。
 - 当前唯一已知的本地凭据阻塞是 `GITHUB_TOKEN`：GitHub `/rate_limit` 明确返回 HTTP 401；Token 长度、前缀和空白格式正常，因此需要在 GitHub 重新生成后替换，而不是继续改代码。
 
-下一次真实验收先替换本地 GitHub Token，再运行 `python main.py --smoke-test`。全部已配置接口通过后，才执行一次受预算保护的完整流水线，重点检查重要 Technical Report 是否进入候选、审计漏斗能否解释每次去留、人物公开入口是否充分，以及正文是否完全摆脱英文摘要直出。
+下一次真实验收重新运行 GitHub `smoke_only=true`。关键项应全部通过；若 OpenReview 等辅助源仍出现 429，应显示为 `degraded` 且在约 30 秒内结束，而不是分页五分钟后让 Workflow 失败。随后再执行一次带双金丝雀 seed 的完整流水线，重点检查重要 Technical Report 是否进入候选、学术索引请求审计能否解释覆盖缺口、人物公开入口是否充分，以及正文是否完全摆脱英文摘要直出。

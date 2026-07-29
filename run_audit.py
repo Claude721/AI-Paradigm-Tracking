@@ -204,6 +204,20 @@ def _render_markdown(payload: dict[str, Any]) -> str:
             )
     else:
         lines.append("- 本轮没有记录术语、人物、报告和精确补录车道状态。")
+    academic_indexes = coverage.get("academic_indexes") or {}
+    lines.extend(["", "## 学术索引请求健康度", ""])
+    if academic_indexes:
+        for name, value in academic_indexes.items():
+            lines.append(
+                f"- {name}：{value.get('status')}；"
+                f"查询 {value.get('completed_queries', 0)}/"
+                f"{value.get('queries', 0)}；"
+                f"HTTP 请求 {value.get('requests', 0)}；"
+                f"429 {value.get('rate_limited_requests', 0)}；"
+                f"结果 {value.get('results', 0)}"
+            )
+    else:
+        lines.append("- 本轮没有记录 OpenAlex/OpenReview 请求与限流状态。")
     official = coverage.get("official_pages") or {}
     lines.extend(["", "## 官方研究入口健康度", ""])
     if official:

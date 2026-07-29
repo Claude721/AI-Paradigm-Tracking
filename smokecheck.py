@@ -8,7 +8,7 @@ import smtplib
 import ssl
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,8 +19,6 @@ from agents.llm_utils import build_client, resolve_all
 from sources.arxiv_source import ArxivSource
 from sources.follow_builders_source import FollowBuildersSource
 from sources.hf_papers_source import HuggingFacePapersSource
-from sources.openalex_source import OpenAlexSource
-from sources.openreview_source import OpenReviewSource
 from sources.priority_research_source import PriorityResearchPageSource
 from sources.research_feed_source import ResearchFeedSource
 
@@ -32,6 +30,7 @@ class SmokeResult:
     count: int = 0
     latency_ms: int = 0
     detail: str = ""
+    blocking: bool = True
 
 
 async def run_smoke_checks(
@@ -55,6 +54,7 @@ async def run_smoke_checks(
             True,
             _arxiv,
             require_results=True,
+            required_config=True,
         )
     )
     results.append(
@@ -63,6 +63,7 @@ async def run_smoke_checks(
             True,
             _huggingface,
             require_results=True,
+            blocking_on_failure=False,
         )
     )
     results.append(
@@ -72,6 +73,7 @@ async def run_smoke_checks(
             _follow_builders,
             require_results=True,
             skipped_detail="FOLLOW_BUILDERS_ENABLED=false",
+            blocking_on_failure=False,
         )
     )
     results.append(
@@ -81,6 +83,7 @@ async def run_smoke_checks(
             _openalex_works,
             require_results=True,
             skipped_detail="未配置 OPENALEX_API_KEY",
+            required_config=True,
         )
     )
     results.append(
@@ -90,6 +93,7 @@ async def run_smoke_checks(
             _openalex_authors,
             require_results=True,
             skipped_detail="未配置 OPENALEX_API_KEY",
+            required_config=True,
         )
     )
     results.append(
@@ -97,8 +101,9 @@ async def run_smoke_checks(
             "OpenReview",
             bool(config.OPENREVIEW_VENUES),
             _openreview,
-            require_results=True,
+            require_results=False,
             skipped_detail="未配置 OPENREVIEW_VENUES",
+            blocking_on_failure=False,
         )
     )
     results.append(
@@ -108,6 +113,7 @@ async def run_smoke_checks(
             _priority_pages,
             require_results=True,
             skipped_detail="没有高优先级官方研究页",
+            required_config=True,
         )
     )
     results.append(
@@ -117,6 +123,7 @@ async def run_smoke_checks(
             _research_feeds,
             require_results=True,
             skipped_detail="未配置 RESEARCH_FEED_URLS",
+            blocking_on_failure=False,
         )
     )
     results.append(
@@ -126,6 +133,7 @@ async def run_smoke_checks(
             _github,
             require_results=True,
             skipped_detail="未配置 GITHUB_TOKEN；不会匿名调用 Search API",
+            required_config=True,
         )
     )
     results.append(
@@ -134,6 +142,7 @@ async def run_smoke_checks(
             True,
             _hackernews,
             require_results=True,
+            blocking_on_failure=False,
         )
     )
     if include_tavily:
@@ -158,17 +167,30 @@ async def run_smoke_checks(
             _semantic_scholar,
             require_results=True,
             skipped_detail="未显式启用或没有获批 Key；已确认不会匿名请求",
+            blocking_on_failure=False,
         )
     )
     results.append(
         _skipped("Reddit 官方 API", "未获批或 OAuth 配置不完整；运行时正确跳过")
         if not _reddit_configured()
-        else await _check("Reddit 官方 API", True, _reddit, require_results=False)
+        else await _check(
+            "Reddit 官方 API",
+            True,
+            _reddit,
+            require_results=False,
+            blocking_on_failure=False,
+        )
     )
     results.append(
         _skipped("X Recent Search", "未配置 TWITTER_BEARER_TOKEN；运行时正确跳过")
         if not config.TWITTER_BEARER_TOKEN
-        else await _check("X Recent Search", True, _x_recent_search, require_results=False)
+        else await _check(
+            "X Recent Search",
+            True,
+            _x_recent_search,
+            require_results=False,
+            blocking_on_failure=False,
+        )
     )
 
     if include_smtp:
@@ -179,6 +201,7 @@ async def run_smoke_checks(
                 _smtp,
                 require_results=False,
                 skipped_detail="SMTP 配置不完整",
+                required_config=True,
             )
         )
     else:
@@ -190,7 +213,7 @@ async def run_smoke_checks(
 
 
 def print_smoke_results(results: list[SmokeResult]) -> None:
-    labels = {"passed": "✓", "failed": "✗", "skipped": "–"}
+    labels = {"passed": "✓", "degraded": "△", "failed": "✗", "skipped": "–"}
     print("\nAI 技术范式雷达 — 小成本真实 Smoke Test\n")
     for item in results:
         count = f"，结果={item.count}" if item.count else ""
@@ -200,9 +223,11 @@ def print_smoke_results(results: list[SmokeResult]) -> None:
             f"{item.status}{count}{latency}；{item.detail}"
         )
     failed = [item.name for item in results if item.status == "failed"]
+    degraded = [item.name for item in results if item.status == "degraded"]
     print(
-        f"\n结论：{len(results) - len(failed)}/{len(results)} 项未失败；"
-        f"配置后失败 {len(failed)} 项。"
+        f"\n结论：阻断失败 {len(failed)} 项；"
+        f"非阻断降级 {len(degraded)} 项；"
+        f"部署判定={'失败' if failed else '通过'}。"
     )
     print("明细已写入 logs/smoke_test_latest.json（不含任何密钥或响应正文）。\n")
 
@@ -218,28 +243,50 @@ async def _check(
     *,
     require_results: bool,
     skipped_detail: str = "",
+    required_config: bool = False,
+    blocking_on_failure: bool = True,
 ) -> SmokeResult:
     if not configured:
+        if required_config:
+            return SmokeResult(
+                name=name,
+                status="failed",
+                detail=skipped_detail or "必需配置缺失",
+                blocking=True,
+            )
         return _skipped(name, skipped_detail or "未配置")
     started = time.monotonic()
+    failure_status = "failed" if blocking_on_failure else "degraded"
     try:
-        count, detail = await operation()
+        count, detail = await asyncio.wait_for(
+            operation(),
+            timeout=config.SMOKE_CHECK_TIMEOUT_SECONDS,
+        )
         latency = int((time.monotonic() - started) * 1000)
         if require_results and count <= 0:
             return SmokeResult(
                 name=name,
-                status="failed",
+                status=failure_status,
                 count=0,
                 latency_ms=latency,
                 detail=detail or "接口可连接，但没有返回可用结果",
+                blocking=blocking_on_failure,
             )
-        return SmokeResult(name, "passed", count, latency, detail)
+        return SmokeResult(
+            name,
+            "passed",
+            count,
+            latency,
+            detail,
+            blocking=blocking_on_failure,
+        )
     except Exception as exc:
         return SmokeResult(
             name=name,
-            status="failed",
+            status=failure_status,
             latency_ms=int((time.monotonic() - started) * 1000),
             detail=_safe_error(exc),
+            blocking=blocking_on_failure,
         )
 
 
@@ -300,12 +347,26 @@ async def _follow_builders() -> tuple[int, str]:
 
 
 async def _openalex_works() -> tuple[int, str]:
-    items = await OpenAlexSource(
-        lookback_days=90,
-        per_query=3,
-        searches=['"world model" AND (video OR robotics OR embodied)'],
-    ).fetch()
-    return len(items), _sample(items)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).date()
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.get(
+            "https://api.openalex.org/works",
+            headers={"User-Agent": "AI-Paradigm-Radar/3.2"},
+            params={
+                "api_key": config.OPENALEX_API_KEY,
+                "search": '"world model"',
+                "filter": f"from_publication_date:{cutoff.isoformat()}",
+                "sort": "relevance_score:desc,publication_date:desc",
+                "per-page": 2,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+    items = payload.get("results")
+    if not isinstance(items, list):
+        raise ValueError("OpenAlex Works 响应缺少 results 列表")
+    sample = str(items[0].get("display_name", "")) if items else "无作品结果"
+    return len(items), f"单次请求；示例={sample}"
 
 
 async def _openalex_authors() -> tuple[int, str]:
@@ -326,13 +387,30 @@ async def _openalex_authors() -> tuple[int, str]:
 
 
 async def _openreview() -> tuple[int, str]:
-    items = await OpenReviewSource(
-        lookback_days=730,
-        limit=5,
-        venues=config.OPENREVIEW_VENUES[:1],
-        searches=["world model"],
-    ).fetch()
-    return len(items), _sample(items)
+    async with httpx.AsyncClient(
+        timeout=20,
+        follow_redirects=True,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "AI-Paradigm-Radar/3.2",
+        },
+    ) as client:
+        response = await client.get(
+            "https://api2.openreview.net/notes/search",
+            params={
+                "query": "world model",
+                "venueid": config.OPENREVIEW_VENUES[0],
+                "limit": 1,
+                "offset": 0,
+                "sort": "tmdate:desc",
+                "details": "replyCount",
+            },
+        )
+        response.raise_for_status()
+        notes = response.json().get("notes")
+    if not isinstance(notes, list):
+        raise ValueError("OpenReview 响应缺少 notes 列表")
+    return len(notes), "单次请求；HTTP 与 notes 响应契约正常"
 
 
 async def _priority_pages() -> tuple[int, str]:
@@ -522,7 +600,12 @@ def _reddit_configured() -> bool:
 
 
 def _skipped(name: str, detail: str) -> SmokeResult:
-    return SmokeResult(name=name, status="skipped", detail=detail)
+    return SmokeResult(
+        name=name,
+        status="skipped",
+        detail=detail,
+        blocking=False,
+    )
 
 
 def _sample(items: list) -> str:
@@ -544,7 +627,17 @@ def _safe_error(exc: Exception) -> str:
             )
         if response.status_code == 401 and host == "api.tavily.com":
             return "HTTP 401 (api.tavily.com)：TAVILY_API_KEY 无效"
+        if response.status_code == 429:
+            return (
+                f"HTTP 429 ({host})：第三方接口临时限流；"
+                "最小请求已停止，不继续生产级分页"
+            )
         return f"HTTP {response.status_code} ({host})"
+    if isinstance(exc, TimeoutError):
+        return (
+            f"TimeoutError：单项超过 {config.SMOKE_CHECK_TIMEOUT_SECONDS}s，"
+            "已停止该接口检查"
+        )
     return f"{type(exc).__name__}: {str(exc)[:240]}"
 
 
@@ -555,8 +648,10 @@ def _write_results(results: list[SmokeResult]) -> None:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "summary": {
             "passed": sum(item.status == "passed" for item in results),
+            "degraded": sum(item.status == "degraded" for item in results),
             "failed": sum(item.status == "failed" for item in results),
             "skipped": sum(item.status == "skipped" for item in results),
+            "deployment_ready": not smoke_failed(results),
         },
         "results": [asdict(item) for item in results],
     }

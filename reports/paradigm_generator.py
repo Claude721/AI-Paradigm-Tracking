@@ -163,6 +163,17 @@ class ParadigmReportGenerator:
             for name, value in (coverage.get("recall_lanes") or {}).items()
             if value.get("status") == "query_failed"
         ]
+        academic_incomplete = [
+            (
+                f"{name}={value.get('status')}"
+                f"(queries {value.get('completed_queries', 0)}/"
+                f"{value.get('queries', 0)}, 429 "
+                f"{value.get('rate_limited_requests', 0)})"
+            )
+            for name, value in (coverage.get("academic_indexes") or {}).items()
+            if value.get("status")
+            not in {"completed", "completed_after_retry"}
+        ]
         official = coverage.get("official_pages") or {}
         official_incomplete = (
             int(official.get("checked_pages", 0) or 0)
@@ -176,6 +187,8 @@ class ParadigmReportGenerator:
             incomplete_parts.append("领域：" + "、".join(incomplete))
         if failed_lanes:
             incomplete_parts.append("召回车道：" + "、".join(failed_lanes))
+        if academic_incomplete:
+            incomplete_parts.append("学术索引：" + "、".join(academic_incomplete))
         if official_incomplete:
             incomplete_parts.append(
                 "官方入口："

@@ -21,6 +21,7 @@ LLM_MODEL=qwen3.7-plus
 LLM_API_KEY=你的百炼API-Key
 LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_REQUEST_TIMEOUT_SECONDS=180
+SMOKE_CHECK_TIMEOUT_SECONDS=30
 
 SUB_AGENT_PROVIDER=dashscope
 SUB_AGENT_MODEL=qwen3.7-plus
@@ -31,6 +32,8 @@ MAIN_AGENT_MODEL=qwen3.7-plus
 `SUB_AGENT_API_KEY` 和 `MAIN_AGENT_API_KEY` 可以留空继承 `LLM_API_KEY`；如果分别填写，也应使用有效的 DashScope Key。
 
 `LLM_REQUEST_TIMEOUT_SECONDS` 是单次请求的硬上限。推荐保持 `180`；程序关闭 SDK 隐式重试，由各 Agent 自己执行一次有审计记录的重试，避免长报告在 GitHub Actions 中无边界等待。
+
+`SMOKE_CHECK_TIMEOUT_SECONDS` 是每个真实接口冒烟的总时限，推荐 `30`。冒烟只验证一次最小请求和响应结构，不复用生产分页器；它不会因为一个“每页 3 条”的参数反而把数千条搜索结果全部翻完。
 
 OpenAlex：
 
@@ -225,7 +228,7 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT=6
 
 五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版 `PARADIGM_MIN_*` 与 `PARADIGM_MAX_*` 已停用，GitHub 中即使残留也不会影响新逻辑。
 
-第一次运行前必须先做专用 smoke test。它每个接口只取极少结果、模型只要求回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。
+第一次运行前必须先做专用 smoke test。它每个接口只发有总时限的最小请求、模型只要求回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。OpenAlex Works 与 OpenReview 各只请求一页，绝不执行生产级 cursor/offset 分页。
 
 ## E. 时间窗口与自动任务
 
@@ -234,7 +237,7 @@ SOURCING_LOOKBACK_DAYS=7
 PARADIGM_RECALL_OVERLAP_DAYS=30
 SCHEDULE_DAY_OF_WEEK=fri
 SCHEDULE_HOUR=9
-SCHEDULE_MINUTE=0
+SCHEDULE_MINUTE=15
 SCHEDULE_TIMEZONE=Asia/Shanghai
 ```
 
@@ -260,7 +263,7 @@ python main.py --doctor
 python main.py --smoke-test
 ```
 
-`--doctor` 只检查“有没有配置”；`--smoke-test` 才真实检查“凭据和接口能不能用”。结果同时写入 `logs/smoke_test_latest.json`，其中不含密钥或响应正文。只有配置过的接口失败时命令才返回非零；明确未配置的可选接口显示 `skipped`。
+`--doctor` 只检查“有没有配置”；`--smoke-test` 才真实检查“凭据和接口能不能用”。结果同时写入 `logs/smoke_test_latest.json`，其中不含密钥或响应正文。结果分为 `passed`、`degraded`、`failed` 与 `skipped`：关键契约失败才阻断部署；OpenReview 等生产中本来允许降级的辅助源出现临时 429 时保留黄色审计，但不让整次 Workflow 变红；明确未配置的可选接口显示 `skipped`。
 
 只有以下项目通过或明确跳过后再首跑：
 

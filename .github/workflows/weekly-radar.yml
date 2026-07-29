@@ -52,6 +52,7 @@ jobs:
       LLM_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
       LLM_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
       LLM_REQUEST_TIMEOUT_SECONDS: ${{ vars.LLM_REQUEST_TIMEOUT_SECONDS || '180' }}
+      SMOKE_CHECK_TIMEOUT_SECONDS: ${{ vars.SMOKE_CHECK_TIMEOUT_SECONDS || '30' }}
       SUB_AGENT_PROVIDER: dashscope
       SUB_AGENT_MODEL: qwen3.7-plus
       SUB_AGENT_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}

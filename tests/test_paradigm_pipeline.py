@@ -1070,6 +1070,17 @@ class ParadigmPipelineTests(unittest.TestCase):
                             "hits": 0,
                         }
                     },
+                    "academic_indexes": {
+                        "openreview": {
+                            "status": "partial",
+                            "queries": 4,
+                            "completed_queries": 3,
+                            "failed_queries": 1,
+                            "requests": 8,
+                            "rate_limited_requests": 2,
+                            "results": 5,
+                        }
+                    },
                     "official_pages": {
                         "total_pages": 2,
                         "checked_pages": 2,
@@ -1082,6 +1093,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         self.assertIn("运行不完整的空报告", content)
         self.assertIn("priority_researchers_1", content)
+        self.assertIn("openreview=partial", content)
         self.assertIn("官方入口", content)
 
     def test_paradigm_skill_renders_json_contract(self) -> None:
@@ -1264,6 +1276,22 @@ class ParadigmPipelineTests(unittest.TestCase):
         coverage = source.coverage()
         self.assertEqual(coverage["parse_zero_links"], 1)
         self.assertEqual(coverage["request_failed"], 0)
+
+    def test_priority_source_distinguishes_smoke_sampling_from_user_safety_limit(
+        self,
+    ) -> None:
+        with patch.object(config, "PRIORITY_RESEARCH_LINK_SAFETY_LIMIT", 0):
+            sampled = PriorityResearchPageSource(
+                per_page=2,
+                pages=["https://lab.example/research"],
+            )
+        with patch.object(config, "PRIORITY_RESEARCH_LINK_SAFETY_LIMIT", 3):
+            configured = PriorityResearchPageSource(
+                pages=["https://lab.example/research"],
+            )
+
+        self.assertEqual(sampled.limit_origin, "caller_sample")
+        self.assertEqual(configured.limit_origin, "configured_safety_limit")
 
     def test_arxiv_report_query_failure_does_not_drop_regular_feed(self) -> None:
         source = ArxivSource(max_results=5, lookback_days=7)
@@ -1558,6 +1586,53 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertEqual(result, [])
         self.assertEqual(transport.get.await_count, 2)
 
+    def test_openalex_known_route_lane_ignores_abstract_only_tail(self) -> None:
+        def page(results: list[dict], cursor: str) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"results": results, "meta": {"next_cursor": cursor}},
+                request=httpx.Request("GET", "https://api.openalex.org/works"),
+            )
+
+        strong = {
+            "id": "https://openalex.org/W1",
+            "display_name": "A World Model for Robot Planning",
+            "publication_date": "2026-07-20",
+            "primary_topic": {"display_name": "World Models"},
+            "abstract_inverted_index": {"world": [0], "model": [1]},
+        }
+        weak = {
+            "id": "https://openalex.org/W2",
+            "display_name": "A Generic Prediction Method",
+            "publication_date": "2026-07-20",
+            "primary_topic": {"display_name": "Machine Learning"},
+            # 全文 search 会返回只在摘要里弱命中的尾部结果；它不应让
+            # OpenAlex 已知路线车道继续无界翻页。
+            "abstract_inverted_index": {"world": [0], "model": [1]},
+        }
+        transport = MagicMock()
+        transport.get = AsyncMock(
+            side_effect=[
+                page([strong], "cursor-1"),
+                page([weak], "cursor-2"),
+                page([weak], "cursor-3"),
+            ]
+        )
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        source = OpenAlexSource(searches=['"world model"'], per_query=1)
+        with (
+            patch.object(config, "OPENALEX_API_KEY", "configured"),
+            patch("sources.openalex_source.httpx.AsyncClient", return_value=context),
+        ):
+            result = asyncio.run(source.fetch())
+
+        self.assertEqual([item.title for item in result], [strong["display_name"]])
+        self.assertEqual(transport.get.await_count, 3)
+        self.assertEqual(source.coverage()["requests"], 3)
+        self.assertEqual(source.coverage()["status"], "completed")
+
     def test_openreview_uses_public_search_endpoint_instead_of_challenged_notes(self) -> None:
         response = httpx.Response(
             200,
@@ -1587,6 +1662,45 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertEqual(
             call.kwargs["params"]["venueid"], "ICLR.cc/2026/Conference"
         )
+
+    def test_openreview_retries_429_and_exposes_degraded_coverage(self) -> None:
+        request = httpx.Request(
+            "GET", "https://api2.openreview.net/notes/search"
+        )
+        rate_limited = httpx.Response(
+            429,
+            headers={"Retry-After": "0"},
+            request=request,
+        )
+        recovered = httpx.Response(
+            200,
+            json={"notes": []},
+            request=request,
+        )
+        transport = MagicMock()
+        transport.get = AsyncMock(side_effect=[rate_limited, recovered])
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        source = OpenReviewSource(
+            venues=["ICLR.cc/2026/Conference"],
+            searches=["world model"],
+            limit=2,
+            concurrency=1,
+        )
+        with (
+            patch("sources.openreview_source.httpx.AsyncClient", return_value=context),
+            patch(
+                "sources.openreview_source.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            result = asyncio.run(source.fetch())
+
+        self.assertEqual(result, [])
+        self.assertEqual(transport.get.await_count, 2)
+        self.assertEqual(source.coverage()["rate_limited_requests"], 1)
+        self.assertEqual(source.coverage()["status"], "completed_after_retry")
 
     def test_tavily_budget_is_shared_across_candidates(self) -> None:
         response = httpx.Response(

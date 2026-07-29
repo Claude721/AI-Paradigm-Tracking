@@ -5,7 +5,7 @@
 - 每周五 09:15（Asia/Shanghai）由 GitHub 云端运行，本机无需开机。
 - GitHub Actions 页面提供“Run workflow”按钮，可以随时手动执行，并选择 7/30/60/90 天窗口或填写精确 arXiv ID。
 - 手动运行还可以勾选 `reset_state`，强制忽略旧数据库。
-- `smoke_only=true` 时只做小成本真实接口验证：Qwen 只回复一次 `OK`，Tavily 只消耗一个 basic request，SMTP 只登录不发信；不会生成报告或改动去重数据库。
+- `smoke_only=true` 时只做小成本真实接口验证：Qwen 只回复一次 `OK`，OpenAlex Works 与 OpenReview 各请求一页，Tavily 只消耗一个 basic request，SMTP 只登录不发信；每项默认 30 秒总时限，不会生成报告或改动去重数据库。
 - 自动与手动触发都执行 `python main.py`，报告生成后都会发送邮件。
 - SMTP 发送失败会让任务失败，不会把该报告登记成已成功交付。
 - 报告若包含英文长段、评分表、字段拼装或缺少核心章节，会先自动重写一次；仍不合格则任务失败且不发送邮件。
@@ -44,6 +44,7 @@
 | Variable | 填写内容 |
 |---|---|
 | `LLM_REQUEST_TIMEOUT_SECONDS` | 推荐 `180`；单次模型请求硬上限，业务层另有一次可审计重试 |
+| `SMOKE_CHECK_TIMEOUT_SECONDS` | 推荐 `30`；每个真实接口冒烟的总时限，且冒烟不执行生产分页 |
 | `OPENREVIEW_VENUES` | 逗号分隔的 venue id |
 | `SEMANTIC_SCHOLAR_ENABLED` | 没有获批 Key 时填 `false`；只有同时创建 Key Secret 时才填 `true` |
 | `RESEARCH_FEED_URLS` | 已验证的官方 RSS/Atom 地址，逗号分隔 |
@@ -75,7 +76,7 @@ GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留�
 1. 打开仓库的 `Actions`。
 2. 选择 `AI 技术范式雷达`。
 3. 点击 `Run workflow`，第一次选择 `7` 天，保持 `smoke_only=true`。精确 arXiv ID 留空，此时 `reset_state` 不影响结果。
-4. 确认“配置体检”和“小成本真实接口冒烟”均为绿色，并下载 `paradigm-radar-audit-*` 查看 `smoke_test_latest.json`。
+4. 确认“配置体检”和“小成本真实接口冒烟”均为绿色，并下载 `paradigm-radar-audit-*` 查看 `smoke_test_latest.json`。`degraded` 表示 OpenReview 等可降级信源临时限流，Workflow 可以通过但必须保留观察；`failed` 才表示关键接口契约不成立。
 5. 再次点击 `Run workflow`，把 `smoke_only` 改成 `false`，把 `reset_state` 改成 `true`，执行新版本第一次完整运行。
 6. 确认“抓取、分析并发送邮件”“保存跨周去重状态”全部为绿色。
 7. 确认收件箱收到邮件及运行审计附件，并在该次运行的 Artifacts 中看到报告、`paradigm-radar-state` 与 `paradigm-radar-audit-*`。

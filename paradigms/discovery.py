@@ -46,9 +46,11 @@ class ParadigmDiscovery:
         self.hf = HuggingFacePapersSource(lookback_days=lookback)
         self.follow_builders = FollowBuildersSource()
         self.priority_pages = PriorityResearchPageSource(lookback_days=lookback)
+        self.openalex = OpenAlexSource(lookback_days=lookback)
+        self.openreview = OpenReviewSource(lookback_days=lookback)
         self.evidence_sources = [
-            OpenAlexSource(lookback_days=lookback),
-            OpenReviewSource(lookback_days=lookback),
+            self.openalex,
+            self.openreview,
             ResearchFeedSource(lookback_days=lookback),
             self.priority_pages,
         ]
@@ -131,6 +133,10 @@ class ParadigmDiscovery:
         )
         coverage["recall_lanes"] = self.arxiv.recall_coverage()
         coverage["official_pages"] = self.priority_pages.coverage()
+        coverage["academic_indexes"] = {
+            "openalex": self.openalex.coverage(),
+            "openreview": self.openreview.coverage(),
+        }
         return DiscoveryBatch(
             origins=origins,
             supporting=supporting,

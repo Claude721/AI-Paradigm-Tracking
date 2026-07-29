@@ -51,7 +51,7 @@ class WeeklyPipelineTests(unittest.TestCase):
         trigger = CronTrigger(
             day_of_week="fri",
             hour=9,
-            minute=0,
+            minute=15,
             timezone=timezone_shanghai,
         )
         now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone_shanghai)
@@ -59,7 +59,7 @@ class WeeklyPipelineTests(unittest.TestCase):
         next_fire = trigger.get_next_fire_time(None, now)
 
         self.assertIsNotNone(next_fire)
-        self.assertEqual(next_fire.isoformat(), "2026-07-24T09:00:00+08:00")
+        self.assertEqual(next_fire.isoformat(), "2026-07-24T09:15:00+08:00")
 
     def test_cloud_state_reuses_dedup_history_but_rebuilds_landscape_baseline(self) -> None:
         workflow = Path(".github/workflows/weekly-radar.yml").read_text(
@@ -69,6 +69,7 @@ class WeeklyPipelineTests(unittest.TestCase):
         self.assertIn("state_landscape", workflow)
         self.assertIn("current_landscape", workflow)
         self.assertIn("恢复旧数据库用于证据去重", workflow)
+        self.assertIn("SMOKE_CHECK_TIMEOUT_SECONDS", workflow)
         self.assertNotIn('state_commit="$(jq', workflow)
 
     def test_email_builds_attachment_without_network(self) -> None:
@@ -148,7 +149,30 @@ class WeeklyPipelineTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             result = audit.write(
-                {"origin_count": 1, "analysis_count": 1},
+                {
+                    "origin_count": 1,
+                    "analysis_count": 1,
+                    "frontier_coverage": {
+                        "academic_indexes": {
+                            "openalex": {
+                                "status": "completed",
+                                "queries": 10,
+                                "completed_queries": 10,
+                                "requests": 12,
+                                "rate_limited_requests": 0,
+                                "results": 25,
+                            },
+                            "openreview": {
+                                "status": "partial",
+                                "queries": 4,
+                                "completed_queries": 3,
+                                "requests": 7,
+                                "rate_limited_requests": 2,
+                                "results": 4,
+                            },
+                        }
+                    },
+                },
                 output_dir=directory,
             )
             payload = json.loads(
@@ -164,6 +188,8 @@ class WeeklyPipelineTests(unittest.TestCase):
         self.assertIn("发布者/社区依据：存在独立承接", markdown)
         self.assertIn("最终依据：最终 Rubric 未达到报告阈值", markdown)
         self.assertIn("心智模型脚手架已形成 3 个有效部件", markdown)
+        self.assertIn("学术索引请求健康度", markdown)
+        self.assertIn("HTTP 请求 7；429 2", markdown)
 
     def test_required_email_failure_fails_the_task(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

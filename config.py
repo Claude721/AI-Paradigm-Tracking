@@ -125,6 +125,12 @@ LLM_REQUEST_TIMEOUT_SECONDS: int = max(
     30,
     _env_int("LLM_REQUEST_TIMEOUT_SECONDS", 180),
 )
+# 每个真实接口冒烟的总时限。冒烟只验证最小请求和响应契约，不允许生产
+# 分页逻辑或第三方服务异常无界拖住整轮部署验收。
+SMOKE_CHECK_TIMEOUT_SECONDS: int = max(
+    5,
+    min(_env_int("SMOKE_CHECK_TIMEOUT_SECONDS", 30), 120),
+)
 
 # Ollama 便捷配置（仅当 provider=ollama 时作为 LLM_MODEL/LLM_BASE_URL 的补充）
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "")
@@ -346,10 +352,10 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
 )
 PARADIGM_STATE_SCHEMA_VERSION: int = 2
 
-# 定时任务（默认每周五 09:00，Asia/Shanghai）
+# 定时任务（默认每周五 09:15，Asia/Shanghai；与 GitHub Actions 一致）
 SCHEDULE_DAY_OF_WEEK: str = os.getenv("SCHEDULE_DAY_OF_WEEK", "fri")
 SCHEDULE_HOUR: int = _env_int("SCHEDULE_HOUR", 9)
-SCHEDULE_MINUTE: int = _env_int("SCHEDULE_MINUTE", 0)
+SCHEDULE_MINUTE: int = _env_int("SCHEDULE_MINUTE", 15)
 SCHEDULE_TIMEZONE: str = os.getenv("SCHEDULE_TIMEZONE", "Asia/Shanghai")
 
 # 报告邮件推送（可选；未启用时只生成本地 Markdown）

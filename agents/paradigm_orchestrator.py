@@ -92,6 +92,28 @@ class ParadigmOrchestrator:
                 f"失败 {failed_lanes}；成功但零命中 {zero_lanes}"
             ),
         )
+        academic_indexes = batch.coverage.get("academic_indexes") or {}
+        degraded_indexes = [
+            name
+            for name, value in academic_indexes.items()
+            if value.get("status") != "completed"
+        ]
+        run_audit.event(
+            "academic_index_coverage",
+            "warning" if degraded_indexes else "passed",
+            "；".join(
+                (
+                    f"{name}={value.get('status')}，"
+                    f"queries {value.get('completed_queries', 0)}/"
+                    f"{value.get('queries', 0)}，requests "
+                    f"{value.get('requests', 0)}，results "
+                    f"{value.get('results', 0)}，429 "
+                    f"{value.get('rate_limited_requests', 0)}"
+                )
+                for name, value in academic_indexes.items()
+            )
+            or "没有记录学术索引运行状态",
+        )
         official_coverage = batch.coverage.get("official_pages") or {}
         official_warning = bool(
             int(official_coverage.get("checked_pages", 0) or 0)

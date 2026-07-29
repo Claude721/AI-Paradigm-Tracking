@@ -50,6 +50,13 @@ class PriorityResearchPageSource:
         self.per_page = max(
             per_page if per_page is not None else configured, 0
         )
+        self.limit_origin = (
+            "caller_sample"
+            if per_page is not None
+            else "configured_safety_limit"
+            if configured > 0
+            else "unlimited"
+        )
         self.pages = config.PRIORITY_RESEARCH_PAGES if pages is None else pages
         self.concurrency = max(
             concurrency
@@ -134,16 +141,28 @@ class PriorityResearchPageSource:
                     "allowed_links": len(allowed_links),
                     "recent_links": len(recent_links),
                     "selected_links": len(selected_links),
+                    "selection_limit_origin": self.limit_origin,
                     "detail_failures": 0,
                     "evidence": 0,
                 }
                 if self.per_page > 0 and len(recent_links) > self.per_page:
-                    logger.warning(
-                        "官方研究入口 %s 触发显式 link safety limit：%s → %s",
+                    message = (
+                        "官方研究入口 %s 触发%s：%s → %s"
+                    )
+                    arguments = (
                         index_url,
+                        (
+                            "调用方最小取样预算"
+                            if self.limit_origin == "caller_sample"
+                            else "用户显式 link safety limit"
+                        ),
                         len(recent_links),
                         self.per_page,
                     )
+                    if self.limit_origin == "caller_sample":
+                        logger.info(message, *arguments)
+                    else:
+                        logger.warning(message, *arguments)
                 for link in selected_links:
                     discovered.append((index_url, link))
 
