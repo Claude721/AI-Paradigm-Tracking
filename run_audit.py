@@ -195,6 +195,10 @@ def _render_markdown(payload: dict[str, Any]) -> str:
             "covered": "成功并命中",
             "searched_zero_hits": "成功但零命中",
             "query_failed": "执行失败",
+            "not_executed_rate_limited": "因上游限流未执行",
+            "not_executed_upstream_unavailable": "因上游不可用未执行",
+            "not_executed_transport_failure": "因网络故障未执行",
+            "not_executed_safety_limit": "因用户 safety limit 未执行",
         }
         for name, value in recall_lanes.items():
             lines.append(
@@ -208,16 +212,18 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     lines.extend(["", "## 学术索引请求健康度", ""])
     if academic_indexes:
         for name, value in academic_indexes.items():
+            planned = value.get("planned_queries", value.get("queries", 0))
             lines.append(
                 f"- {name}：{value.get('status')}；"
                 f"查询 {value.get('completed_queries', 0)}/"
-                f"{value.get('queries', 0)}；"
+                f"{planned}；"
                 f"HTTP 请求 {value.get('requests', 0)}；"
                 f"429 {value.get('rate_limited_requests', 0)}；"
-                f"结果 {value.get('results', 0)}"
+                f"结果 {value.get('results', 0)}；"
+                f"未执行 {value.get('not_executed_queries', 0)}"
             )
     else:
-        lines.append("- 本轮没有记录 OpenAlex/OpenReview 请求与限流状态。")
+        lines.append("- 本轮没有记录 arXiv/OpenAlex/OpenReview 请求与限流状态。")
     official = coverage.get("official_pages") or {}
     lines.extend(["", "## 官方研究入口健康度", ""])
     if official:

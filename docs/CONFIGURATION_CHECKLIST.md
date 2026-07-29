@@ -228,7 +228,7 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT=6
 
 五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版 `PARADIGM_MIN_*` 与 `PARADIGM_MAX_*` 已停用，GitHub 中即使残留也不会影响新逻辑。
 
-第一次运行前必须先做专用 smoke test。它每个接口只发有总时限的最小请求、模型只要求回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。OpenAlex Works 与 OpenReview 各只请求一页，绝不执行生产级 cursor/offset 分页。
+第一次运行前必须先做专用 smoke test。它每个接口只发有总时限的最小请求、模型只要求回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。探针不导入或调用生产召回器：arXiv 只查一个稳定 ID，官方研究页只取一个索引页，RSS/Follow Builders 只取一个 Feed，GitHub 只发一次 Search，OpenAlex/OpenReview 也各只请求一页。它不会执行领域、人物、报告、详情页、cursor 或 offset 分页。
 
 ## E. 时间窗口与自动任务
 
@@ -263,7 +263,7 @@ python main.py --doctor
 python main.py --smoke-test
 ```
 
-`--doctor` 只检查“有没有配置”；`--smoke-test` 才真实检查“凭据和接口能不能用”。结果同时写入 `logs/smoke_test_latest.json`，其中不含密钥或响应正文。结果分为 `passed`、`degraded`、`failed` 与 `skipped`：关键契约失败才阻断部署；OpenReview 等生产中本来允许降级的辅助源出现临时 429 时保留黄色审计，但不让整次 Workflow 变红；明确未配置的可选接口显示 `skipped`。
+`--doctor` 只检查“有没有配置”；`--smoke-test` 才真实检查“凭据和接口能不能用”。结果同时写入 `logs/smoke_test_latest.json`，其中不含密钥或响应正文，并带 `contract_version` 与 `failure_kind`。结果分为 `passed`、`degraded`、`failed` 与 `skipped`：公共服务的临时 429、5xx、网络错误和超时标为 `transient_availability/degraded`，不阻断代码部署；401/403、404、配置缺失或响应结构变化仍会失败。明确未配置的可选接口显示 `skipped`。
 
 只有以下项目通过或明确跳过后再首跑：
 

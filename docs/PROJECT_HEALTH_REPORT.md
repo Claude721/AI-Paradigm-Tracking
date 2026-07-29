@@ -1,6 +1,18 @@
 # AI 技术范式雷达体检报告
 
-> 2026-07-29 第十一次更新。本轮依据 GitHub Actions Smoke 实际失败日志，重构最小请求契约、阻断分级、学术索引分页和 429 审计；没有运行新的真实 API 请求、完整流水线或邮件发送。
+> 2026-07-30 第十二次更新。本轮依据 GitHub Actions 第二次 Smoke 失败日志，完成探针与生产召回器的结构性隔离，并补齐 arXiv 的生产限流熔断、车道优先级和部分成功保留；没有运行新的真实 API 请求、完整流水线或邮件发送。
+
+## 2026-07-30 第二次 GitHub Smoke 失败复盘
+
+新日志证明上一轮 OpenAlex/OpenReview 修复已经在线生效：OpenAlex Works 用一次请求在 1.5 秒内返回 2 条，OpenReview 用一次请求在 0.25 秒内返回 1 条；Qwen、Hugging Face、Follow Builders、官方研究页、RSS、GitHub、HN、Tavily 与 SMTP 也都通过。唯一红灯是 arXiv，但它在 Smoke 中发出的仍是包含整组基础模型关键词的生产查询，并继续进入后续召回车道：19 秒时首个领域查询收到 429，30 秒时才被外层总时限取消。因此这不是“arXiv 偶发限流”这一表面现象，而是上一轮只替换了两个出错探针，没有从架构上禁止 Smoke 复用生产抓取器。
+
+本轮把这一边界改成了可回归的契约：
+
+- `smokecheck.py` 不再导入任何生产 Source。arXiv 只精确查询一个稳定 ID；Hugging Face、Follow Builders、官方研究页与 RSS 各取一个入口；GitHub 去掉额外的 `/rate_limit` 请求，直接从唯一 Search 响应头读取余量。OpenAlex/OpenReview 继续各发一个请求。
+- 每个探针都由离线测试断言实际请求次数与参数；LLM 探针也被纳入 `SMOKE_CHECK_TIMEOUT_SECONDS`，不再继承 180 秒的业务模型超时。输出加入 `contract_version=2026-07-30.1` 和 `failure_kind`，可以直接从 artifact 判断线上是否运行了正确版本。
+- 失败不再只按信源静态分级。公共服务的 429、408、5xx、网络错误与超时属于 `transient_availability`，保留为非阻断 `degraded`；401/403、404、必需配置缺失、JSON/XML/HTML 契约变化仍为 `failed`。这不是把故障涂绿，而是把“代码不可部署”和“第三方此刻不可用”分开。
+
+同一日志还揭示了生产 arXiv 的放大风险：宽查询收到共享限流后，旧代码会继续尝试人物、报告和其他领域；且当所有领域查询失败时，即使精确 seed、报告或人物车道已经取得结果，也可能在结尾抛异常并由 `safe_fetch` 丢掉整批部分成功。生产顺序现改为**显式 seed → 正式 Technical Report → 重点研究者 → 领域地图**；429、5xx 或网络故障只做一次有界退避，仍失败即对本轮 arXiv 熔断。其余车道明确记录为 `not_executed_rate_limited` 等状态，已经取得的高优先级材料继续进入后续分析。arXiv 的计划查询数、完成数、HTTP 请求数、429、熔断与未执行量现与 OpenAlex/OpenReview 一起进入邮件审计；覆盖未闭合时，空报告不能被解释为“本周没有创新”。
 
 ## 2026-07-29 GitHub Smoke 失败复盘
 
@@ -104,10 +116,10 @@ Kimi‑K3 的实际标题是 *Kimi K3: Open Frontier Intelligence*，标题本�
 ## 验证结果
 
 - Python 静态编译通过。
-- 109 项本地单元测试通过，新增覆盖 Rubric 类型题、离散答案确定性计分、模型数字分无效、低分辨率到高分辨率的心智模型结构、T‑Rex 与 Kimi‑K3 双金丝雀、无术语重点研究者车道、品牌化官方发布、JSON-LD、详情页 Full Report、跨全文取样、报告机制数量不截断、无机制 System Card、逐入口审计、高势能边界复核、行业覆盖、人物贡献、官方/独立证据分账、重叠召回、地图版本化基线更新、OpenAlex 高精度相关性耗尽、OpenReview 429 退避、Smoke 单请求契约/逐项时限/阻断分级、官方页面取样与生产熔断分账和社区失败可见性，以及原有接口、持久化与邮件回归。
+- 123 项本地单元测试通过，新增覆盖 Rubric 类型题、离散答案确定性计分、模型数字分无效、低分辨率到高分辨率的心智模型结构、T‑Rex 与 Kimi‑K3 双金丝雀、无术语重点研究者车道、品牌化官方发布、JSON-LD、详情页 Full Report、跨全文取样、报告机制数量不截断、无机制 System Card、逐入口审计、高势能边界复核、行业覆盖、人物贡献、官方/独立证据分账、重叠召回、地图版本化基线更新、OpenAlex 高精度相关性耗尽、OpenReview 429 退避、Smoke 与生产 Source 的导入隔离、所有探针的单请求预算/逐项时限/错误分类、arXiv 精确 seed 优先级/限流熔断/部分成功保留、官方页面取样与社区失败可见性，以及原有接口、持久化与邮件回归。
 - GitHub Actions YAML 语法通过本地解析。
 - 工作流已升级为 Node 24 Actions：`checkout@v6`、`setup-python@v6`、`upload-artifact@v7`；关闭 checkout 凭据持久化以消除无用的 post-job Git 清理。
 - 真实小成本验证已通过 Qwen `qwen3.7-plus`、arXiv、Hugging Face Daily Papers、OpenAlex Works/Authors、官方研究页、Hacker News、Tavily 和 QQ SMTP 登录（未发信）。本轮又以 Kimi‑K3 验证了 arXiv 自然检索、comment 专项检索、Kimi Research 页面、Moonshot 团队归属和官方 PDF 回退。OpenReview 在修复后通过定向复测。Semantic Scholar、Reddit 与 X 因未配置而按设计跳过。
-- 当前唯一已知的本地凭据阻塞是 `GITHUB_TOKEN`：GitHub `/rate_limit` 明确返回 HTTP 401；Token 长度、前缀和空白格式正常，因此需要在 GitHub 重新生成后替换，而不是继续改代码。
+- 最新云端日志中的 GitHub Search 已通过并返回剩余额度，说明 Repository secret 中的 `GITHUB_TOKEN` 当前有效；本地 `.env` 中的 Token 是否相同仍以本机下一次 Smoke 为准，不再把旧的本地 401 结论当作云端阻塞。
 
-下一次真实验收重新运行 GitHub `smoke_only=true`。关键项应全部通过；若 OpenReview 等辅助源仍出现 429，应显示为 `degraded` 且在约 30 秒内结束，而不是分页五分钟后让 Workflow 失败。随后再执行一次带双金丝雀 seed 的完整流水线，重点检查重要 Technical Report 是否进入候选、学术索引请求审计能否解释覆盖缺口、人物公开入口是否充分，以及正文是否完全摆脱英文摘要直出。
+下一次真实验收重新运行 GitHub `smoke_only=true`。日志标题应显示 `contract 2026-07-30.1`；若 arXiv/OpenAlex/GitHub 等公共服务仍出现 429 或超时，应显示 `degraded` 与 `failure_kind=transient_availability`，而不是调用生产车道后超时失败。401/403、404 或响应契约错误仍应让 Workflow 失败。随后再执行一次带双金丝雀 seed 的完整流水线，重点检查重要 Technical Report 是否优先进入候选、arXiv/OpenAlex/OpenReview 请求审计能否解释覆盖缺口、人物公开入口是否充分，以及正文是否完全摆脱英文摘要直出。

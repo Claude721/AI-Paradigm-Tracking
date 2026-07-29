@@ -173,7 +173,7 @@ def collect_checks() -> list[Check]:
             "云端部署验收",
             "ready",
             f"逐项总时限 {config.SMOKE_CHECK_TIMEOUT_SECONDS}s；"
-            "OpenAlex/OpenReview 只发单页最小请求；关键失败与辅助源降级分账",
+            "各外部能力使用独立单请求探针；临时可用性与契约失败分账",
         ),
         _email_check(),
         _schedule_check(),

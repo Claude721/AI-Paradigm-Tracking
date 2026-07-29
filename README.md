@@ -80,7 +80,7 @@ python main.py --doctor    # 零网络检查配置是否齐全
 python main.py --smoke-test # 小成本真实检查接口；SMTP 只登录、不发邮件
 ```
 
-第一次完整运行前先执行 `python main.py --smoke-test`。它不会运行流水线、不会创建报告或修改范式数据库，结果保存在 `logs/smoke_test_latest.json`，且不记录密钥和响应正文。每个接口只执行有总时限的最小请求；LLM、arXiv、OpenAlex、官方研究页、GitHub、Tavily（已配置时）和 SMTP 等关键契约失败会返回非零，OpenReview、RSS、HN 等可降级信源的临时 429/空结果会明确显示为 `degraded`，但不把可部署系统误判为整体失败。
+第一次完整运行前先执行 `python main.py --smoke-test`。它不会运行流水线、不会创建报告或修改范式数据库，结果保存在 `logs/smoke_test_latest.json`，且不记录密钥和响应正文。Smoke 使用与生产召回器隔离的单请求探针：例如 arXiv 只查一个稳定 ID、GitHub 只发一次 Search，不会运行领域/人物/报告车道或详情页抓取。鉴权失败、404 与响应结构变化会返回非零；公共服务的 429、5xx、网络错误或超时会标为带 `failure_kind` 的 `degraded`，保留风险但不把一次第三方抖动误判成代码不可部署。OpenReview、RSS、HN 等辅助源失败也会显式降级。
 
 完整运行还会生成 `logs/run_audit_latest.md`、`logs/run_audit_latest.json` 和 `logs/current_run.log`。其中包含信源返回量、漏斗、每条材料/路线的结构化去留理由，以及各阶段模型 token 用量；不会保存 prompt、模型回答正文或模型私有推理。启用邮件后，Markdown 审计和本轮日志会随报告一起发送。
 

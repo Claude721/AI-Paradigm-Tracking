@@ -66,74 +66,37 @@ class ArxivSource(BaseSource):
         self.executed_recall_lanes: set[str] = set()
         self.failed_recall_lanes: set[str] = set()
         self.recall_lane_hits: dict[str, int] = {}
+        self.not_executed_recall_lanes: dict[str, str] = {}
+        self.planned_recall_lanes: set[str] = set()
+        self.request_count = 0
+        self.rate_limited_requests = 0
+        self._circuit_open = False
+        self.circuit_reason = ""
 
     async def fetch(self) -> list[RawProject]:
+        landscape_plan = arxiv_query_plan()
+        author_plan = (
+            arxiv_priority_author_query_plan(config.PRIORITY_RESEARCHERS)
+            if config.PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED
+            else []
+        )
+        landscape_lanes = [
+            f"landscape:{query_spec['group']}" for query_spec in landscape_plan
+        ]
+        author_lanes = [str(query_spec["group"]) for query_spec in author_plan]
+        self.planned_recall_lanes.update(
+            [
+                *landscape_lanes,
+                *author_lanes,
+                "technical_documents",
+                *(["explicit_seeds"] if self.seed_arxiv_ids else []),
+            ]
+        )
+
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             results: list[RawProject] = []
-            for query_spec in arxiv_query_plan():
-                if self.max_results and len(results) >= self.max_results:
-                    break
-                group = str(query_spec["group"])
-                try:
-                    batch = await self._fetch_query(
-                        client,
-                        str(query_spec["query"]),
-                        query_group=group,
-                        domain_ids=list(query_spec["domain_ids"]),
-                        result_limit=(
-                            self.max_results - len(results)
-                            if self.max_results
-                            else None
-                        ),
-                    )
-                    results.extend(batch)
-                    self.executed_query_groups.add(group)
-                    self._record_lane(f"landscape:{group}", len(batch))
-                except Exception as exc:
-                    self.failed_query_groups.add(group)
-                    self.failed_recall_lanes.add(f"landscape:{group}")
-                    logger.warning("arXiv 覆盖查询失败 [%s]: %s", group, exc)
 
-            if config.PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED:
-                for query_spec in arxiv_priority_author_query_plan(
-                    config.PRIORITY_RESEARCHERS
-                ):
-                    lane = str(query_spec["group"])
-                    try:
-                        batch = await self._fetch_query(
-                            client,
-                            str(query_spec["query"]),
-                            query_group="priority_researchers",
-                            result_limit=(
-                                max(self.max_results - len(results), 0)
-                                if self.max_results
-                                else None
-                            ),
-                        )
-                        results.extend(batch)
-                        self._record_lane(lane, len(batch))
-                    except Exception as exc:
-                        self.failed_recall_lanes.add(lane)
-                        logger.warning("arXiv 重点研究者召回失败 [%s]: %s", lane, exc)
-
-            try:
-                batch = await self._fetch_query(
-                    client,
-                    TECHNICAL_REPORT_QUERY,
-                    force_technical_report=True,
-                    query_group="technical_reports",
-                    result_limit=(
-                        max(self.max_results - len(results), 0)
-                        if self.max_results
-                        else None
-                    ),
-                )
-                results.extend(batch)
-                self._record_lane("technical_documents", len(batch))
-            except Exception as exc:
-                self.failed_recall_lanes.add("technical_documents")
-                logger.warning("arXiv Technical Report 专项查询失败: %s", exc)
-
+            # 显式 seed 是用户指定的审计对象，必须先于任何宽查询执行。
             if self.seed_arxiv_ids:
                 try:
                     batch = await self._fetch_seed_ids(client, self.seed_arxiv_ids)
@@ -143,8 +106,100 @@ class ArxivSource(BaseSource):
                     self.failed_recall_lanes.add("explicit_seeds")
                     logger.warning("arXiv 精确补录查询失败: %s", exc)
 
-        if self.failed_query_groups and not self.executed_query_groups:
-            raise RuntimeError("arXiv 所有前沿覆盖查询均失败")
+            # 正式报告能承载多个机制，优先于宽领域词车道使用 API 预算。
+            if self._circuit_open:
+                self._mark_not_executed(
+                    ["technical_documents", *author_lanes, *landscape_lanes],
+                    self.circuit_reason,
+                )
+            elif self._limit_reached(results):
+                self._mark_not_executed(
+                    ["technical_documents", *author_lanes, *landscape_lanes],
+                    "safety_limit",
+                )
+            else:
+                try:
+                    batch = await self._fetch_query(
+                        client,
+                        TECHNICAL_REPORT_QUERY,
+                        force_technical_report=True,
+                        query_group="technical_reports",
+                        result_limit=self._remaining_limit(results),
+                    )
+                    results.extend(batch)
+                    self._record_lane("technical_documents", len(batch))
+                except Exception as exc:
+                    self.failed_recall_lanes.add("technical_documents")
+                    logger.warning("arXiv Technical Report 专项查询失败: %s", exc)
+
+            for index, query_spec in enumerate(author_plan):
+                lane = str(query_spec["group"])
+                if self._circuit_open:
+                    self._mark_not_executed(
+                        author_lanes[index:], self.circuit_reason
+                    )
+                    break
+                if self._limit_reached(results):
+                    self._mark_not_executed(
+                        author_lanes[index:], "safety_limit"
+                    )
+                    break
+                try:
+                    batch = await self._fetch_query(
+                        client,
+                        str(query_spec["query"]),
+                        query_group="priority_researchers",
+                        result_limit=self._remaining_limit(results),
+                    )
+                    results.extend(batch)
+                    self._record_lane(lane, len(batch))
+                except Exception as exc:
+                    self.failed_recall_lanes.add(lane)
+                    logger.warning("arXiv 重点研究者召回失败 [%s]: %s", lane, exc)
+
+            for index, query_spec in enumerate(landscape_plan):
+                lane = landscape_lanes[index]
+                group = str(query_spec["group"])
+                if self._circuit_open:
+                    self._mark_not_executed(
+                        landscape_lanes[index:], self.circuit_reason
+                    )
+                    break
+                if self._limit_reached(results):
+                    self._mark_not_executed(
+                        landscape_lanes[index:], "safety_limit"
+                    )
+                    break
+                try:
+                    batch = await self._fetch_query(
+                        client,
+                        str(query_spec["query"]),
+                        query_group=group,
+                        domain_ids=list(query_spec["domain_ids"]),
+                        result_limit=self._remaining_limit(results),
+                    )
+                    results.extend(batch)
+                    self.executed_query_groups.add(group)
+                    self._record_lane(lane, len(batch))
+                except Exception as exc:
+                    self.failed_query_groups.add(group)
+                    self.failed_recall_lanes.add(lane)
+                    logger.warning("arXiv 覆盖查询失败 [%s]: %s", group, exc)
+
+            if self._circuit_open:
+                pending = self.planned_recall_lanes - (
+                    self.executed_recall_lanes
+                    | self.failed_recall_lanes
+                    | set(self.not_executed_recall_lanes)
+                )
+                self._mark_not_executed(pending, self.circuit_reason)
+
+        if (
+            self.failed_query_groups
+            and not self.executed_query_groups
+            and not results
+        ):
+            raise RuntimeError("arXiv 所有前沿覆盖查询均失败且没有其他车道结果")
         deduped = list({item.url: item for item in results}.values())
         deduped.sort(
             key=lambda item: (
@@ -155,17 +210,66 @@ class ArxivSource(BaseSource):
         )
         return deduped[: self.max_results] if self.max_results else deduped
 
+    def _limit_reached(self, results: list[RawProject]) -> bool:
+        return bool(self.max_results and len(results) >= self.max_results)
+
+    def _remaining_limit(self, results: list[RawProject]) -> int | None:
+        if not self.max_results:
+            return None
+        return max(self.max_results - len(results), 0)
+
+    def _mark_not_executed(self, lanes, reason: str) -> None:
+        for lane in lanes:
+            lane_name = str(lane)
+            if (
+                lane_name not in self.executed_recall_lanes
+                and lane_name not in self.failed_recall_lanes
+            ):
+                self.not_executed_recall_lanes[lane_name] = (
+                    reason or "upstream_unavailable"
+                )
+
+    def coverage(self) -> dict[str, object]:
+        if self._circuit_open:
+            status = self.circuit_reason or "upstream_unavailable"
+        elif self.failed_recall_lanes or self.not_executed_recall_lanes:
+            status = "partial"
+        elif self.rate_limited_requests:
+            status = "completed_after_retry"
+        else:
+            status = "completed"
+        return {
+            "status": status,
+            "planned_queries": len(self.planned_recall_lanes),
+            "completed_queries": len(self.executed_recall_lanes),
+            "failed_queries": len(self.failed_recall_lanes),
+            "not_executed_queries": len(self.not_executed_recall_lanes),
+            "requests": self.request_count,
+            "rate_limited_requests": self.rate_limited_requests,
+            "results": sum(self.recall_lane_hits.values()),
+            "circuit_open": self._circuit_open,
+        }
+
     def recall_coverage(self) -> dict[str, dict[str, object]]:
-        lanes = set(self.recall_lane_hits) | self.failed_recall_lanes
+        lanes = (
+            self.planned_recall_lanes
+            | set(self.recall_lane_hits)
+            | self.failed_recall_lanes
+            | set(self.not_executed_recall_lanes)
+        )
         return {
             lane: {
                 "status": (
-                    "query_failed"
-                    if lane in self.failed_recall_lanes
+                    f"not_executed_{self.not_executed_recall_lanes[lane]}"
+                    if lane in self.not_executed_recall_lanes
                     else (
-                        "searched_zero_hits"
-                        if self.recall_lane_hits.get(lane, 0) == 0
-                        else "covered"
+                        "query_failed"
+                        if lane in self.failed_recall_lanes
+                        else (
+                            "searched_zero_hits"
+                            if self.recall_lane_hits.get(lane, 0) == 0
+                            else "covered"
+                        )
                     )
                 ),
                 "hits": self.recall_lane_hits.get(lane, 0),
@@ -268,30 +372,55 @@ class ArxivSource(BaseSource):
         client: httpx.AsyncClient,
         params: dict[str, object],
     ) -> httpx.Response:
-        """arXiv export 偶发超时；做一次短退避重试，并保留最终故障给覆盖审计。"""
+        """单次退避后仍失败就熔断本轮，避免对共享出口持续放大故障。"""
+        if self._circuit_open:
+            raise RuntimeError(
+                f"arXiv 本轮熔断已开启：{self.circuit_reason or 'upstream_unavailable'}"
+            )
         last_error: Exception | None = None
         for attempt in range(2):
             try:
+                self.request_count += 1
                 response = await client.get(ARXIV_API, params=params)
-                if response.status_code == 429 or response.status_code >= 500:
-                    response.raise_for_status()
+                if response.status_code == 429:
+                    self.rate_limited_requests += 1
                 response.raise_for_status()
                 return response
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                 last_error = exc
+                status = (
+                    exc.response.status_code
+                    if isinstance(exc, httpx.HTTPStatusError)
+                    else 0
+                )
                 retryable_status = (
                     isinstance(exc, httpx.HTTPStatusError)
-                    and (
-                        exc.response.status_code == 429
-                        or exc.response.status_code >= 500
-                    )
+                    and (status in {408, 425, 429} or status >= 500)
                 )
                 if attempt == 1 or (
                     isinstance(exc, httpx.HTTPStatusError)
                     and not retryable_status
                 ):
+                    if isinstance(exc, httpx.TransportError) or retryable_status:
+                        self._circuit_open = True
+                        self.circuit_reason = (
+                            "rate_limited"
+                            if status == 429
+                            else (
+                                "upstream_unavailable"
+                                if status in {408, 425} or status >= 500
+                                else "transport_failure"
+                            )
+                        )
                     raise
-                await asyncio.sleep(0.75)
+                delay = 0.75
+                if status == 429:
+                    retry_after = exc.response.headers.get("Retry-After", "")
+                    try:
+                        delay = min(max(float(retry_after), 0.75), 5.0)
+                    except ValueError:
+                        delay = 3.0
+                await asyncio.sleep(delay)
         raise RuntimeError("arXiv 请求重试后仍失败") from last_error
 
     def _page_state(

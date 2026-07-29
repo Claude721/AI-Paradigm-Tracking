@@ -162,12 +162,13 @@ class ParadigmReportGenerator:
             name
             for name, value in (coverage.get("recall_lanes") or {}).items()
             if value.get("status") == "query_failed"
+            or str(value.get("status", "")).startswith("not_executed_")
         ]
         academic_incomplete = [
             (
                 f"{name}={value.get('status')}"
                 f"(queries {value.get('completed_queries', 0)}/"
-                f"{value.get('queries', 0)}, 429 "
+                f"{value.get('planned_queries', value.get('queries', 0))}, 429 "
                 f"{value.get('rate_limited_requests', 0)})"
             )
             for name, value in (coverage.get("academic_indexes") or {}).items()

@@ -42,6 +42,7 @@ from sources.paradigm_evidence_source import (
     CommunityEvidenceClient,
     _is_relevant_repository,
 )
+from sources.base import RawProject
 from sources.arxiv_document_source import (
     ArxivDocumentClient,
     _distributed_text_excerpt,
@@ -1295,17 +1296,119 @@ class ParadigmPipelineTests(unittest.TestCase):
 
     def test_arxiv_report_query_failure_does_not_drop_regular_feed(self) -> None:
         source = ArxivSource(max_results=5, lookback_days=7)
-        empty_feed = (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            '<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+        async def fetch_query(*args, **kwargs):
+            if kwargs.get("force_technical_report"):
+                raise httpx.ConnectError("report query unavailable")
+            return []
+
+        source._fetch_query = AsyncMock(side_effect=fetch_query)
+        with patch.object(config, "PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED", False):
+            self.assertEqual(asyncio.run(source.fetch()), [])
+        self.assertIn("technical_documents", source.failed_recall_lanes)
+        self.assertTrue(source.executed_query_groups)
+
+    def test_arxiv_exact_seed_runs_before_broad_recall_and_survives_failures(
+        self,
+    ) -> None:
+        source = ArxivSource(
+            max_results=None,
+            lookback_days=7,
+            seed_arxiv_ids=["2607.24653"],
         )
-        source._request = AsyncMock(
-            side_effect=[
-                SimpleNamespace(text=empty_feed),
-                httpx.ConnectError("report query unavailable"),
-            ]
+        seeded = RawProject(
+            source="arxiv",
+            name="Seeded report",
+            url="https://arxiv.org/abs/2607.24653",
+            created_at="2026-07-29T00:00:00Z",
+            extra={"origin_priority": 3},
         )
-        self.assertEqual(asyncio.run(source.fetch()), [])
+        events = []
+
+        async def fetch_seed(*args, **kwargs):
+            events.append("seed")
+            return [seeded]
+
+        async def fail_query(*args, **kwargs):
+            events.append(
+                "report" if kwargs.get("force_technical_report") else "other"
+            )
+            raise httpx.ConnectError("other recall unavailable")
+
+        source._fetch_seed_ids = AsyncMock(side_effect=fetch_seed)
+        source._fetch_query = AsyncMock(side_effect=fail_query)
+        with patch.object(config, "PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED", False):
+            received = asyncio.run(source.fetch())
+
+        self.assertEqual(received, [seeded])
+        self.assertEqual(events[0], "seed")
+        self.assertIn("explicit_seeds", source.executed_recall_lanes)
+
+    def test_arxiv_shared_rate_limit_opens_circuit_after_one_retry(self) -> None:
+        source = ArxivSource(max_results=None, lookback_days=7)
+        request = httpx.Request("GET", "https://export.arxiv.org/api/query")
+        client = SimpleNamespace(
+            get=AsyncMock(
+                side_effect=[
+                    httpx.Response(429, request=request),
+                    httpx.Response(429, request=request),
+                ]
+            )
+        )
+        with (
+            patch(
+                "sources.arxiv_source.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+            self.assertRaises(httpx.HTTPStatusError),
+        ):
+            asyncio.run(source._request(client, "all:model", 1))
+
+        self.assertEqual(client.get.await_count, 2)
+        self.assertEqual(source.request_count, 2)
+        self.assertEqual(source.rate_limited_requests, 2)
+        self.assertTrue(source._circuit_open)
+        self.assertEqual(source.circuit_reason, "rate_limited")
+
+    def test_arxiv_circuit_marks_remaining_lanes_not_executed(self) -> None:
+        source = ArxivSource(
+            max_results=None,
+            lookback_days=7,
+            seed_arxiv_ids=[],
+        )
+
+        async def rate_limited(*args, **kwargs):
+            source._circuit_open = True
+            source.circuit_reason = "rate_limited"
+            raise httpx.HTTPStatusError(
+                "rate limited",
+                request=httpx.Request(
+                    "GET", "https://export.arxiv.org/api/query"
+                ),
+                response=httpx.Response(
+                    429,
+                    request=httpx.Request(
+                        "GET", "https://export.arxiv.org/api/query"
+                    ),
+                ),
+            )
+
+        source._fetch_query = AsyncMock(side_effect=rate_limited)
+        received = asyncio.run(source.fetch())
+        coverage = source.recall_coverage()
+
+        self.assertEqual(received, [])
+        self.assertEqual(source._fetch_query.await_count, 1)
+        self.assertEqual(source.coverage()["status"], "rate_limited")
+        self.assertEqual(
+            coverage["technical_documents"]["status"],
+            "query_failed",
+        )
+        self.assertTrue(
+            any(
+                value["status"] == "not_executed_rate_limited"
+                for value in coverage.values()
+            )
+        )
 
     def test_arxiv_transport_timeout_retries_once(self) -> None:
         source = ArxivSource(max_results=5, lookback_days=7)

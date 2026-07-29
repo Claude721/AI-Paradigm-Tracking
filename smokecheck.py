@@ -7,6 +7,7 @@ import json
 import smtplib
 import ssl
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,11 +17,11 @@ import httpx
 
 import config
 from agents.llm_utils import build_client, resolve_all
-from sources.arxiv_source import ArxivSource
-from sources.follow_builders_source import FollowBuildersSource
-from sources.hf_papers_source import HuggingFacePapersSource
-from sources.priority_research_source import PriorityResearchPageSource
-from sources.research_feed_source import ResearchFeedSource
+
+
+ARXIV_API = "https://export.arxiv.org/api/query"
+HF_PAPERS_API = "https://huggingface.co/api/daily_papers"
+SMOKE_CONTRACT_VERSION = "2026-07-30.1"
 
 
 @dataclass
@@ -31,6 +32,7 @@ class SmokeResult:
     latency_ms: int = 0
     detail: str = ""
     blocking: bool = True
+    failure_kind: str = ""
 
 
 async def run_smoke_checks(
@@ -55,6 +57,7 @@ async def run_smoke_checks(
             _arxiv,
             require_results=True,
             required_config=True,
+            degrade_on_transient=True,
         )
     )
     results.append(
@@ -84,6 +87,7 @@ async def run_smoke_checks(
             require_results=True,
             skipped_detail="未配置 OPENALEX_API_KEY",
             required_config=True,
+            degrade_on_transient=True,
         )
     )
     results.append(
@@ -94,6 +98,7 @@ async def run_smoke_checks(
             require_results=True,
             skipped_detail="未配置 OPENALEX_API_KEY",
             required_config=True,
+            degrade_on_transient=True,
         )
     )
     results.append(
@@ -114,6 +119,7 @@ async def run_smoke_checks(
             require_results=True,
             skipped_detail="没有高优先级官方研究页",
             required_config=True,
+            degrade_on_transient=True,
         )
     )
     results.append(
@@ -134,6 +140,7 @@ async def run_smoke_checks(
             require_results=True,
             skipped_detail="未配置 GITHUB_TOKEN；不会匿名调用 Search API",
             required_config=True,
+            degrade_on_transient=True,
         )
     )
     results.append(
@@ -214,13 +221,19 @@ async def run_smoke_checks(
 
 def print_smoke_results(results: list[SmokeResult]) -> None:
     labels = {"passed": "✓", "degraded": "△", "failed": "✗", "skipped": "–"}
-    print("\nAI 技术范式雷达 — 小成本真实 Smoke Test\n")
+    print(
+        "\nAI 技术范式雷达 — 小成本真实 Smoke Test "
+        f"(contract {SMOKE_CONTRACT_VERSION})\n"
+    )
     for item in results:
         count = f"，结果={item.count}" if item.count else ""
         latency = f"，{item.latency_ms}ms" if item.latency_ms else ""
+        failure_kind = (
+            f"，failure_kind={item.failure_kind}" if item.failure_kind else ""
+        )
         print(
             f"{labels.get(item.status, '?')} {item.name}: "
-            f"{item.status}{count}{latency}；{item.detail}"
+            f"{item.status}{count}{latency}{failure_kind}；{item.detail}"
         )
     failed = [item.name for item in results if item.status == "failed"]
     degraded = [item.name for item in results if item.status == "degraded"]
@@ -245,6 +258,7 @@ async def _check(
     skipped_detail: str = "",
     required_config: bool = False,
     blocking_on_failure: bool = True,
+    degrade_on_transient: bool = False,
 ) -> SmokeResult:
     if not configured:
         if required_config:
@@ -253,6 +267,7 @@ async def _check(
                 status="failed",
                 detail=skipped_detail or "必需配置缺失",
                 blocking=True,
+                failure_kind="configuration",
             )
         return _skipped(name, skipped_detail or "未配置")
     started = time.monotonic()
@@ -271,6 +286,7 @@ async def _check(
                 latency_ms=latency,
                 detail=detail or "接口可连接，但没有返回可用结果",
                 blocking=blocking_on_failure,
+                failure_kind="empty_response",
             )
         return SmokeResult(
             name,
@@ -281,12 +297,14 @@ async def _check(
             blocking=blocking_on_failure,
         )
     except Exception as exc:
+        transient = degrade_on_transient and _is_transient_failure(exc)
         return SmokeResult(
             name=name,
-            status=failure_status,
+            status="degraded" if transient else failure_status,
             latency_ms=int((time.monotonic() - started) * 1000),
             detail=_safe_error(exc),
-            blocking=blocking_on_failure,
+            blocking=False if transient else blocking_on_failure,
+            failure_kind=_failure_kind(exc),
         )
 
 
@@ -301,11 +319,14 @@ async def _check_models() -> list[SmokeResult]:
         started = time.monotonic()
         try:
             client, model = build_client(role)
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": "只回复 OK"}],
-                temperature=0,
-                max_tokens=16,
+            response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "只回复 OK"}],
+                    temperature=0,
+                    max_tokens=16,
+                ),
+                timeout=config.SMOKE_CHECK_TIMEOUT_SECONDS,
             )
             content = (response.choices[0].message.content or "").strip()
             usage = getattr(response, "usage", None)
@@ -317,6 +338,7 @@ async def _check_models() -> list[SmokeResult]:
                     1 if content else 0,
                     int((time.monotonic() - started) * 1000),
                     f"{resolved.label}；usage.total_tokens={total_tokens}",
+                    failure_kind="" if content else "empty_response",
                 )
             )
         except Exception as exc:
@@ -326,24 +348,88 @@ async def _check_models() -> list[SmokeResult]:
                     "failed",
                     latency_ms=int((time.monotonic() - started) * 1000),
                     detail=_safe_error(exc),
+                    failure_kind=_failure_kind(exc),
                 )
             )
     return results
 
 
 async def _arxiv() -> tuple[int, str]:
-    items = await ArxivSource(max_results=3, lookback_days=60).fetch()
-    return len(items), _sample(items)
+    async with httpx.AsyncClient(
+        timeout=20,
+        follow_redirects=True,
+        headers={
+            "Accept": "application/atom+xml",
+            "User-Agent": "AI-Paradigm-Radar/3.2",
+        },
+    ) as client:
+        response = await client.get(
+            ARXIV_API,
+            params={
+                # 精确查询一个长期稳定的公开记录；Smoke 不运行任何生产检索车道。
+                "id_list": "1706.03762",
+                "max_results": 1,
+            },
+        )
+        response.raise_for_status()
+    try:
+        root = ET.fromstring(response.text)
+    except ET.ParseError as exc:
+        raise ValueError("arXiv 响应不是有效 Atom XML") from exc
+    entries = root.findall("{http://www.w3.org/2005/Atom}entry")
+    return len(entries), "单次精确 ID 请求；HTTP 与 Atom 响应契约正常"
 
 
 async def _huggingface() -> tuple[int, str]:
-    items = await HuggingFacePapersSource(lookback_days=60).fetch()
-    return len(items), _sample(items)
+    async with httpx.AsyncClient(
+        timeout=20,
+        follow_redirects=True,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "AI-Paradigm-Radar/3.2",
+        },
+    ) as client:
+        response = await client.get(HF_PAPERS_API)
+        response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise ValueError("Hugging Face Daily Papers 响应不是列表")
+    sample = ""
+    if payload:
+        paper = payload[0].get("paper") if isinstance(payload[0], dict) else {}
+        if isinstance(paper, dict):
+            sample = str(paper.get("title", ""))
+    return len(payload), f"单次请求；示例={sample or '无标题'}"
 
 
 async def _follow_builders() -> tuple[int, str]:
-    items = await FollowBuildersSource().fetch()
-    return len(items), _sample(items)
+    base = config.FOLLOW_BUILDERS_FEED_URL.rstrip("/")
+    if base.startswith("file://"):
+        path = Path(base[7:]) / "feed-x.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        request_detail = "单次本地文件读取"
+    else:
+        async with httpx.AsyncClient(
+            timeout=20,
+            follow_redirects=True,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "AI-Paradigm-Radar/3.2",
+            },
+        ) as client:
+            response = await client.get(f"{base}/feed-x.json")
+            response.raise_for_status()
+        payload = response.json()
+        request_detail = "单次 feed-x.json 请求"
+    if not isinstance(payload, dict) or not isinstance(payload.get("x"), list):
+        raise ValueError("Follow Builders 响应缺少 x 列表")
+    builders = payload["x"]
+    tweets = sum(
+        len(builder.get("tweets", []))
+        for builder in builders
+        if isinstance(builder, dict) and isinstance(builder.get("tweets", []), list)
+    )
+    return len(builders), f"{request_detail}；builders={len(builders)}；tweets={tweets}"
 
 
 async def _openalex_works() -> tuple[int, str]:
@@ -381,9 +467,11 @@ async def _openalex_authors() -> tuple[int, str]:
             },
         )
         response.raise_for_status()
-        items = response.json().get("results", [])
+        items = response.json().get("results")
+    if not isinstance(items, list):
+        raise ValueError("OpenAlex Authors 响应缺少 results 列表")
     sample = str(items[0].get("display_name", "")) if items else "无作者结果"
-    return len(items), f"示例={sample}"
+    return len(items), f"单次请求；示例={sample}"
 
 
 async def _openreview() -> tuple[int, str]:
@@ -423,20 +511,45 @@ async def _priority_pages() -> tuple[int, str]:
         page
         for page in config.PRIORITY_RESEARCH_PAGES
         if (urlparse(page).hostname or "") in preferred_hosts
-    ][:3]
+    ][:1]
     if not pages:
-        pages = config.PRIORITY_RESEARCH_PAGES[:3]
-    items = await PriorityResearchPageSource(
-        lookback_days=3650,
-        per_page=2,
-        pages=pages,
-    ).fetch()
-    return len(items), f"检查入口={len(pages)}；{_sample(items)}"
+        pages = config.PRIORITY_RESEARCH_PAGES[:1]
+    page = pages[0]
+    async with httpx.AsyncClient(
+        timeout=20,
+        follow_redirects=True,
+        headers={"User-Agent": "AI-Paradigm-Radar/3.2"},
+    ) as client:
+        response = await client.get(page)
+        response.raise_for_status()
+    body = response.text.strip()
+    if len(body) < 200 or not any(
+        marker in body.casefold() for marker in ("<html", "<a ", "__next_data__")
+    ):
+        raise ValueError("官方研究页响应不像可解析的 HTML")
+    return 1, f"单次索引页请求；host={urlparse(page).hostname or 'unknown'}"
 
 
 async def _research_feeds() -> tuple[int, str]:
-    items = await ResearchFeedSource(lookback_days=90).fetch()
-    return len(items), _sample(items)
+    feed_url = config.RESEARCH_FEED_URLS[0]
+    async with httpx.AsyncClient(
+        timeout=20,
+        follow_redirects=True,
+        headers={
+            "Accept": "application/rss+xml, application/atom+xml, application/xml",
+            "User-Agent": "AI-Paradigm-Radar/3.2",
+        },
+    ) as client:
+        response = await client.get(feed_url)
+        response.raise_for_status()
+    try:
+        root = ET.fromstring(response.text)
+    except ET.ParseError as exc:
+        raise ValueError("研究 Feed 响应不是有效 XML") from exc
+    nodes = root.findall(".//item") or root.findall(
+        "{http://www.w3.org/2005/Atom}entry"
+    )
+    return len(nodes), f"单次 Feed 请求；host={urlparse(feed_url).hostname or 'unknown'}"
 
 
 async def _github() -> tuple[int, str]:
@@ -447,17 +560,20 @@ async def _github() -> tuple[int, str]:
         "User-Agent": "AI-Paradigm-Radar/3.2",
     }
     async with httpx.AsyncClient(timeout=20) as client:
-        rate = await client.get("https://api.github.com/rate_limit", headers=headers)
-        rate.raise_for_status()
         response = await client.get(
             "https://api.github.com/search/repositories",
             headers=headers,
             params={"q": "qwen in:name,description", "per_page": 2},
         )
         response.raise_for_status()
-        items = response.json().get("items", [])
-    search = ((rate.json().get("resources") or {}).get("search") or {})
-    return len(items), f"search_remaining={search.get('remaining', 'unknown')}；示例={items[0].get('full_name', '') if items else '无'}"
+        items = response.json().get("items")
+    if not isinstance(items, list):
+        raise ValueError("GitHub Search 响应缺少 items 列表")
+    remaining = response.headers.get("x-ratelimit-remaining", "unknown")
+    return len(items), (
+        f"单次 Search 请求；search_remaining={remaining}；"
+        f"示例={items[0].get('full_name', '') if items else '无'}"
+    )
 
 
 async def _hackernews() -> tuple[int, str]:
@@ -608,14 +724,6 @@ def _skipped(name: str, detail: str) -> SmokeResult:
     )
 
 
-def _sample(items: list) -> str:
-    if not items:
-        return "无有效结果"
-    item = items[0]
-    value = getattr(item, "title", "") or getattr(item, "name", "")
-    return f"示例={str(value)[:120]}"
-
-
 def _safe_error(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         response = exc.response
@@ -623,7 +731,7 @@ def _safe_error(exc: Exception) -> str:
         if response.status_code == 401 and host == "api.github.com":
             return (
                 "HTTP 401 (api.github.com)：Token 无效、已撤销或粘贴错误；"
-                "只读 /rate_limit 不需要额外仓库权限"
+                "只读 Search 不需要额外仓库权限"
             )
         if response.status_code == 401 and host == "api.tavily.com":
             return "HTTP 401 (api.tavily.com)：TAVILY_API_KEY 无效"
@@ -633,7 +741,7 @@ def _safe_error(exc: Exception) -> str:
                 "最小请求已停止，不继续生产级分页"
             )
         return f"HTTP {response.status_code} ({host})"
-    if isinstance(exc, TimeoutError):
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
         return (
             f"TimeoutError：单项超过 {config.SMOKE_CHECK_TIMEOUT_SECONDS}s，"
             "已停止该接口检查"
@@ -641,10 +749,38 @@ def _safe_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {str(exc)[:240]}"
 
 
+def _is_transient_failure(exc: Exception) -> bool:
+    """只把平台临时不可用降级；鉴权、404 和响应契约变化仍然阻断。"""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status in {408, 425, 429} or status >= 500
+    return isinstance(
+        exc,
+        (
+            TimeoutError,
+            httpx.TimeoutException,
+            httpx.TransportError,
+        ),
+    )
+
+
+def _failure_kind(exc: Exception) -> str:
+    if _is_transient_failure(exc):
+        return "transient_availability"
+    if isinstance(exc, httpx.HTTPStatusError):
+        if exc.response.status_code in {401, 403}:
+            return "authentication_or_permission"
+        return "http_contract"
+    if isinstance(exc, (ValueError, json.JSONDecodeError, ET.ParseError)):
+        return "response_contract"
+    return "runtime"
+
+
 def _write_results(results: list[SmokeResult]) -> None:
     path = Path("logs/smoke_test_latest.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "contract_version": SMOKE_CONTRACT_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "summary": {
             "passed": sum(item.status == "passed" for item in results),

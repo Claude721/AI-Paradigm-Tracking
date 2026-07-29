@@ -134,6 +134,7 @@ class ParadigmDiscovery:
         coverage["recall_lanes"] = self.arxiv.recall_coverage()
         coverage["official_pages"] = self.priority_pages.coverage()
         coverage["academic_indexes"] = {
+            "arxiv": self.arxiv.coverage(),
             "openalex": self.openalex.coverage(),
             "openreview": self.openreview.coverage(),
         }
