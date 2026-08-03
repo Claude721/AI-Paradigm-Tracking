@@ -352,6 +352,25 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
 )
 PARADIGM_STATE_SCHEMA_VERSION: int = 2
 
+# 云端任务必须在 GitHub 的硬超时之前主动收尾。该预算只决定本轮执行到
+# backlog 的哪个位置，不参与 Rubric、排序分数或研究去留；未处理项会持久化
+# 并在后续运行继续。设为 0 可在有外部进程监管的本地环境禁用软预算。
+PARADIGM_RUN_BUDGET_SECONDS: int = max(
+    0, _env_int("PARADIGM_RUN_BUDGET_SECONDS", 3900)
+)
+# 每个后续阶段预留的时间：原点机制抽取会为深挖和最终报告各预留一份，
+# 深挖/历史刷新会为最终报告预留一份。
+PARADIGM_STAGE_RESERVE_SECONDS: int = max(
+    60, _env_int("PARADIGM_STAGE_RESERVE_SECONDS", 600)
+)
+# 批次大小只是可取消、可检查点的执行粒度，不是候选数量上限。
+PARADIGM_ANALYSIS_BATCH_SIZE: int = max(
+    1, min(_env_int("PARADIGM_ANALYSIS_BATCH_SIZE", 6), 24)
+)
+PARADIGM_DEEP_BATCH_SIZE: int = max(
+    1, min(_env_int("PARADIGM_DEEP_BATCH_SIZE", 1), 6)
+)
+
 # 定时任务（默认每周五 09:15，Asia/Shanghai；与 GitHub Actions 一致）
 SCHEDULE_DAY_OF_WEEK: str = os.getenv("SCHEDULE_DAY_OF_WEEK", "fri")
 SCHEDULE_HOUR: int = _env_int("SCHEDULE_HOUR", 9)

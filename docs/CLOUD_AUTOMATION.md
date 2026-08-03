@@ -10,7 +10,8 @@
 - SMTP 发送失败会让任务失败，不会把该报告登记成已成功交付。
 - 报告若包含英文长段、评分表、字段拼装或缺少核心章节，会先自动重写一次；仍不合格则任务失败且不发送邮件。
 - 成功邮件除研究 Memo 外，还会附带本轮结构化筛选审计和运行日志；审计记录信源返回量、筛选理由及各阶段 token 用量，不保存 prompt、模型正文或私有推理。
-- 去重数据库会在成功运行后保存为私有 Actions artifact；状态 schema 兼容时跨代码 commit 恢复，避免每次改 prompt 都丢掉路线历史。只有主动勾选 `reset_state` 或 schema 不兼容时才从空状态开始；空状态自动使用 60 天冷启动窗口。
+- 去重数据库会在成功运行后保存为私有 Actions artifact；旧版兼容 schema 会先由应用迁移和校验，不能只因元数据版本变化就丢弃状态。只有主动勾选 `reset_state`、数据库损坏或确实超出兼容范围时才从空状态开始；空状态自动使用 60 天冷启动窗口。
+- 主流程失败或被 GitHub 硬取消时，独立的 `always()` 步骤会发送失败提醒；它不依赖正式报告已经生成。若运行成功但仍有待处理 backlog，邮件主题会标注“覆盖进行中”，审计会区分 Rubric 淘汰与运行延后。
 
 ## 1. 私有 GitHub 仓库
 
@@ -64,12 +65,16 @@
 | `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS` | 推荐 `60`；状态数据库为空或覆盖地图版本变化时使用 |
 | `PARADIGM_RESEARCHER_PROFILE_LIMIT` | 推荐 `6`；覆盖前三位、末位/资深作者和重点研究者 |
 | `PARADIGM_*_SAFETY_LIMIT` | 可选运行熔断；默认/推荐 `0`，表示数量完全由 Rubric 结果决定 |
+| `PARADIGM_RUN_BUDGET_SECONDS` | 推荐 `3900`；在 90 分钟 Actions 硬超时前主动收尾并续存 backlog，最多不要超过 `4500` |
+| `PARADIGM_STAGE_RESERVE_SECONDS` | 推荐 `600`；为深挖、报告和交付保留时间 |
+| `PARADIGM_ANALYSIS_BATCH_SIZE` | 推荐 `6`；机制抽取检查点粒度，不是候选上限 |
+| `PARADIGM_DEEP_BATCH_SIZE` | 推荐 `1`；深挖检查点粒度，避免半完成档案入库 |
 
 不配置变量时，RSS 信源为空；研究入口、组织与重点研究者使用仓库中的版本化默认目录，不影响工作流语法。若仓库已有旧版 `PRIORITY_RESEARCH_PAGES` 或 `ESTABLISHED_RESEARCH_ORGANIZATIONS` 长名单，`merge` 会保留它们并同时加载新默认目录，不会冻结后续更新。
 
 GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留空时同时发现社区和普通技术网页，结果仍只算索引线索。Rubric 与前沿覆盖地图都随代码提交，无需创建 Secret 或 Variable。旧版 `PARADIGM_MAX_ANALYSIS_ITEMS`、`PARADIGM_MAX_DEEP_CANDIDATES` 等 Variable 可以删除；即使保留，新代码也不会读取。Reddit 的 Client ID/Secret 必须和“已批准”开关一起配置；只填密钥但不开启批准开关时，代码不会请求 Reddit API。Semantic Scholar 同理：Secret 留空、Variable 为 `false` 时，代码不会匿名请求。
 
-跨提交恢复状态会检查数据库 schema，并读取前沿覆盖地图版本，不再因为 commit SHA 改变就重置。普通 Prompt、Skill 或报告样式更新会延续跨周历史；覆盖地图升级时仍恢复旧数据库用于证据去重，但程序会用 60 天窗口补扫新加入的技术面。已经分析过且正文未变化的材料不会再次调用 LLM。
+跨提交恢复状态会验证 SQLite 完整性，并把兼容的旧 schema 迁移到当前版本，再读取前沿覆盖地图版本；不再因为 commit SHA 或一个可迁移的版本号变化就重置。普通 Prompt、Skill 或报告样式更新会延续跨周历史；覆盖地图升级时仍恢复旧数据库用于证据去重，但程序会用 60 天窗口补扫新加入的技术面。已经分析过且正文未变化的材料不会再次调用 LLM。
 
 ## 4. 首次手动验收
 
@@ -88,10 +93,10 @@ GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留�
 - 不要同时长期运行本机 `python main.py --schedule` 或重复的 Codex 自动任务，否则可能在同一天收到两封邮件。
 - GitHub 定时任务可能因平台负载稍有延迟，所以安排在 09:15 而不是整点。
 - 状态和报告 artifact 当前保留 90 天；只要任务每周持续成功，下一周就能恢复最近状态。
-- 运行审计 artifact 使用 `if: always()`：即使报告生成或邮件失败，也会尽量保留 `current_run.log` 和结构化审计，避免只看到一个红叉而不知道停在哪一步。
+- 运行审计 artifact 与失败提醒都使用独立的 `always()` 语义：即使报告生成、邮件或主流程超时，也会尽量保留 `current_run.log`、结构化审计并发送包含 Actions 链接的告警。
 - 如果连续超过 90 天没有成功运行，artifact 可能过期，下一次会被视为新的首跑。
-- 代码 commit 变化不会自动丢弃旧状态；数据库 schema 版本变化才会从空状态冷启动。覆盖地图版本变化会保留旧去重历史并扩大为 60 天补扫。V0 阶段确需清空所有历史时才手动勾选 `reset_state`。
-- 周报没有合格路线时仍会成功发送“空雷达”；这是研究结论，不是任务故障。只有编辑质量闸门或邮件投递失败才会阻止状态保存。
+- 代码 commit 变化不会自动丢弃旧状态；兼容的数据库 schema 会迁移，只有损坏或超出兼容范围才冷启动。覆盖地图版本变化会保留旧去重历史并扩大为 60 天补扫。V0 阶段确需清空所有历史时才手动勾选 `reset_state`。
+- 周报没有合格路线且所有计划材料已完成判断时，仍会成功发送“空雷达”；这是研究结论。若软预算到达但仍有 backlog，则邮件与空报告必须明确写“覆盖进行中”，不能把尚未分析冒充零创新。
 - GitHub 公共仓库连续 60 天无活动可能停用 scheduled workflow，因此本项目建议使用私有仓库。
 - 修改工作流后，确保更改已经进入默认分支。
 - 工作流使用 Node 24 版本的 `checkout@v6`、`setup-python@v6` 与 `upload-artifact@v7`；任务不执行 git push，因此 checkout 不持久化临时凭据。

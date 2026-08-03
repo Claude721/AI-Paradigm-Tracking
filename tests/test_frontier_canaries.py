@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from database.paradigm_store import ParadigmStore
@@ -333,8 +334,11 @@ class FrontierCoverageTests(unittest.TestCase):
         self.assertTrue(seeded[0].extra["explicit_seed"])
 
     def test_recent_revision_of_old_paper_is_recalled(self) -> None:
+        recent_revision = (
+            datetime.now(timezone.utc) - timedelta(days=1)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
         xml = T_REX_ATOM.replace(
-            "2026-06-18T17:59:59Z", "2026-07-25T17:59:59Z"
+            "2026-06-18T17:59:59Z", recent_revision
         )
         source = ArxivSource(lookback_days=7, seed_arxiv_ids=[])
         self.assertEqual(len(source._parse_atom_feed(xml)), 1)

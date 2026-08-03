@@ -222,11 +222,17 @@ PARADIGM_RECALL_OVERLAP_DAYS=30
 PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
 PARADIGM_SEED_ARXIV_IDS=
 PARADIGM_RESEARCHER_PROFILE_LIMIT=6
+PARADIGM_RUN_BUDGET_SECONDS=3900
+PARADIGM_STAGE_RESERVE_SECONDS=600
+PARADIGM_ANALYSIS_BATCH_SIZE=6
+PARADIGM_DEEP_BATCH_SIZE=1
 ```
 
 技术去留由仓库中的 `rubrics/paradigm_rubric.json` 决定；行业覆盖由 `taxonomy/frontier_landscape.json` 决定。前者维护判断问题，后者维护基础模型、推理与软件 Agent、多模态/语音/3D、具身/自动驾驶、World Model、AI4S、系统/端侧/硬件、安全等发现范围。通常两个路径都留空，直接维护仓库内版本并提交。覆盖地图的 `version` 改变后，云端会重新扫描 60 天，避免新增领域继续继承旧召回盲区。
 
 五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版 `PARADIGM_MIN_*` 与 `PARADIGM_MAX_*` 已停用，GitHub 中即使残留也不会影响新逻辑。
+
+`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制一次云端运行的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后生成本期报告并发送邮件，剩余项保留为 backlog。GitHub job 的硬超时为 90 分钟，推荐软预算 `3900` 秒，最多不要超过 `4500` 秒。`PARADIGM_ANALYSIS_BATCH_SIZE` 与 `PARADIGM_DEEP_BATCH_SIZE` 只是检查点粒度，不是 Top-K。
 
 第一次运行前必须先做专用 smoke test。它每个接口只发有总时限的最小请求、模型只要求回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。探针不导入或调用生产召回器：arXiv 只查一个稳定 ID，官方研究页只取一个索引页，RSS/Follow Builders 只取一个 Feed，GitHub 只发一次 Search，OpenAlex/OpenReview 也各只请求一页。它不会执行领域、人物、报告、详情页、cursor 或 offset 分页。
 

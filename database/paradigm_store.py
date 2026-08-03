@@ -136,20 +136,26 @@ class ParadigmStore:
         placeholders = ",".join("?" for _ in fingerprints)
         with self._connect() as conn:
             rows = conn.execute(
-                f"SELECT fingerprint, content_signature, last_analyzed_at FROM evidence_state "
+                f"SELECT fingerprint, content_signature, last_analyzed_at, payload_json "
+                f"FROM evidence_state "
                 f"WHERE fingerprint IN ({placeholders})",
                 fingerprints,
             ).fetchall()
         existing = {
-            fingerprint: (signature, last_analyzed_at)
-            for fingerprint, signature, last_analyzed_at in rows
+            fingerprint: (signature, last_analyzed_at, payload_json)
+            for fingerprint, signature, last_analyzed_at, payload_json in rows
         }
         selected = []
         stats = {"new": 0, "changed": 0, "unchanged_skip": 0}
         for item in origins:
             signature = _content_signature(item)
             previous = existing.get(item.fingerprint)
-            if previous is None or previous[1] is None:
+            if previous is None:
+                selected.append(item)
+                stats["new"] += 1
+            elif previous[1] is None:
+                if previous[0] == signature:
+                    _restore_execution_metadata(item, previous[2])
                 selected.append(item)
                 stats["new"] += 1
             elif previous[0] != signature:
@@ -180,7 +186,13 @@ class ParadigmStore:
                         url=excluded.url,
                         payload_json=excluded.payload_json,
                         last_seen_at=excluded.last_seen_at,
-                        last_analyzed_at=COALESCE(excluded.last_analyzed_at, evidence_state.last_analyzed_at)
+                        last_analyzed_at=CASE
+                            WHEN excluded.last_analyzed_at IS NOT NULL
+                                THEN excluded.last_analyzed_at
+                            WHEN excluded.content_signature != evidence_state.content_signature
+                                THEN NULL
+                            ELSE evidence_state.last_analyzed_at
+                        END
                     """,
                     (
                         item.fingerprint,
@@ -490,6 +502,18 @@ def _content_signature(item: TechnicalEvidence) -> str:
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _restore_execution_metadata(item: TechnicalEvidence, payload_json: str) -> None:
+    """把 pending 重试元数据带到本周重新发现的同一内容上。"""
+    try:
+        previous = json.loads(payload_json)
+        previous_raw = previous.get("raw") or {}
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return
+    for key in ("analysis_failure_count", "last_analysis_failure_at"):
+        if key in previous_raw:
+            item.raw[key] = previous_raw[key]
 
 
 _ROUTE_STOPWORDS = {

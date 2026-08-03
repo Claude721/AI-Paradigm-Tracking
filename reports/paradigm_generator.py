@@ -205,13 +205,27 @@ class ParadigmReportGenerator:
             if incomplete_parts
             else ""
         )
+        pending_work = int(stats.get("pending_work_count", 0) or 0)
+        if pending_work:
+            progress_note = (
+                "\n\n本轮还存在**尚未完成研究判断的执行积压**："
+                f"机制抽取完成 {stats.get('analysis_completed_count', stats.get('analysis_count', 0))}/"
+                f"{stats.get('planned_analysis_count', 0)} 条；"
+                f"待抽取 {stats.get('analysis_deferred_count', 0)} 条，"
+                f"待深挖 {stats.get('candidate_deferred_count', 0)} 条，"
+                f"待刷新 {stats.get('refresh_deferred_count', 0)} 条。"
+                "这些材料只是因软时间预算或显式 safety limit 延后，"
+                "并未被 Rubric 淘汰；因此本期空白不能解释为近期没有新范式。"
+            )
+        else:
+            progress_note = ""
         return f"""# AI 技术范式雷达
 
 > {date} · 发现窗口 {stats.get('discovery_lookback_days', config.SOURCING_LOOKBACK_DAYS)} 天
 
 ## 本期研究 Memo
 
-本期共扫描 {stats.get('origin_count', 0)} 篇论文、Technical Report 与官方技术博客，但没有材料同时跨过**技术外延、发布者可信度和外部承接**三道门槛。技术范式不会按周出现，这一期不为了维持篇幅把局部 benchmark 改进或作者的宏大叙事包装成趋势。{coverage_note}
+本期共扫描 {stats.get('origin_count', 0)} 篇论文、Technical Report 与官方技术博客，但在本轮已经完成研究判断的材料中，没有内容同时跨过**技术外延、发布者可信度和外部承接**三道门槛。技术范式不会按周出现，这一期不为了维持篇幅把局部 benchmark 改进或作者的宏大叙事包装成趋势。{coverage_note}{progress_note}
 
 ## 接下来真正值得盯的信号
 
@@ -298,7 +312,13 @@ def _researcher_dossier(profile: ResearcherProfile) -> dict:
 def _public_stats(stats: dict) -> dict:
     keys = {
         "origin_count",
+        "planned_analysis_count",
         "analysis_count",
+        "analysis_completed_count",
+        "analysis_deferred_count",
+        "candidate_deferred_count",
+        "refresh_deferred_count",
+        "run_incomplete",
         "candidate_extractions",
         "new_paradigms",
         "updated_paradigms",

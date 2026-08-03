@@ -133,7 +133,14 @@ async def _run_pipeline_once() -> dict:
             report_path = await orchestrator.report_gen.generate([], stats)
         stats["report_path"] = str(report_path)
 
-    audit_summary = run_audit.write(stats)
+    audit_summary = run_audit.write(
+        stats,
+        status=(
+            "completed_with_backlog"
+            if stats.get("run_incomplete")
+            else "completed"
+        ),
+    )
     stats.update(audit_summary)
     stats["audit_attachments"] = [
         audit_summary["audit_markdown_path"],
@@ -315,6 +322,11 @@ def main() -> None:
         action="store_true",
         help="smoke test 中跳过 Tavily，避免重复消耗 basic request credit",
     )
+    parser.add_argument(
+        "--notify-failure",
+        action="store_true",
+        help="仅发送云端任务失败提醒；不运行研究流水线",
+    )
     args = parser.parse_args()
 
     if args.setup:
@@ -346,6 +358,10 @@ def main() -> None:
         print_smoke_results(results)
         if smoke_failed(results):
             raise SystemExit(1)
+    elif args.notify_failure:
+        from notifications.email_notifier import send_failure_email
+
+        asyncio.run(send_failure_email())
     else:
         setup_logging()
         asyncio.run(run_pipeline())

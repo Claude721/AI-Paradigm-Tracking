@@ -46,7 +46,7 @@ Product Hunt、普通 GitHub Trending 和产品热榜不再决定候选，只在
 - Tavily 免费搜索用于发现公开索引的社区页面和独立技术博客；它不是平台全量 API，也不参与声量计分。Reddit OAuth 只有在明确获批后才读取帖子、评论与互动指标。
 - 前沿机构目录区分“主动抓取、已建立、监测、重点研究者”四层；完整名单与官方核验入口见 [前沿机构与研究者 Watchlist](docs/FRONTIER_RESEARCH_WATCHLIST.md)。
 
-Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，可长期增删问题、调整 option 权重与阶段阈值。每周分析数量由实际召回和 Rubric 结果共同决定，不固定取前 100、30 或 16 个；Rubric 分数与回答只进入审计，不进入最终报告。
+Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，可长期增删问题、调整 option 权重与阶段阈值。研究池与最终去留不固定取前 100、30 或 16 个；Rubric 分数与回答只进入审计，不进入最终报告。云端单次运行另有墙上时间软预算：它只让任务在 GitHub 硬超时前分批收尾，未处理材料会保留到后续运行，不会被写成 Rubric 淘汰。
 
 行业发现范围位于 [`taxonomy/frontier_landscape.json`](taxonomy/frontier_landscape.json)。发现层不是一张关键词表，而是并行运行领域术语、重点研究者完整姓名、正式文档类型、官方研究索引、Hugging Face 策展和人工精确补录等独立车道。每次审计同时显示逐领域状态、每条召回车道和逐个官方入口健康度，避免“报告为零”掩盖某家公司页面解析失败。数据库为空或覆盖地图升级时自动回看 60 天；正常周更重叠扫描 30 天并由数据库去重。T‑Rex 与 Kimi‑K3 被保留为两类离线黄金样例，但生产逻辑没有把论文标题写成白名单。
 
@@ -56,7 +56,7 @@ Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，�
 
 每条重要路线都会追踪前三位作者、末位/资深作者和重点名单中的关键作者；官方项目页明确标注共同一作/通讯关系时按贡献角色组织，不能把大型合作论文写成“某位大佬的论文”。人物档案优先核验当前机构、代表作、研究连续性、个人主页、ORCID、GitHub、LinkedIn 与公开邮箱；没有公开联系方式时，报告必须保留检索过的公开来源和能够确认的最低背景。
 
-系统使用独立的 `database/paradigm_radar.db`。同一证据按 DOI、arXiv ID 或稳定 URL 去重；观察池和已报告路线会在每周重新检索近期讨论。同一范式只有在证据签名发生实质变化时才会以“进展更新”再次出现，因此相邻周不会原样重复。没有候选跨过联合门槛时会正常发送一份空雷达，而不是硬凑一条新范式。
+系统使用独立的 `database/paradigm_radar.db`。同一证据按 DOI、arXiv ID 或稳定 URL 去重；观察池和已报告路线会在每周重新检索近期讨论。同一范式只有在证据签名发生实质变化时才会以“进展更新”再次出现，因此相邻周不会原样重复。所有计划材料均完成判断后，如果没有候选跨过联合门槛，会正常发送一份空雷达；若仍有执行 backlog，邮件会标注“覆盖进行中”，不能把尚未分析误写成零创新。
 
 ## 配置与运行
 
@@ -91,6 +91,8 @@ SOURCING_LOOKBACK_DAYS=7
 PARADIGM_RECALL_OVERLAP_DAYS=30
 PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED=true
 PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
+PARADIGM_RUN_BUDGET_SECONDS=3900
+PARADIGM_STAGE_RESERVE_SECONDS=600
 SCHEDULE_DAY_OF_WEEK=fri
 SCHEDULE_HOUR=9
 SCHEDULE_MINUTE=15
@@ -114,7 +116,7 @@ SMTP_USE_SSL=true
 SMTP_USE_STARTTLS=false
 ```
 
-邮件主题会显示“新范式”和“进展更新”数量，完整 Markdown 作为附件发送。没有合格候选时也会发送空雷达，明确说明本周没有内容通过门槛。
+邮件主题会显示“新范式”和“进展更新”数量，完整 Markdown 作为附件发送。没有合格候选且研究判断已完成时会发送空雷达；若有软预算积压，主题和正文会明确标注覆盖尚未闭合。主流程失败或被 GitHub 取消时，云端另有独立失败提醒，不依赖报告文件已经生成。
 
 手动执行 `python main.py` 与每周调度使用同一个流水线，都会在报告生成后发送邮件。开启
 `EMAIL_PUSH_REQUIRED=true` 后，SMTP 失败会让任务明确失败，且不会登记为“已交付”。

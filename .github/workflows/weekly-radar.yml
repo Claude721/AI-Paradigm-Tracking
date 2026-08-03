@@ -92,7 +92,12 @@ jobs:
       PARADIGM_BOOTSTRAP_LOOKBACK_DAYS: ${{ vars.PARADIGM_BOOTSTRAP_LOOKBACK_DAYS || '60' }}
       PARADIGM_SEED_ARXIV_IDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seed_arxiv_ids || '' }}
       PARADIGM_RESEARCHER_PROFILE_LIMIT: ${{ vars.PARADIGM_RESEARCHER_PROFILE_LIMIT || '6' }}
-      PARADIGM_STATE_SCHEMA_VERSION: "2"
+      # 软预算只决定本轮处理到 backlog 的哪里；Rubric 仍是唯一研究门槛。
+      # 3900 秒会在 90 分钟 job 硬超时前为报告、邮件和 artifact 留出余量。
+      PARADIGM_RUN_BUDGET_SECONDS: ${{ vars.PARADIGM_RUN_BUDGET_SECONDS || '3900' }}
+      PARADIGM_STAGE_RESERVE_SECONDS: ${{ vars.PARADIGM_STAGE_RESERVE_SECONDS || '600' }}
+      PARADIGM_ANALYSIS_BATCH_SIZE: ${{ vars.PARADIGM_ANALYSIS_BATCH_SIZE || '6' }}
+      PARADIGM_DEEP_BATCH_SIZE: ${{ vars.PARADIGM_DEEP_BATCH_SIZE || '1' }}
       EMAIL_PUSH_ENABLED: "true"
       EMAIL_PUSH_REQUIRED: "true"
       SMTP_HOST: smtp.qq.com
@@ -145,13 +150,6 @@ jobs:
           gh api "$artifact_url" > /tmp/paradigm-radar-state.zip
           unzip -oq /tmp/paradigm-radar-state.zip -d /tmp/paradigm-radar-restore
 
-          state_schema="$(jq -r '.schema_version // empty' /tmp/paradigm-radar-restore/state-meta.json 2>/dev/null || true)"
-          if [ "$state_schema" != "$PARADIGM_STATE_SCHEMA_VERSION" ]; then
-            echo "检测到状态数据库结构不兼容，本轮从空数据库开始"
-            echo "restored=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           state_landscape="$(jq -r '.landscape_version // empty' /tmp/paradigm-radar-restore/state-meta.json 2>/dev/null || true)"
           current_landscape="$(jq -r '.version' taxonomy/frontier_landscape.json)"
           if [ "$state_landscape" != "$current_landscape" ]; then
@@ -164,9 +162,16 @@ jobs:
             exit 0
           fi
 
+          state_schema="$(jq -r '.schema_version // empty' /tmp/paradigm-radar-restore/state-meta.json 2>/dev/null || true)"
+          if ! python -m database.state_migration /tmp/paradigm-radar-restore/paradigm_radar.db --from-version "$state_schema"; then
+            echo "状态 artifact 无法安全迁移，本轮从空状态开始"
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           mkdir -p database
           cp /tmp/paradigm-radar-restore/paradigm_radar.db database/paradigm_radar.db
-          echo "已恢复兼容版本的跨周路线与去重状态"
+          echo "已恢复并迁移跨周路线与去重状态"
           echo "restored=true" >> "$GITHUB_OUTPUT"
 
       - name: 配置体检
@@ -177,14 +182,25 @@ jobs:
         run: python main.py --smoke-test
 
       - name: 抓取、分析并发送邮件
+        id: pipeline
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
         run: python main.py
+
+      - name: 主流程失败邮件提醒
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) && steps.pipeline.outcome != 'success' }}
+        continue-on-error: true
+        env:
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PIPELINE_STEP_OUTCOME: ${{ steps.pipeline.outcome }}
+          AUDIT_ARTIFACT_NAME: paradigm-radar-audit-${{ github.run_id }}
+        run: python main.py --notify-failure
 
       - name: 记录状态对应的代码版本
         if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         run: |
           landscape_version="$(jq -r '.version' taxonomy/frontier_landscape.json)"
-          printf '{"schema_version":%s,"landscape_version":"%s","commit_sha":"%s","run_id":"%s"}\n' "$PARADIGM_STATE_SCHEMA_VERSION" "$landscape_version" "$GITHUB_SHA" "$GITHUB_RUN_ID" > database/state-meta.json
+          state_schema="$(python -m database.state_migration --print-current-version)"
+          printf '{"schema_version":%s,"landscape_version":"%s","commit_sha":"%s","run_id":"%s"}\n' "$state_schema" "$landscape_version" "$GITHUB_SHA" "$GITHUB_RUN_ID" > database/state-meta.json
 
       - name: 保存跨周去重状态
         if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}

@@ -175,6 +175,7 @@ def collect_checks() -> list[Check]:
             f"逐项总时限 {config.SMOKE_CHECK_TIMEOUT_SECONDS}s；"
             "各外部能力使用独立单请求探针；临时可用性与契约失败分账",
         ),
+        _execution_budget_check(),
         _email_check(),
         _schedule_check(),
     ]
@@ -258,6 +259,29 @@ def _email_check() -> Check:
     )
 
 
+def _execution_budget_check() -> Check:
+    budget = config.PARADIGM_RUN_BUDGET_SECONDS
+    if budget == 0:
+        return Check(
+            "可续跑时间预算",
+            "云端可靠性",
+            "warning",
+            "软预算已禁用；本地可用，但 90 分钟 GitHub job 可能被硬取消",
+        )
+    status = "ready" if budget <= 4500 else "warning"
+    return Check(
+        "可续跑时间预算",
+        "云端可靠性",
+        status,
+        f"单轮 {budget}s；阶段预留 {config.PARADIGM_STAGE_RESERVE_SECONDS}s；"
+        f"抽取/深挖批次 {config.PARADIGM_ANALYSIS_BATCH_SIZE}/"
+        f"{config.PARADIGM_DEEP_BATCH_SIZE}；"
+        + (
+            "适配 90 分钟 Actions 硬超时"
+            if status == "ready"
+            else "超过 4500s，可能来不及生成报告、发送邮件和保存 artifact"
+        ),
+    )
 def _schedule_check() -> Check:
     try:
         ZoneInfo(config.SCHEDULE_TIMEZONE)
