@@ -56,7 +56,7 @@ Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，�
 
 每条重要路线都会追踪前三位作者、末位/资深作者和重点名单中的关键作者；官方项目页明确标注共同一作/通讯关系时按贡献角色组织，不能把大型合作论文写成“某位大佬的论文”。人物档案优先核验当前机构、代表作、研究连续性、个人主页、ORCID、GitHub、LinkedIn 与公开邮箱；没有公开联系方式时，报告必须保留检索过的公开来源和能够确认的最低背景。
 
-系统使用独立的 `database/paradigm_radar.db`。同一证据按 DOI、arXiv ID 或稳定 URL 去重；观察池和已报告路线会在每周重新检索近期讨论。同一范式只有在证据签名发生实质变化时才会以“进展更新”再次出现，因此相邻周不会原样重复。研究检查点与报告交付是两个状态：研究完成后先把候选快照写入持久化 outbox，报告生成或 SMTP 失败不会撤销已经完成的研究；下一次运行会先复用快照/已验证报告完成续投，再开始新一轮研究。SMTP 接受邮件后若进程在数据库确认前硬退出，系统按同一 `Message-ID` 至少一次重试，无法承诺所有邮箱服务商上的绝对 exactly-once。所有计划材料均完成判断后，如果没有候选跨过联合门槛，会正常发送一份空雷达；若仍有执行 backlog，邮件会标注“覆盖进行中”，不能把尚未分析误写成零创新。
+系统使用独立的 `database/paradigm_radar.db`。同一证据按 DOI、arXiv ID 或稳定 URL 去重；观察池和已报告路线会在每周重新检索近期讨论。同一范式只有在证据签名发生实质变化时才会以“进展更新”再次出现，因此相邻周不会原样重复。研究检查点与报告交付是两个状态：研究完成后先把候选快照写入持久化 outbox；多路线报告再逐路线写作并逐条保存 checkpoint，最后只生成轻量的全局 Memo 框架，程序确定性装配全部路线。任一路线、总编或 SMTP 失败都不会撤销已经完成的研究/草稿；下一次运行只复用快照、路线草稿或已验证报告完成最老的待交付任务，然后退出，避免恢复耗时与一整轮新研究叠加触发 GitHub 硬超时。若还要抓取最新一周，再启动一次正常运行。SMTP 接受邮件后若进程在数据库确认前硬退出，系统按同一 `Message-ID` 至少一次重试，无法承诺所有邮箱服务商上的绝对 exactly-once。所有计划材料均完成判断后，如果没有候选跨过联合门槛，会正常发送一份空雷达；若仍有执行 backlog，邮件会标注“覆盖进行中”，不能把尚未分析误写成零创新。
 
 ## 配置与运行
 
@@ -93,9 +93,11 @@ PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED=true
 PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
 PARADIGM_RESEARCHER_PROFILE_LIMIT=6
 PARADIGM_KEY_RESEARCHER_LIMIT=3
-PARADIGM_RUN_BUDGET_SECONDS=3900
+PARADIGM_RUN_BUDGET_SECONDS=3600
 PARADIGM_STAGE_RESERVE_SECONDS=1200
 PARADIGM_REPORT_TIMEOUT_SECONDS=1200
+PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS=360
+PARADIGM_REPORT_ROUTE_CONCURRENCY=2
 SCHEDULE_DAY_OF_WEEK=fri
 SCHEDULE_HOUR=9
 SCHEDULE_MINUTE=15

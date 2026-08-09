@@ -20,6 +20,7 @@ from paradigms.analyzer import (
     ParadigmAnalyzer,
     ParadigmSynthesizer,
     _author_prompt_summary,
+    _bounded_synthesis_evidence,
     _validate_mental_model,
 )
 from paradigms.clustering import cluster_extractions
@@ -39,9 +40,11 @@ from reports.paradigm_generator import (
     _attach_primary_source_index,
     _attach_researcher_index,
     _candidate_dossier,
+    _compact_route_dossier,
     _editorial_advisories,
     _editorial_violations,
     _momentum_evidence,
+    _route_fragment_key,
     _valid_editorial_report,
 )
 from skills.loader import SkillLoader
@@ -888,6 +891,97 @@ class ParadigmPipelineTests(unittest.TestCase):
             _candidate_dossier(item)["mental_model"], item.mental_model
         )
 
+    def test_synthesis_evidence_budget_is_explicit_not_a_fixed_top_k(self) -> None:
+        tiny = [paper(str(index)) for index in range(30)]
+        for index, value in enumerate(tiny):
+            value.title = f"Compact evidence {index}"
+            value.url = f"https://example.org/paper/{index}"
+            value.summary = "短证据"
+        represented = _bounded_synthesis_evidence(tiny)
+        self.assertGreater(len(represented["records"]), 24)
+        self.assertEqual(represented["overflow"]["count"], 0)
+
+        large = [paper(str(index)) for index in range(80)]
+        for index, value in enumerate(large):
+            value.title = f"Large evidence {index}"
+            value.url = f"https://example.org/large/{index}"
+            value.summary = "机制正文" * 2000
+            value.raw["document_excerpt"] = "完整报告" * 6000
+        bounded = _bounded_synthesis_evidence(large)
+        serialized = json.dumps(bounded, ensure_ascii=False)
+        self.assertLess(len(serialized), 60_000)
+        self.assertGreater(bounded["overflow"]["count"], 0)
+        self.assertIn("不代表被 Rubric 淘汰", bounded["overflow"]["meaning"])
+
+    def test_synthesis_repairs_only_invalid_structure_after_valid_json(self) -> None:
+        first_payload = {
+            "innovation_types": ["architecture"],
+            "rubric_answers": rubric_answers(["architecture"]),
+            "mental_model": {
+                "observation_axis": "沿状态转移观察。",
+                "low_resolution_model": "旧模型预测像素，新模型预测状态。",
+                "decisive_intervention": "改变状态转移接口。",
+                "resolution_ladder": [
+                    {
+                        "question": "改变了什么？",
+                        "answer": "状态接口。",
+                        "evidence_status": "source_fact",
+                        "model_update": "不再只看像素。",
+                    },
+                    {
+                        "question": "信号来自哪里？",
+                        "answer": "预测误差。",
+                        "evidence_status": "source_fact",
+                        "model_update": "闭合训练信号。",
+                    },
+                ],
+                "training_causal_chain": ["状态进入模型并由预测误差更新参数。"],
+                "runtime_causal_chain": ["当前状态映射为未来状态。"],
+                "minimal_simulation": "一个杯子从左向右移动。",
+            },
+        }
+        repair_payload = {
+            "mental_model": {
+                "counterfactual_and_boundary": "移除状态接口后退回平均像素预测。"
+            }
+        }
+        responses = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps(first_payload))
+                    )
+                ]
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps(repair_payload))
+                    )
+                ]
+            ),
+        ]
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(side_effect=responses)
+                )
+            )
+        )
+        item = candidate()
+        item.mental_model = {}
+        item.evidence[0].raw["document_excerpt"] = "很长的报告正文" * 4000
+        asyncio.run(ParadigmSynthesizer(client=client, model="test").run([item]))
+        calls = client.chat.completions.create.await_args_list
+        first_prompt = calls[0].kwargs["messages"][0]["content"]
+        repair_prompt = calls[1].kwargs["messages"][0]["content"]
+        self.assertIn("counterfactual_and_boundary", repair_prompt)
+        self.assertLess(len(repair_prompt), len(first_prompt))
+        self.assertEqual(
+            item.mental_model["counterfactual_and_boundary"],
+            "移除状态接口后退回平均像素预测。",
+        )
+
     def test_mental_model_rejects_module_dump_without_resolution_ladder(self) -> None:
         with self.assertRaisesRegex(ValueError, "observation_axis"):
             _validate_mental_model(
@@ -1033,22 +1127,29 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         memo = "本期从旧方法的能力边界出发，解释技术团队如何把朴素思想落实到训练和推理。" * 16
         body = "这条路线的技术机制、验证证据和潜在价值需要放在同一个问题背景中理解。" * 24
-        editorial = (
-            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
-            f"{memo}\n\n## **技术路线**正在形成新的能力边界\n\n"
+        route = (
+            "### **技术路线**正在形成新的能力边界\n\n"
             f"{body} **关键机制**仍需独立复现。A. Researcher 是关键作者，"
-            "公开入口：[ORCID](https://orcid.org/0000-0000-0000-0001)。\n\n"
+            "公开入口：[ORCID](https://orcid.org/0000-0000-0000-0001)，"
+            "并可[查看原文](https://arxiv.org/abs/2607.00001)。\n\n"
             "**讨论势能判断：** 当前仍是单点提出，尚未看到独立复现；"
-            "本轮社区覆盖有限，因此暂不判断为扩散。\n\n"
+            "本轮社区覆盖有限，因此暂不判断为扩散。"
+        )
+        frame = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
+            f"{memo}\n\n"
             "## 接下来真正值得盯的信号\n\n观察独立复现与有内容的二次讨论。"
         )
-        response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=editorial))]
-        )
+        responses = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=value))]
+            )
+            for value in (route, frame)
+        ]
         client = SimpleNamespace(
             chat=SimpleNamespace(
                 completions=SimpleNamespace(
-                    create=AsyncMock(return_value=response)
+                    create=AsyncMock(side_effect=responses)
                 )
             )
         )
@@ -1066,6 +1167,134 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertIn("## 本期研究 Memo", content)
         self.assertNotIn("评分拆解", content)
         self.assertNotIn("| 新颖性 |", content)
+
+    def test_multi_route_report_is_bounded_and_persists_each_route(self) -> None:
+        first = candidate([paper("1")])
+        first.researchers = [verified_researcher("A. Researcher")]
+        second = candidate([paper("2")])
+        second.key = "second-route"
+        second.name = "Second route"
+        second.route_family = "Reasoning-time memory"
+        second.researchers = [verified_researcher("B. Researcher")]
+        for route_index, item in enumerate((first, second), 1):
+            for evidence_index in range(25):
+                item.evidence.append(
+                    TechnicalEvidence(
+                        source="reddit",
+                        evidence_type=EvidenceType.COMMUNITY_DISCUSSION,
+                        title=f"discussion-{route_index}-{evidence_index}",
+                        url=(
+                            "https://reddit.com/r/MachineLearning/comments/"
+                            f"{route_index}-{evidence_index}"
+                        ),
+                        summary="社区对机制边界的中文讨论" * 800,
+                        raw={"relationship": "independent_discussion"},
+                    )
+                )
+
+        route_body = (
+            "旧系统把所有变化混在同一个表示里，新方法只改写决定状态转移的接口。"
+            "训练时预测误差沿这个接口更新参数，运行时当前状态先形成中间表示，"
+            "再决定下一状态；拿掉这一接口后，系统会退回平均预测。"
+        ) * 8
+        route_one = (
+            "### 世界模型开始把变化压成可行动状态\n\n"
+            f"{route_body} A. Researcher 延续了此前的世界模型研究。"
+            "[查看原文](https://arxiv.org/abs/2607.00001)。\n\n"
+            "**讨论势能判断：** 当前仍是单点提出，社区开始讨论状态接口，"
+            "但尚无独立复现；本轮只覆盖到部分公开 Reddit 页面。"
+        )
+        route_two = (
+            "### 推理时记忆开始进入状态更新闭环\n\n"
+            f"{route_body} B. Researcher 的连续工作聚焦推理时状态。"
+            "[查看原文](https://arxiv.org/abs/2607.00002)。\n\n"
+            "**讨论势能判断：** 当前出现少量机制解读，尚未形成多团队承接；"
+            "X 与小红书没有完整平台覆盖。"
+        )
+        memo = (
+            "本期两条路线表面分属世界模型与推理系统，实质都在重写状态如何被保留和更新。"
+            "旧系统把上下文当作一次性输入，新工作则尝试把可行动变化或推理记忆放进运行闭环。"
+            "这并不等于两条路线已经形成统一范式，但它们共同说明研究重心正从扩大输入规模，"
+            "转向设计可持续更新的内部状态。当前证据仍以原始工作和少量机制讨论为主，"
+            "独立复现与跨团队采用还不足，因此更适合作为需要验证的技术方向，而非成熟共识。"
+        ) * 2
+        frame = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
+            f"{memo}\n\n## 接下来真正值得盯的信号\n\n"
+            "观察独立复现是否证明这些状态接口能跨任务迁移。"
+        )
+        responses = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=value))]
+            )
+            for value in (route_one, route_two, frame)
+        ]
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(side_effect=responses)
+                )
+            )
+        )
+        fragments = {}
+        with tempfile.TemporaryDirectory() as directory:
+            path = asyncio.run(
+                ParadigmReportGenerator(
+                    directory, client=client, model="test"
+                ).generate(
+                    [first, second],
+                    {"origin_count": 52},
+                    save_route_fragment=fragments.__setitem__,
+                )
+            )
+            content = path.read_text(encoding="utf-8")
+
+        self.assertEqual(len(fragments), 2)
+        self.assertIn(_route_fragment_key(first), fragments)
+        self.assertIn(_route_fragment_key(second), fragments)
+        self.assertIn(route_one.strip(), content)
+        self.assertIn(route_two.strip(), content)
+        self.assertEqual(content.count("**讨论势能判断：**"), 2)
+        self.assertEqual(client.chat.completions.create.await_count, 3)
+        first_dossier = _compact_route_dossier(first)
+        self.assertGreater(
+            first_dossier["evidence_overflow"]["momentum_evidence"]["count"],
+            0,
+        )
+        prompt_lengths = [
+            len(call.kwargs["messages"][0]["content"])
+            for call in client.chat.completions.create.await_args_list
+        ]
+        self.assertLess(max(prompt_lengths), 45_000)
+
+    def test_one_route_failure_does_not_discard_peer_route_checkpoints(self) -> None:
+        first = candidate([paper("1")])
+        second = candidate([paper("2")])
+        second.key = "failing-route"
+        third = candidate([paper("3")])
+        third.key = "third-route"
+        generator = ParadigmReportGenerator(client=False)
+
+        async def draft(_date, item, **_kwargs):
+            if item.key == "failing-route":
+                raise TimeoutError("one route timed out")
+            return f"### {item.name}\n\n已通过路线级质量闸门"
+
+        generator._draft_one_route = draft
+        saved = {}
+        with self.assertRaisesRegex(RuntimeError, "1 条路线草稿未完成"):
+            asyncio.run(
+                generator._draft_routes(
+                    "2026-08-10",
+                    [first, second, third],
+                    cached={},
+                    save_fragment=saved.__setitem__,
+                )
+            )
+
+        self.assertEqual(len(saved), 2)
+        self.assertIn(_route_fragment_key(first), saved)
+        self.assertIn(_route_fragment_key(third), saved)
 
     def test_researcher_index_keeps_completed_search_trace_when_no_contact_exists(self) -> None:
         item = candidate()
@@ -1265,12 +1494,26 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertFalse(
             any("行内重点强调" in value for value in _editorial_violations(report, [], require_primary_sources=False))
         )
-        response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=report))]
+        route = (
+            "### 路线分析\n\n"
+            + "这条路线解释技术机制与边界。" * 50
+            + "A. Researcher 是这条路线的关键研究者。"
+            + "[查看原文](https://arxiv.org/abs/2607.00001)。"
+            + "\n\n**讨论势能判断：** 当前证据不足，尚不能判断形成独立承接。"
         )
+        frame = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
+            f"{memo}\n\n## 接下来真正值得盯的信号\n\n观察独立复现。"
+        )
+        responses = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=value))]
+            )
+            for value in (route, frame)
+        ]
         client = SimpleNamespace(
             chat=SimpleNamespace(
-                completions=SimpleNamespace(create=AsyncMock(return_value=response))
+                completions=SimpleNamespace(create=AsyncMock(side_effect=responses))
             )
         )
         item = candidate()
@@ -1282,7 +1525,7 @@ class ParadigmPipelineTests(unittest.TestCase):
                 ).generate([item], {"origin_count": 1})
             )
             content = path.read_text(encoding="utf-8")
-        self.assertEqual(client.chat.completions.create.await_count, 1)
+        self.assertEqual(client.chat.completions.create.await_count, 2)
         self.assertIn("## 原文与一手资料", content)
 
     def test_report_generation_fails_instead_of_sending_raw_fallback(self) -> None:

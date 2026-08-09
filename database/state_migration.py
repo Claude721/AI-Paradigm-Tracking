@@ -69,6 +69,13 @@ _REQUIRED_COLUMNS = {
         "updated_at",
         "delivered_at",
     },
+    "report_render_fragments": {
+        "delivery_key",
+        "fragment_key",
+        "content",
+        "created_at",
+        "updated_at",
+    },
     "paradigm_evidence": {
         "paradigm_key",
         "fingerprint",
@@ -84,8 +91,9 @@ def migrate_state(
 ) -> int:
     """Validate an artifact and apply all backwards-compatible migrations.
 
-    Version 2 added ``radar_meta``; version 3 adds the durable report outbox and
-    a delivery identifier.  All additions are backwards-compatible, so opening
+    Version 2 added ``radar_meta``; version 3 added the durable report outbox and
+    a delivery identifier; version 4 adds resumable route-level report fragments.
+    All additions are backwards-compatible, so opening
     the database with :class:`ParadigmStore` performs the migration.  Future
     versions must extend this function before raising the schema version.
     """
@@ -156,7 +164,9 @@ def _validate_sqlite(path: Path, *, require_current: bool) -> None:
 
     required = set(_REQUIRED_TABLES)
     if require_current:
-        required.update({"radar_meta", "report_outbox"})
+        required.update(
+            {"radar_meta", "report_outbox", "report_render_fragments"}
+        )
     missing = required - tables
     if missing:
         raise ValueError(f"状态数据库缺少必需表: {sorted(missing)}")

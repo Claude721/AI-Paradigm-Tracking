@@ -222,11 +222,26 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
         )
     else:
         try:
+            route_fragments = store.load_report_fragments(job.delivery_key)
+            if route_fragments:
+                run_audit.event(
+                    "report_outbox",
+                    "fragments_restored",
+                    f"恢复 {len(route_fragments)} 条已通过质量闸门的路线草稿",
+                )
             report_path = await asyncio.wait_for(
                 generator.generate(
                     job.candidates,
                     stats,
                     report_date=job.report_date,
+                    route_fragments=route_fragments,
+                    save_route_fragment=lambda fragment_key, content: (
+                        store.save_report_fragment(
+                            job.delivery_key,
+                            fragment_key,
+                            content,
+                        )
+                    ),
                 ),
                 timeout=config.PARADIGM_REPORT_TIMEOUT_SECONDS,
             )
@@ -316,22 +331,24 @@ async def _run_pipeline_once() -> dict:
         pending_job = orchestrator.store.load_pending_report_job()
         if pending_job is not None:
             logger.warning(
-                "发现未完成交付 %s（状态=%s），先复用研究结果完成报告/邮件",
+                "发现未完成交付 %s（状态=%s），本次只复用研究结果完成报告/邮件",
                 pending_job.delivery_key[:12],
                 pending_job.status,
             )
-            await _deliver_paradigm_job(
+            result = await _deliver_paradigm_job(
                 orchestrator.store,
                 generator,
                 pending_job,
                 recovered=True,
             )
-            run_audit.reset()
+            result["recovered_delivery_only"] = True
             run_audit.event(
                 "report_outbox",
                 "recovered",
-                f"已完成历史待交付任务 {pending_job.delivery_key[:12]}",
+                f"已完成历史待交付任务 {pending_job.delivery_key[:12]}；"
+                "为避免恢复耗时与新研究叠加触发云端硬超时，本次不再启动新研究",
             )
+            return result
 
     stats = await orchestrator.run()
     if config.PIPELINE_MODE != "legacy":

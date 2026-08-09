@@ -355,13 +355,13 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
 PARADIGM_KEY_RESEARCHER_LIMIT: int = max(
     1, min(_env_int("PARADIGM_KEY_RESEARCHER_LIMIT", 3), 6)
 )
-PARADIGM_STATE_SCHEMA_VERSION: int = 3
+PARADIGM_STATE_SCHEMA_VERSION: int = 4
 
 # 云端任务必须在 GitHub 的硬超时之前主动收尾。该预算只决定本轮执行到
 # backlog 的哪个位置，不参与 Rubric、排序分数或研究去留；未处理项会持久化
 # 并在后续运行继续。设为 0 可在有外部进程监管的本地环境禁用软预算。
 PARADIGM_RUN_BUDGET_SECONDS: int = max(
-    0, _env_int("PARADIGM_RUN_BUDGET_SECONDS", 3900)
+    0, _env_int("PARADIGM_RUN_BUDGET_SECONDS", 3600)
 )
 # 研究阶段内部的收尾余量；报告渲染已经独立使用下方超时和 durable outbox。
 PARADIGM_STAGE_RESERVE_SECONDS: int = max(
@@ -369,6 +369,15 @@ PARADIGM_STAGE_RESERVE_SECONDS: int = max(
 )
 PARADIGM_REPORT_TIMEOUT_SECONDS: int = max(
     60, _env_int("PARADIGM_REPORT_TIMEOUT_SECONDS", 1200)
+)
+# 总编辑请求不再复用短分析请求的 180 秒上限。一次路线起草/
+# 整合仍受整体 report timeout 约束，超时后已完成的路线草稿会续存。
+PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS: int = max(
+    LLM_REQUEST_TIMEOUT_SECONDS,
+    _env_int("PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS", 360),
+)
+PARADIGM_REPORT_ROUTE_CONCURRENCY: int = max(
+    1, min(_env_int("PARADIGM_REPORT_ROUTE_CONCURRENCY", 2), 4)
 )
 # 批次大小只是可取消、可检查点的执行粒度，不是候选数量上限。
 PARADIGM_ANALYSIS_BATCH_SIZE: int = max(

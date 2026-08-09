@@ -268,18 +268,28 @@ def _execution_budget_check() -> Check:
             "warning",
             "软预算已禁用；本地可用，但 90 分钟 GitHub job 可能被硬取消",
         )
-    status = "ready" if budget <= 4500 else "warning"
+    report_budget = config.PARADIGM_REPORT_TIMEOUT_SECONDS
+    combined = budget + report_budget
+    request_budget = config.PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS
+    status = (
+        "ready"
+        if combined <= 4800 and request_budget < report_budget
+        else "warning"
+    )
     return Check(
         "可续跑时间预算",
         "云端可靠性",
         status,
-        f"单轮 {budget}s；阶段预留 {config.PARADIGM_STAGE_RESERVE_SECONDS}s；"
+        f"研究 {budget}s + 报告 {report_budget}s = {combined}s；"
+        f"报告单请求 {request_budget}s，并发 "
+        f"{config.PARADIGM_REPORT_ROUTE_CONCURRENCY}；"
+        f"阶段预留 {config.PARADIGM_STAGE_RESERVE_SECONDS}s；"
         f"抽取/深挖批次 {config.PARADIGM_ANALYSIS_BATCH_SIZE}/"
         f"{config.PARADIGM_DEEP_BATCH_SIZE}；"
         + (
-            "适配 90 分钟 Actions 硬超时"
+            "为 90 分钟 Actions 的安装、测试、邮件和 artifact 保留约 10 分钟"
             if status == "ready"
-            else "超过 4500s，可能来不及生成报告、发送邮件和保存 artifact"
+            else "总预算或单请求配置过大，可能来不及发送邮件和保存 artifact"
         ),
     )
 def _schedule_check() -> Check:

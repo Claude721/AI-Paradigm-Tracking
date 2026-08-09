@@ -20,6 +20,7 @@ from agents.paradigm_orchestrator import (
 )
 from database.paradigm_store import ParadigmStore
 from database.state_migration import migrate_state
+from healthcheck import _execution_budget_check
 from notifications.email_notifier import send_failure_email
 from paradigms.models import (
     EvidenceType,
@@ -116,6 +117,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             self.assertEqual(version, config.PARADIGM_STATE_SCHEMA_VERSION)
             self.assertIn("radar_meta", tables)
             self.assertIn("report_outbox", tables)
+            self.assertIn("report_render_fragments", tables)
             with sqlite3.connect(database) as connection:
                 delivery_columns = {
                     row[1]
@@ -224,10 +226,18 @@ class ExecutionReliabilityTests(unittest.TestCase):
             store.record_delivery_failure(
                 job.delivery_key, "renderer failed", rendered=False
             )
+            store.save_report_fragment(
+                job.delivery_key,
+                "route:durable-route:signature",
+                "### 已验证路线草稿",
+            )
             pending = store.load_pending_report_job()
             self.assertIsNotNone(pending)
             self.assertEqual(pending.candidates[0].key, candidate.key)
             self.assertEqual(store.load_pending_origins(), [])
+            self.assertEqual(
+                len(store.load_report_fragments(job.delivery_key)), 1
+            )
 
             store.save_rendered_report(job.delivery_key, "# validated report")
             store.begin_delivery_attempt(job.delivery_key)
@@ -253,6 +263,122 @@ class ExecutionReliabilityTests(unittest.TestCase):
             self.assertEqual(reported, candidate.report_signature)
             self.assertEqual(outbox_status, "delivered")
             self.assertEqual(report_content, "")
+            self.assertEqual(store.load_report_fragments(job.delivery_key), {})
+
+    def test_report_timeout_resumes_from_route_fragment_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            candidate = ParadigmCandidate(
+                key="route-checkpoint",
+                name="Route checkpoint",
+                thesis="改变能力边界",
+                problem_shift="从旧问题转向新问题",
+                mechanism="新的训练接口",
+                evidence=[_origin("2608.00009")],
+            )
+            store.save_candidates([candidate])
+            job = store.enqueue_report(
+                [candidate], {"new_paradigms": 1}, report_date="2026-08-09"
+            )
+            report_path = Path(directory) / job.report_name
+
+            async def fail_after_fragment(*_args, **kwargs):
+                kwargs["save_route_fragment"](
+                    "route:route-checkpoint:abc",
+                    "### 已完成且通过闸门的路线草稿",
+                )
+                try:
+                    raise TimeoutError("editorial frame timed out")
+                except TimeoutError as exc:
+                    raise RuntimeError("report rendering failed") from exc
+
+            failing_generator = SimpleNamespace(
+                output_dir=Path(directory),
+                generate=AsyncMock(side_effect=fail_after_fragment),
+            )
+            with (
+                patch.object(config, "EMAIL_PUSH_ENABLED", False),
+                patch.object(config, "PARADIGM_REPORT_TIMEOUT_SECONDS", 30),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "report rendering"):
+                    asyncio.run(
+                        app_main._deliver_paradigm_job(
+                            store, failing_generator, job, recovered=False
+                        )
+                    )
+
+            pending = store.load_pending_report_job()
+            self.assertIsNotNone(pending)
+            self.assertIn("RuntimeError: report rendering failed", pending.last_error)
+            self.assertIn("TimeoutError: editorial frame timed out", pending.last_error)
+            self.assertEqual(
+                store.load_report_fragments(job.delivery_key),
+                {
+                    "route:route-checkpoint:abc": (
+                        "### 已完成且通过闸门的路线草稿"
+                    )
+                },
+            )
+
+            async def resume_from_fragment(*_args, **kwargs):
+                self.assertIn(
+                    "route:route-checkpoint:abc", kwargs["route_fragments"]
+                )
+                report_path.write_text("# resumed report", encoding="utf-8")
+                return report_path
+
+            recovered_generator = SimpleNamespace(
+                output_dir=Path(directory),
+                generate=AsyncMock(side_effect=resume_from_fragment),
+            )
+            audit_result = {
+                "audit_markdown_path": str(Path(directory) / "audit.md"),
+                "audit_json_path": str(Path(directory) / "audit.json"),
+            }
+            with (
+                patch.object(config, "EMAIL_PUSH_ENABLED", False),
+                patch.object(run_audit, "write", return_value=audit_result),
+            ):
+                asyncio.run(
+                    app_main._deliver_paradigm_job(
+                        store, recovered_generator, pending, recovered=True
+                    )
+                )
+
+            self.assertIsNone(store.load_pending_report_job())
+            self.assertEqual(store.load_report_fragments(job.delivery_key), {})
+
+    def test_recovered_outbox_delivery_does_not_start_fresh_research(self) -> None:
+        pending = SimpleNamespace(
+            delivery_key="a" * 64,
+            status="pending_render",
+        )
+        store = SimpleNamespace(load_pending_report_job=Mock(return_value=pending))
+        orchestrator = SimpleNamespace(store=store, run=AsyncMock())
+        generator = SimpleNamespace()
+        delivery = AsyncMock(return_value={"email_sent": True})
+
+        with (
+            patch.object(config, "PIPELINE_MODE", "paradigm"),
+            patch("main._check_env"),
+            patch("main._print_model_banner"),
+            patch(
+                "agents.paradigm_orchestrator.ParadigmOrchestrator",
+                return_value=orchestrator,
+            ),
+            patch(
+                "reports.paradigm_generator.ParadigmReportGenerator",
+                return_value=generator,
+            ),
+            patch("main._deliver_paradigm_job", new=delivery),
+        ):
+            result = asyncio.run(app_main._run_pipeline_once())
+
+        self.assertTrue(result["recovered_delivery_only"])
+        delivery.assert_awaited_once_with(
+            store, generator, pending, recovered=True
+        )
+        orchestrator.run.assert_not_awaited()
 
     def test_email_failure_reuses_validated_report_without_rerunning_research(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -490,6 +616,25 @@ class ExecutionReliabilityTests(unittest.TestCase):
             run, origin, deep, reserve = _execution_deadlines(100.0, 1600.0)
         self.assertEqual((run, origin, deep, reserve), (4000.0, 3400.0, 4000.0, 600))
 
+    def test_doctor_checks_combined_research_and_delivery_budget(self) -> None:
+        with (
+            patch.object(config, "PARADIGM_RUN_BUDGET_SECONDS", 3600),
+            patch.object(config, "PARADIGM_REPORT_TIMEOUT_SECONDS", 1200),
+            patch.object(
+                config, "PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS", 360
+            ),
+            patch.object(config, "PARADIGM_REPORT_ROUTE_CONCURRENCY", 2),
+        ):
+            self.assertEqual(_execution_budget_check().status, "ready")
+        with (
+            patch.object(config, "PARADIGM_RUN_BUDGET_SECONDS", 3900),
+            patch.object(config, "PARADIGM_REPORT_TIMEOUT_SECONDS", 1200),
+            patch.object(
+                config, "PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS", 360
+            ),
+        ):
+            self.assertEqual(_execution_budget_check().status, "warning")
+
     def test_slow_discovery_cannot_consume_the_entire_origin_stage(self) -> None:
         with (
             patch.object(config, "PARADIGM_RUN_BUDGET_SECONDS", 3900),
@@ -553,6 +698,8 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("database.state_migration", workflow)
         self.assertIn("PARADIGM_RUN_BUDGET_SECONDS", workflow)
         self.assertIn("PARADIGM_KEY_RESEARCHER_LIMIT", workflow)
+        self.assertIn("PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS", workflow)
+        self.assertIn("PARADIGM_REPORT_ROUTE_CONCURRENCY", workflow)
         self.assertIn("运行离线回归测试", workflow)
         self.assertIn("--notify-failure", workflow)
         self.assertIn("always() && failure()", workflow)

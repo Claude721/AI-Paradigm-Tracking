@@ -66,9 +66,11 @@
 | `PARADIGM_RESEARCHER_PROFILE_LIMIT` | 推荐 `6`；兼容性人物档案安全上限，完整作者名单仍保留在证据中 |
 | `PARADIGM_KEY_RESEARCHER_LIMIT` | 推荐 `3`；实际核验并写入报告的一作、通讯/资深作者或重点研究者上限 |
 | `PARADIGM_*_SAFETY_LIMIT` | 可选运行熔断；默认/推荐 `0`，表示数量完全由 Rubric 结果决定 |
-| `PARADIGM_RUN_BUDGET_SECONDS` | 推荐 `3900`；在 90 分钟 Actions 硬超时前主动收尾并续存 backlog，最多不要超过 `4500` |
+| `PARADIGM_RUN_BUDGET_SECONDS` | 推荐 `3600`；与 1200 秒报告上限合计 80 分钟，给安装、测试、邮件和 artifact 留约 10 分钟 |
 | `PARADIGM_STAGE_RESERVE_SECONDS` | 推荐 `1200`；发现完成后从实际剩余研究预算中为深挖保留的目标余量 |
 | `PARADIGM_REPORT_TIMEOUT_SECONDS` | 推荐 `1200`；研究快照入 outbox 后，研究总编辑渲染的独立上限 |
+| `PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS` | 推荐 `360`；单条路线或轻量总编框架的一次模型请求上限，不再沿用分析请求的 180 秒 |
+| `PARADIGM_REPORT_ROUTE_CONCURRENCY` | 推荐 `2`；路线级写作并发，每条通过后立即写入状态 artifact 可恢复的 checkpoint |
 | `PARADIGM_ANALYSIS_BATCH_SIZE` | 推荐 `6`；机制抽取检查点粒度，不是候选上限 |
 | `PARADIGM_DEEP_BATCH_SIZE` | 推荐 `1`；深挖检查点粒度，避免半完成档案入库 |
 | `EMAIL_MAX_ATTACHMENT_BYTES` | 推荐 `10000000`；报告异常膨胀时阻断发送并保留 outbox |
@@ -77,7 +79,7 @@
 
 GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留空时同时发现社区和普通技术网页，结果仍只算索引线索。Rubric 与前沿覆盖地图都随代码提交，无需创建 Secret 或 Variable。旧版 `PARADIGM_MAX_ANALYSIS_ITEMS`、`PARADIGM_MAX_DEEP_CANDIDATES` 等 Variable 可以删除；即使保留，新代码也不会读取。Reddit 的 Client ID/Secret 必须和“已批准”开关一起配置；只填密钥但不开启批准开关时，代码不会请求 Reddit API。Semantic Scholar 同理：Secret 留空、Variable 为 `false` 时，代码不会匿名请求。
 
-跨提交恢复状态会验证 SQLite 完整性，并把兼容的旧 schema 迁移到当前版本，再读取前沿覆盖地图版本；不再因为 commit SHA 或一个可迁移的版本号变化就重置。普通 Prompt、Skill 或报告样式更新会延续跨周历史；覆盖地图升级时仍恢复旧数据库用于证据去重，但程序会用 60 天窗口补扫新加入的技术面。已经分析过且正文未变化的材料不会再次调用 LLM。若找不到 artifact，工作流会明确失败并要求人工判断；只有确定要建立新基线时才以 `reset_state=true` 运行。
+跨提交恢复状态会验证 SQLite 完整性，并把兼容的旧 schema 迁移到当前版本，再读取前沿覆盖地图版本；不再因为 commit SHA 或一个可迁移的版本号变化就重置。普通 Prompt、Skill 或报告样式更新会延续跨周历史；覆盖地图升级时仍恢复旧数据库用于证据去重，但程序会用 60 天窗口补扫新加入的技术面。已经分析过且正文未变化的材料不会再次调用 LLM。报告中每条已通过闸门的路线草稿也会按候选证据与写作 Skill 签名保存；总编超时后，下次只补未完成路线并重做轻量开篇，不重烧完整路线写作。存在待交付 outbox 时，本次运行完成它后即退出，不在同一 90 分钟 Job 中叠加新研究；需要最新一周结果时再启动一次正常运行。若找不到 artifact，工作流会明确失败并要求人工判断；只有确定要建立新基线时才以 `reset_state=true` 运行。
 
 ## 4. 首次手动验收
 

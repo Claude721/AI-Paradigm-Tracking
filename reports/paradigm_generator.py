@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import inspect
 import json
 import logging
 import re
@@ -43,7 +46,10 @@ class ParadigmReportGenerator:
 
     def _get_client(self):
         if self.client is None:
-            self.client, self.model = build_client("main")
+            self.client, self.model = build_client(
+                "main",
+                timeout_seconds=config.PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS,
+            )
         return self.client, self.model
 
     async def generate(
@@ -52,6 +58,8 @@ class ParadigmReportGenerator:
         pipeline_stats: dict | None = None,
         *,
         report_date: str = "",
+        route_fragments: dict[str, str] | None = None,
+        save_route_fragment=None,
     ) -> Path:
         date = report_date or datetime.now().astimezone().strftime("%Y-%m-%d")
         path = self.output_dir / f"paradigm_radar_{date}.md"
@@ -74,7 +82,18 @@ class ParadigmReportGenerator:
                     + "；".join(preflight)
                 )
             try:
-                content = await self._editorial_report(date, ordered, stats)
+                route_drafts = await self._draft_routes(
+                    date,
+                    ordered,
+                    cached=route_fragments or {},
+                    save_fragment=save_route_fragment,
+                )
+                content = await self._editorial_frame(
+                    date,
+                    ordered,
+                    route_drafts,
+                    stats,
+                )
                 revision_requests = _editorial_violations(
                     content,
                     ordered,
@@ -96,8 +115,12 @@ class ParadigmReportGenerator:
                     ),
                 )
                 if revision_requests:
-                    content = await self._revise_editorial_report(
-                        date, ordered, content, revision_requests
+                    content = await self._editorial_frame(
+                        date,
+                        ordered,
+                        route_drafts,
+                        stats,
+                        repair_violations=revision_requests,
                     )
                 # 原文 URL 来自已经核验并持久化的证据对象，不再依赖模型抄写。
                 # 总编辑仍应在正文自然链接论文；此处的确定性索引确保即使模型
@@ -125,92 +148,231 @@ class ParadigmReportGenerator:
         path.write_text(content.strip() + "\n", encoding="utf-8")
         return path
 
-    async def _editorial_report(
-        self, date: str, candidates: list[ParadigmCandidate], stats: dict
-    ) -> str:
-        dossiers = [_candidate_dossier(candidate) for candidate in candidates]
-        prompt = self.skill_loader.render(
-            "weekly_research_memo",
-            date=date,
-            lookback_days=config.SOURCING_LOOKBACK_DAYS,
-            stats=json.dumps(_public_stats(stats), ensure_ascii=False),
-            candidate_dossiers=json.dumps(dossiers, ensure_ascii=False),
-            mental_model_method=self.skill_loader.load("technical-mental-model"),
-        )
-        client, model = self._get_client()
-        response = None
-        try:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=7600,
-            )
-            run_audit.record_llm(
-                stage="weekly_memo",
-                role="main",
-                model=model,
-                subject=f"{date} / {len(candidates)} routes",
-                response=response,
-            )
-            return _strip_code_fence(response.choices[0].message.content or "")
-        except Exception as exc:
-            run_audit.record_llm(
-                stage="weekly_memo",
-                role="main",
-                model=model,
-                subject=f"{date} / {len(candidates)} routes",
-                response=response,
-                error=exc,
-            )
-            raise
-
-    async def _revise_editorial_report(
+    async def _editorial_frame(
         self,
         date: str,
         candidates: list[ParadigmCandidate],
-        previous_draft: str,
-        violations: list[str],
+        route_drafts: list[str],
+        stats: dict,
+        *,
+        repair_violations: list[str] | None = None,
     ) -> str:
+        """Write only the bounded memo frame, then attach every checked route."""
+
+        frame_payload = _editorial_frame_payload(candidates)
         prompt = self.skill_loader.render(
-            "weekly_memo_revision",
+            "weekly_memo_frame",
             date=date,
             lookback_days=config.SOURCING_LOOKBACK_DAYS,
-            violations="；".join(violations),
-            candidate_dossiers=json.dumps(
-                [_candidate_dossier(candidate) for candidate in candidates],
+            stats=json.dumps(_public_stats(stats), ensure_ascii=False),
+            route_summaries=json.dumps(
+                frame_payload,
                 ensure_ascii=False,
             ),
-            previous_draft=previous_draft[:16_000],
+            repair_violations="；".join(repair_violations or []) or "无",
+        )
+        run_audit.event(
+            "weekly_memo_frame",
+            "request_bounded",
+            f"输入 {len(prompt)} 字符；展开路线 "
+            f"{len(frame_payload['routes'])}/{len(candidates)}；"
+            f"摘要折叠 {frame_payload['overflow_route_count']} 条",
+        )
+        frame = await self._request_markdown(
+            prompt,
+            stage="weekly_memo_frame",
+            subject=f"{date} / {len(candidates)} routes",
+            temperature=0.2,
+            max_tokens=2200,
+        )
+        violations = _editorial_frame_violations(frame)
+        if violations:
+            repair_prompt = prompt + (
+                "\n\n上一版框架未通过检查："
+                + "；".join(violations)
+                + "。只重写开篇框架，不得输出路线正文。"
+            )
+            frame = await self._request_markdown(
+                repair_prompt,
+                stage="weekly_memo_frame_revision",
+                subject=f"{date} / {'; '.join(violations)}",
+                temperature=0.1,
+                max_tokens=2200,
+            )
+            violations = _editorial_frame_violations(frame)
+        if violations:
+            raise ValueError("周报开篇框架未通过质量闸门：" + "；".join(violations))
+        return _assemble_editorial_frame(frame, route_drafts)
+
+    async def _request_markdown(
+        self,
+        prompt: str,
+        *,
+        stage: str,
+        subject: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """对瞬时连接/读超时做一次显式、可审计的业务重试。"""
+
+        client, model = self._get_client()
+        last_error: Exception | None = None
+        for attempt in range(2):
+            response = None
+            try:
+                retry_note = (
+                    ""
+                    if attempt == 0
+                    else "\n\n上一次请求未完成。请保持事实密度，压缩重复表达并直接输出完整 Markdown。"
+                )
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "user", "content": prompt + retry_note}
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                run_audit.record_llm(
+                    stage=stage,
+                    role="main",
+                    model=model,
+                    subject=f"{subject} / attempt-{attempt + 1}",
+                    response=response,
+                )
+                return _strip_code_fence(
+                    response.choices[0].message.content or ""
+                )
+            except Exception as exc:
+                last_error = exc
+                run_audit.record_llm(
+                    stage=stage,
+                    role="main",
+                    model=model,
+                    subject=f"{subject} / attempt-{attempt + 1}",
+                    response=response,
+                    error=exc,
+                )
+                logger.warning(
+                    "%s 第 %s 次请求失败 [%s]: %s",
+                    stage,
+                    attempt + 1,
+                    subject[:80],
+                    exc,
+                )
+        assert last_error is not None
+        raise last_error
+
+    async def _draft_routes(
+        self,
+        date: str,
+        candidates: list[ParadigmCandidate],
+        *,
+        cached: dict[str, str],
+        save_fragment,
+    ) -> list[str]:
+        """把动态路线数量拆成有界、可并发、可续跑的写作事务。"""
+
+        semaphore = asyncio.Semaphore(config.PARADIGM_REPORT_ROUTE_CONCURRENCY)
+        drafts: dict[str, str] = {}
+
+        async def draft_one(index: int, candidate: ParadigmCandidate) -> None:
+            fragment_key = _route_fragment_key(candidate)
+            cached_content = cached.get(fragment_key, "")
+            if cached_content and not _route_draft_violations(
+                cached_content,
+                candidate,
+            ):
+                drafts[fragment_key] = cached_content
+                run_audit.event(
+                    "weekly_route_draft",
+                    "reused",
+                    f"复用路线草稿 {index}/{len(candidates)}: {candidate.name[:80]}",
+                )
+                return
+            async with semaphore:
+                content = await self._draft_one_route(
+                    date,
+                    candidate,
+                    index=index,
+                    total=len(candidates),
+                )
+                drafts[fragment_key] = content
+                if save_fragment is not None:
+                    result = save_fragment(fragment_key, content)
+                    if inspect.isawaitable(result):
+                        await result
+
+        results = await asyncio.gather(
+            *(
+                draft_one(index, candidate)
+                for index, candidate in enumerate(candidates, 1)
+            ),
+            return_exceptions=True,
+        )
+        failures = [value for value in results if isinstance(value, BaseException)]
+        if failures:
+            run_audit.event(
+                "weekly_route_draft",
+                "partial_failure",
+                f"{len(failures)} 条路线失败，"
+                f"{len(drafts)} 条成功草稿已保存并可在下次复用",
+            )
+            details = "；".join(
+                f"{type(value).__name__}: {str(value)[:180]}"
+                for value in failures[:3]
+            )
+            raise RuntimeError(
+                f"{len(failures)} 条路线草稿未完成；已保存 {len(drafts)} 条："
+                + details
+            ) from failures[0]
+        return [drafts[_route_fragment_key(candidate)] for candidate in candidates]
+
+    async def _draft_one_route(
+        self,
+        date: str,
+        candidate: ParadigmCandidate,
+        *,
+        index: int,
+        total: int,
+    ) -> str:
+        dossier = _compact_route_dossier(candidate)
+        prompt = self.skill_loader.render(
+            "weekly_route_draft",
+            date=date,
+            route_index=index,
+            route_total=total,
+            route_dossier=json.dumps(dossier, ensure_ascii=False),
             mental_model_method=self.skill_loader.load("technical-mental-model"),
         )
-        client, model = self._get_client()
-        response = None
-        try:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
+        last_violations: list[str] = []
+        for attempt in range(2):
+            repair_note = (
+                ""
+                if attempt == 0
+                else "\n\n上一轮路线草稿未通过检查："
+                + "；".join(last_violations)
+                + "。请直接重写这一条路线，不要输出整份周报。"
+            )
+            content = await self._request_markdown(
+                prompt + repair_note,
+                stage="weekly_route_draft",
+                subject=f"{date} / route-{index} / {candidate.name}",
                 temperature=0.2,
-                max_tokens=7600,
+                max_tokens=2800,
             )
-            run_audit.record_llm(
-                stage="weekly_memo_revision",
-                role="main",
-                model=model,
-                subject=f"{date} / {'; '.join(violations)}",
-                response=response,
-            )
-            return _strip_code_fence(response.choices[0].message.content or "")
-        except Exception as exc:
-            run_audit.record_llm(
-                stage="weekly_memo_revision",
-                role="main",
-                model=model,
-                subject=f"{date} / {'; '.join(violations)}",
-                response=response,
-                error=exc,
-            )
-            raise
+            last_violations = _route_draft_violations(content, candidate)
+            if not last_violations:
+                run_audit.event(
+                    "weekly_route_draft",
+                    "passed",
+                    f"路线草稿 {index}/{total} 通过；输入 {len(prompt)} 字符，输出 {len(content)} 字符",
+                )
+                return content
+        raise ValueError(
+            f"路线草稿未通过质量闸门 [{candidate.name}]: "
+            + "；".join(last_violations)
+        )
 
     @staticmethod
     def _empty_report(date: str, stats: dict) -> str:
@@ -385,6 +547,293 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
             )
         ],
     }
+
+
+def _route_fragment_key(item: ParadigmCandidate) -> str:
+    """Stable key for one evidence snapshot, not merely for a route name."""
+
+    contract = SkillLoader()
+    contract_material = (
+        contract.load("weekly_route_draft")
+        + "\n"
+        + contract.load("technical-mental-model")
+    )
+    contract_signature = hashlib.sha256(
+        contract_material.encode("utf-8")
+    ).hexdigest()[:12]
+    input_signature = hashlib.sha256(
+        json.dumps(
+            {
+                "report_signature": item.report_signature,
+                "dossier": _compact_route_dossier(item),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+    return f"route:{contract_signature}:{item.key}:{input_signature}"
+
+
+def _compact_route_dossier(item: ParadigmCandidate) -> dict:
+    """Bound one route-writing request without weakening its evidence contract.
+
+    The full candidate can accumulate dozens of historical/community records.
+    A route writer needs the already-synthesized causal model plus primary and
+    momentum evidence, not a second copy of every raw discovery document.
+    """
+
+    primary, primary_overflow = _bounded_route_evidence(
+        _primary_sources(item),
+        char_budget=14_000,
+    )
+    momentum, momentum_overflow = _bounded_route_evidence(
+        _momentum_evidence(item),
+        char_budget=12_000,
+    )
+
+    return {
+        "name": item.name,
+        "route_family": item.route_family,
+        "report_kind": item.report_kind,
+        "thesis": item.thesis,
+        "background": item.background,
+        "problem_shift": item.problem_shift,
+        "design_philosophy": item.design_philosophy,
+        "mechanism": item.mechanism,
+        "technical_explanation": item.technical_explanation,
+        "mental_model": item.mental_model,
+        "application_value": item.application_value,
+        "why_now": item.why_now,
+        "lineage_path": item.lineage_path,
+        "evidence_assessment": item.evidence_assessment,
+        "objective_momentum_signals": item.objective_momentum_signals[:12],
+        "community_coverage": item.community_coverage,
+        "secondary_discussion_summary": item.secondary_discussion_summary,
+        "trend_interpretation": item.trend_interpretation,
+        "open_questions": item.open_questions[:8],
+        "publisher_tier": item.publisher_tier,
+        "publisher_evidence": item.publisher_evidence[:8],
+        "verified_organization_attribution": verified_organization_attribution(item),
+        "is_formal_technical_report": item.is_formal_technical_report,
+        "marketing_overclaim_risk": item.marketing_overclaim_risk,
+        "primary_sources": primary,
+        "momentum_evidence": momentum,
+        "evidence_overflow": {
+            "primary_sources": primary_overflow,
+            "momentum_evidence": momentum_overflow,
+            "meaning": (
+                "超出路线写作上下文的证据仍会进入确定性原文索引和持久化"
+                "候选，不代表被淘汰或不存在。"
+            ),
+        },
+        "researchers": [
+            _researcher_dossier(value)
+            for value in key_researcher_profiles(
+                item.researchers,
+                config.PARADIGM_KEY_RESEARCHER_LIMIT,
+            )
+        ],
+    }
+
+
+def _bounded_route_evidence(
+    evidence: list[TechnicalEvidence],
+    *,
+    char_budget: int,
+) -> tuple[list[dict], dict[str, object]]:
+    records = []
+    used = 0
+    overflow: list[TechnicalEvidence] = []
+    for value in evidence:
+        record = _evidence_dossier(value)
+        record["source"] = str(record.get("source", ""))[:120]
+        record["title"] = str(record.get("title", ""))[:500]
+        record["url"] = str(record.get("url", ""))[:1500]
+        record["organization"] = str(record.get("organization", ""))[:300]
+        record["summary"] = str(record.get("summary", ""))[:650]
+        metrics = record.get("metrics")
+        record["metrics"] = (
+            {
+                str(key)[:80]: (
+                    metric
+                    if isinstance(metric, (int, float, bool)) or metric is None
+                    else str(metric)[:200]
+                )
+                for key, metric in list(metrics.items())[:20]
+            }
+            if isinstance(metrics, dict)
+            else {}
+        )
+        authors = record.get("authors") or []
+        if isinstance(authors, list) and len(authors) > 8:
+            record["authors"] = [
+                *authors[:8],
+                f"另有 {len(authors) - 8} 位作者",
+            ]
+        length = len(json.dumps(record, ensure_ascii=False))
+        if used + length <= char_budget:
+            records.append(record)
+            used += length
+        else:
+            overflow.append(value)
+    type_counts: dict[str, int] = {}
+    for value in overflow:
+        evidence_type = value.evidence_type.value
+        type_counts[evidence_type] = type_counts.get(evidence_type, 0) + 1
+    return records, {
+        "count": len(overflow),
+        "type_counts": type_counts,
+    }
+
+
+def _editorial_frame_payload(
+    candidates: list[ParadigmCandidate],
+    *,
+    char_budget: int = 28_000,
+) -> dict:
+    """Bound the overview request while accounting for every reportable route."""
+
+    records = []
+    overflow_count = 0
+    overflow_kinds: dict[str, int] = {}
+    used = 0
+    for candidate in candidates:
+        record = {
+            "route_family": (
+                candidate.route_family
+                or candidate.lineage_parent
+                or candidate.name
+            )[:300],
+            "report_kind": candidate.report_kind,
+            "thesis": candidate.thesis[:700],
+            "problem_shift": candidate.problem_shift[:500],
+            "why_now": candidate.why_now[:400],
+            "trend_interpretation": candidate.trend_interpretation[:500],
+            "primary_source_urls": [
+                source.url for source in _primary_sources(candidate)[:4]
+            ],
+            "key_people": [
+                profile.name
+                for profile in key_researcher_profiles(
+                    candidate.researchers,
+                    config.PARADIGM_KEY_RESEARCHER_LIMIT,
+                )
+            ],
+        }
+        length = len(json.dumps(record, ensure_ascii=False))
+        if used + length <= char_budget:
+            records.append(record)
+            used += length
+        else:
+            overflow_count += 1
+            kind = str(record["report_kind"] or "unknown")
+            overflow_kinds[kind] = overflow_kinds.get(kind, 0) + 1
+    return {
+        "routes": records,
+        "overflow_route_count": overflow_count,
+        "overflow_report_kinds": overflow_kinds,
+        "total_route_count": len(candidates),
+        "note": (
+            "overflow_routes 仍会由程序完整附入正文；这里只因总编上下文预算"
+            "省略其详细摘要，不代表它们被筛掉。"
+        ),
+    }
+
+
+def _editorial_frame_violations(content: str) -> list[str]:
+    value = content.strip()
+    memo_match = re.search(
+        r"(?ms)^## 本期研究 Memo\s*$\s*(.*?)(?=^##\s|\Z)", value
+    )
+    memo = memo_match.group(1) if memo_match else ""
+    memo_chinese = len(re.findall(r"[\u4e00-\u9fff]", memo))
+    violations = []
+    if "## 本期研究 Memo" not in value:
+        violations.append("缺少本期研究 Memo")
+    if "## 接下来真正值得盯的信号" not in value:
+        violations.append("缺少后续观察信号")
+    if not 250 <= memo_chinese <= 1000:
+        violations.append(
+            f"开篇 Memo 中文长度为 {memo_chinese}，交付范围为 250–1000"
+        )
+    if re.search(r"(?m)^###\s+", value):
+        violations.append("开篇框架越权生成路线正文")
+    if re.search(r"(?m)^\s*\|.+\|\s*$", value):
+        violations.append("开篇框架出现表格")
+    if re.search(r"(?:总分|新颖性得分|趋势得分|声量得分)\s*[:：]?\s*\d", value):
+        violations.append("开篇框架出现内部评分")
+    if _has_long_english_excerpt(value):
+        violations.append("开篇框架出现英文原文长句或成段摘录")
+    return violations
+
+
+def _assemble_editorial_frame(frame: str, route_drafts: list[str]) -> str:
+    """Deterministically retain every route even if the overview model is slow."""
+
+    value = frame.strip()
+    closing = re.search(r"(?m)^## 接下来真正值得盯的信号\s*$", value)
+    routes = "\n\n".join(draft.strip() for draft in route_drafts)
+    if not closing:
+        return value + "\n\n" + routes
+    return (
+        value[: closing.start()].rstrip()
+        + "\n\n"
+        + routes
+        + "\n\n"
+        + value[closing.start() :].lstrip()
+    )
+
+
+def _route_draft_violations(
+    content: str, candidate: ParadigmCandidate
+) -> list[str]:
+    """Route-local gate so persisted fragments are safe to reuse verbatim."""
+
+    value = content.strip()
+    chinese_characters = len(re.findall(r"[\u4e00-\u9fff]", value))
+    violations = []
+    if not 300 <= chinese_characters <= 1800:
+        violations.append(
+            f"路线正文中文长度为 {chinese_characters}，交付范围为 300–1800"
+        )
+    if not re.search(r"(?m)^###\s+\S", value):
+        violations.append("缺少三级路线标题")
+    if re.search(r"(?m)^##\s+", value):
+        violations.append("路线草稿越权生成整份周报章节")
+    if len(
+        re.findall(
+            rf"\*\*(?:当前)?{re.escape(MOMENTUM_BRIEF_LABEL)}\s*[：:]?\*\*",
+            value,
+        )
+    ) != 1:
+        violations.append("必须且只能包含一段讨论势能判断")
+    if re.search(r"(?m)^\s*\|.+\|\s*$", value):
+        violations.append("出现表格")
+    if re.search(r"(?:总分|新颖性得分|趋势得分|声量得分)\s*[:：]?\s*\d", value):
+        violations.append("出现内部评分")
+    if _has_long_english_excerpt(value):
+        violations.append("出现英文原文长句或成段摘录")
+    linked_urls = _markdown_link_targets(value)
+    if not any(
+        _normalized_url(source.url) in linked_urls
+        for source in _primary_sources(candidate)
+    ):
+        violations.append("路线正文没有原样附上一手材料 Markdown 链接")
+    people = [
+        profile.name
+        for profile in key_researcher_profiles(
+            candidate.researchers,
+            config.PARADIGM_KEY_RESEARCHER_LIMIT,
+        )
+        if profile.name.strip()
+    ]
+    organization = verified_organization_attribution(candidate)
+    attributable = [*people]
+    if organization:
+        attributable.append(organization["name"])
+    if attributable and not any(value in content for value in attributable):
+        violations.append("路线正文没有交代已核验的关键推动者或发布组织")
+    return violations
 
 
 def _evidence_dossier(item: TechnicalEvidence) -> dict:
@@ -586,7 +1035,10 @@ def _momentum_evidence(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
         if value.raw.get("relationship") == "author_self_release":
             continue
         selected.append(value)
-    return selected[:12]
+    # 不在语义过滤之后再做静默 Top-K。路线写作的上下文上限由
+    # `_bounded_route_evidence` 负责，并把未展开部分写进 overflow 账本；
+    # 这样既控制请求体，也不会把“没有进入 prompt”伪装成“没有证据”。
+    return selected
 
 
 def _momentum_brief_violations(

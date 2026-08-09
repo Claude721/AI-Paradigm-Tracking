@@ -190,6 +190,12 @@ class ParadigmAnalyzer:
                 "publisher_evidence": evidence.raw.get("publisher_evidence", ""),
             },
         )
+        run_audit.event(
+            "technical_report_index",
+            "request_bounded",
+            f"{evidence.title[:80]}：输入 {len(index_prompt)} 字符；"
+            f"报告材料 {len(report_material[:50_000])} 字符",
+        )
         mechanisms, index_error, disposition_reason = await self._request_report_index(
             evidence,
             index_prompt,
@@ -358,6 +364,13 @@ class ParadigmAnalyzer:
                 seed.get("innovation_types"),
             ),
         )
+        run_audit.event(
+            "technical_report_mechanism",
+            "request_bounded",
+            f"{evidence.title[:70]} / mechanism-{index}："
+            f"输入 {len(prompt)} 字符；种子 "
+            f"{len(json.dumps(seed, ensure_ascii=False))} 字符",
+        )
         last_error: Exception | None = None
         for attempt in range(2):
             response = None
@@ -389,6 +402,20 @@ class ParadigmAnalyzer:
                     ),
                     "rubric_answers": payload.get("rubric_answers"),
                 }
+                for field_name in (
+                    "thesis",
+                    "background",
+                    "problem_shift",
+                    "design_philosophy",
+                    "mechanism",
+                    "technical_explanation",
+                    "application_value",
+                    "why_now",
+                    "claimed_results",
+                ):
+                    value = payload.get(field_name)
+                    if value not in (None, "", []):
+                        merged[field_name] = value
                 parsed = self._from_payload(evidence, merged)
                 if parsed.rubric_assessment.get("decision") == "incomplete":
                     raise ValueError(
@@ -656,45 +683,7 @@ class ParadigmSynthesizer:
         return candidates
 
     async def _synthesize_one(self, candidate: ParadigmCandidate) -> None:
-        ordered_evidence = sorted(
-            enumerate(candidate.evidence),
-            key=lambda pair: bool(pair[1].raw.get("historical")),
-        )
-        evidence_payload = [
-            {
-                "index": original_index,
-                "fingerprint": item.fingerprint,
-                "type": item.evidence_type.value,
-                "source": item.source,
-                "title": item.title,
-                "url": item.url,
-                # 原点材料需要保留足够的机制细节，社区证据只保留支持
-                # 相关性判断所需的短摘要。该扩容只发生在通过技术门槛
-                # 的少量候选上，不增加全量论文抽取成本。
-                "summary": item.summary[
-                    : (
-                        2400
-                        if item.evidence_type.value
-                        in {"primary_paper", "technical_blog"}
-                        else 700
-                    )
-                ],
-                "document_excerpt": str(
-                    item.raw.get("document_excerpt", "")
-                )[:12_000],
-                "document_source_url": item.raw.get(
-                    "document_source_url", ""
-                ),
-                "affiliations": item.raw.get("affiliations", []),
-                "project_urls": item.raw.get("project_urls", []),
-                "author_roles": item.raw.get("author_roles", {}),
-                "authors": item.authors,
-                "metrics": item.metrics,
-                "historical": bool(item.raw.get("historical")),
-                "relationship_hint": item.raw.get("relationship", ""),
-            }
-            for original_index, item in ordered_evidence[:24]
-        ]
+        evidence_payload = _bounded_synthesis_evidence(candidate.evidence)
         prompt = self.skill_loader.render(
             "paradigm_synthesis",
             provisional_name=candidate.name,
@@ -718,22 +707,53 @@ class ParadigmSynthesizer:
             lineage_parent=candidate.lineage_parent,
             evidence=json.dumps(evidence_payload, ensure_ascii=False),
         )
+        run_audit.event(
+            "paradigm_synthesis",
+            "request_bounded",
+            f"{candidate.name[:80]}：输入 {len(prompt)} 字符；"
+            f"证据明细 {len(evidence_payload['records'])} 条，"
+            f"折叠 {evidence_payload['overflow']['count']} 条",
+        )
         last_error: Exception | None = None
+        partial_payload: dict[str, object] = {}
+        validation_error = ""
         for attempt in range(2):
             response = None
             try:
                 client, model = self._get_client()
-                repair_note = (
-                    ""
-                    if attempt == 0
-                    else "\n上一轮综合结果不完整。请重新输出完整 JSON，补齐所选"
-                    " innovation_types 的全部 Rubric 题；心智模型必须先给主观察"
-                    "坐标与低分辨率运行图，再用至少两个 resolution_ladder 节点"
-                    "逐层纠偏和提高分辨率。"
-                )
+                stage = "paradigm_synthesis"
+                request_prompt = prompt
+                if attempt and partial_payload:
+                    stage = "paradigm_synthesis_repair"
+                    request_prompt = self.skill_loader.render(
+                        "paradigm_synthesis_repair",
+                        provisional_name=candidate.name,
+                        route_family=candidate.route_family,
+                        validation_error=validation_error,
+                        partial_payload=json.dumps(
+                            {
+                                key: partial_payload.get(key)
+                                for key in (
+                                    "mental_model",
+                                    "innovation_types",
+                                    "rubric_answers",
+                                )
+                                if key in partial_payload
+                            },
+                            ensure_ascii=False,
+                        ),
+                        rubric_definition=rubric_prompt("final"),
+                    )
+                elif attempt:
+                    request_prompt += (
+                        "\n上一轮不是合法 JSON。请重新输出完整 JSON，补齐所选"
+                        " innovation_types 的全部 Rubric 题；心智模型必须先给主观察"
+                        "坐标与低分辨率运行图，再用至少两个 resolution_ladder 节点"
+                        "逐层纠偏和提高分辨率。"
+                    )
                 response = await client.chat.completions.create(
                     model=model,
-                    messages=[{"role": "user", "content": prompt + repair_note}],
+                    messages=[{"role": "user", "content": request_prompt}],
                     temperature=0.1,
                     max_tokens=5600,
                     response_format={"type": "json_object"},
@@ -741,9 +761,16 @@ class ParadigmSynthesizer:
                 payload = parse_json_object(
                     response.choices[0].message.content or "{}"
                 )
-                self._apply_synthesis_payload(candidate, payload)
+                if partial_payload:
+                    payload = _merge_structured_payload(partial_payload, payload)
+                partial_payload = payload
+                try:
+                    self._apply_synthesis_payload(candidate, payload)
+                except Exception as exc:
+                    validation_error = str(exc)
+                    raise
                 run_audit.record_llm(
-                    stage="paradigm_synthesis",
+                    stage=stage,
                     role="main",
                     model=model,
                     subject=candidate.name,
@@ -759,7 +786,11 @@ class ParadigmSynthesizer:
                     exc,
                 )
                 run_audit.record_llm(
-                    stage="paradigm_synthesis",
+                    stage=(
+                        "paradigm_synthesis_repair"
+                        if attempt and partial_payload
+                        else "paradigm_synthesis"
+                    ),
                     role="main",
                     model=self.model,
                     subject=f"{candidate.name} / attempt-{attempt + 1}",
@@ -844,6 +875,178 @@ class ParadigmSynthesizer:
                 for index, item in enumerate(candidate.evidence)
                 if index not in excluded
             ]
+
+
+def _bounded_synthesis_evidence(
+    evidence: list[TechnicalEvidence],
+    *,
+    char_budget: int = 48_000,
+) -> dict[str, object]:
+    """Represent evidence under a hard context budget without a research Top-K.
+
+    Current primary materials and independent uptake are serialized first and
+    with more detail.  If accumulated historical evidence exceeds the request
+    budget, the remainder is represented by an explicit count/type/source
+    ledger.  Nothing is silently reclassified as rejected or absent.
+    """
+
+    primary_types = {"primary_paper", "technical_blog"}
+    uptake_types = {
+        "independent_replication",
+        "implementation",
+        "community_discussion",
+        "secondary_interpretation",
+        "product_adoption",
+        "peer_review",
+        "citation",
+    }
+
+    def priority(pair: tuple[int, TechnicalEvidence]) -> tuple[int, int, int]:
+        original_index, item = pair
+        historical = bool(item.raw.get("historical"))
+        evidence_type = item.evidence_type.value
+        lane = (
+            0
+            if evidence_type in primary_types and not historical
+            else 1
+            if evidence_type in uptake_types and not historical
+            else 2
+            if evidence_type in primary_types
+            else 3
+        )
+        return lane, int(historical), original_index
+
+    ordered = sorted(enumerate(evidence), key=priority)
+    records: list[dict[str, object]] = []
+    used = 0
+    overflow_items: list[TechnicalEvidence] = []
+    for original_index, item in ordered:
+        primary = item.evidence_type.value in primary_types
+        affiliations = item.raw.get("affiliations", [])
+        project_urls = item.raw.get("project_urls", [])
+        author_roles = item.raw.get("author_roles", {})
+        metrics = item.metrics if isinstance(item.metrics, dict) else {}
+        compact_metrics = {
+            str(key)[:80]: (
+                value
+                if isinstance(value, (int, float, bool)) or value is None
+                else str(value)[:200]
+            )
+            for key, value in list(metrics.items())[:20]
+        }
+        detailed = {
+            "index": original_index,
+            "fingerprint": item.fingerprint,
+            "type": item.evidence_type.value,
+            "source": item.source[:120],
+            "title": item.title[:400],
+            "url": item.url[:1000],
+            "summary": item.summary[: (2400 if primary else 700)],
+            "document_excerpt": (
+                str(item.raw.get("document_excerpt", ""))[:7000]
+                if primary
+                else ""
+            ),
+            "document_source_url": str(
+                item.raw.get("document_source_url", "")
+            )[:1000],
+            "affiliations": (
+                [str(value)[:300] for value in affiliations[:8]]
+                if isinstance(affiliations, list)
+                else []
+            ),
+            "project_urls": (
+                [str(value)[:1000] for value in project_urls[:8]]
+                if isinstance(project_urls, list)
+                else []
+            ),
+            "author_roles": (
+                {
+                    str(key)[:120]: str(value)[:300]
+                    for key, value in list(author_roles.items())[:12]
+                }
+                if isinstance(author_roles, dict)
+                else {}
+            ),
+            "authors": [str(value) for value in item.authors[:12]],
+            "metrics": compact_metrics,
+            "historical": bool(item.raw.get("historical")),
+            "relationship_hint": str(item.raw.get("relationship", ""))[:120],
+        }
+        encoded_length = len(json.dumps(detailed, ensure_ascii=False))
+        if used + encoded_length <= char_budget:
+            records.append(detailed)
+            used += encoded_length
+            continue
+
+        compact = {
+            "index": original_index,
+            "fingerprint": item.fingerprint,
+            "type": item.evidence_type.value,
+            "source": item.source[:80],
+            "title": item.title[:180],
+            "url": item.url[:500],
+            "metrics": compact_metrics,
+            "historical": bool(item.raw.get("historical")),
+            "relationship_hint": str(item.raw.get("relationship", ""))[:80],
+            "detail_deferred_due_to_context": True,
+        }
+        compact_length = len(json.dumps(compact, ensure_ascii=False))
+        if used + compact_length <= char_budget:
+            records.append(compact)
+            used += compact_length
+        else:
+            overflow_items.append(item)
+
+    type_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    historical_count = 0
+    for item in overflow_items:
+        evidence_type = item.evidence_type.value
+        type_counts[evidence_type] = type_counts.get(evidence_type, 0) + 1
+        source = item.source[:80] or "unknown"
+        source_counts[source] = source_counts.get(source, 0) + 1
+        historical_count += int(bool(item.raw.get("historical")))
+    if len(source_counts) > 40:
+        ordered_sources = sorted(
+            source_counts.items(),
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+        retained_sources = dict(ordered_sources[:40])
+        retained_sources["__other_sources__"] = sum(
+            count for _, count in ordered_sources[40:]
+        )
+        source_counts = retained_sources
+    return {
+        "records": records,
+        "overflow": {
+            "count": len(overflow_items),
+            "historical_count": historical_count,
+            "type_counts": type_counts,
+            "source_counts": source_counts,
+            "meaning": (
+                "这些证据因上下文预算只保留统计，不代表被 Rubric 淘汰；"
+                "不得据此断言没有更多讨论。"
+                if overflow_items
+                else "没有折叠证据"
+            ),
+        },
+    }
+
+
+def _merge_structured_payload(
+    base: dict[str, object], patch: dict[str, object]
+) -> dict[str, object]:
+    """Merge a small validation repair without discarding valid first-pass work."""
+
+    merged: dict[str, object] = dict(base)
+    for key, value in patch.items():
+        previous = merged.get(key)
+        if isinstance(previous, dict) and isinstance(value, dict):
+            merged[key] = _merge_structured_payload(previous, value)
+        elif value not in (None, ""):
+            merged[key] = value
+    return merged
 
 
 def _validate_mental_model(mental_model: dict[str, object]) -> None:

@@ -139,14 +139,18 @@ def resolve_all() -> tuple[ResolvedModel, ResolvedModel]:
     return resolve_model("sub"), resolve_model("main")
 
 
-def build_client(role: AgentRole = "main") -> tuple[AsyncOpenAI, str]:
+def build_client(
+    role: AgentRole = "main",
+    *,
+    timeout_seconds: int | float | None = None,
+) -> tuple[AsyncOpenAI, str]:
     """构建 AsyncOpenAI 客户端，返回 (client, model_name)"""
     resolved = resolve_model(role)
     logger.info(f"初始化 LLM 客户端: {resolved.label} (role={role})")
     client = AsyncOpenAI(
         base_url=resolved.base_url,
         api_key=resolved.api_key,
-        timeout=float(config.LLM_REQUEST_TIMEOUT_SECONDS),
+        timeout=float(timeout_seconds or config.LLM_REQUEST_TIMEOUT_SECONDS),
         # 业务层已经按阶段记录并执行一次显式重试；关闭 SDK 隐式重试，
         # 避免一个请求在 Actions 中无审计地等待数倍超时。
         max_retries=0,

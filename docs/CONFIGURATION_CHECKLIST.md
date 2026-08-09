@@ -226,9 +226,11 @@ PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
 PARADIGM_SEED_ARXIV_IDS=
 PARADIGM_RESEARCHER_PROFILE_LIMIT=6
 PARADIGM_KEY_RESEARCHER_LIMIT=3
-PARADIGM_RUN_BUDGET_SECONDS=3900
+PARADIGM_RUN_BUDGET_SECONDS=3600
 PARADIGM_STAGE_RESERVE_SECONDS=1200
 PARADIGM_REPORT_TIMEOUT_SECONDS=1200
+PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS=360
+PARADIGM_REPORT_ROUTE_CONCURRENCY=2
 PARADIGM_ANALYSIS_BATCH_SIZE=6
 PARADIGM_DEEP_BATCH_SIZE=1
 ```
@@ -237,7 +239,7 @@ PARADIGM_DEEP_BATCH_SIZE=1
 
 五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版 `PARADIGM_MIN_*` 与 `PARADIGM_MAX_*` 已停用，GitHub 中即使残留也不会影响新逻辑。
 
-`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后，剩余项保留为 backlog。研究完成后候选快照先进入持久化 outbox，报告器再使用独立的 `PARADIGM_REPORT_TIMEOUT_SECONDS` 完成写稿。GitHub job 的硬超时为 90 分钟，默认研究预算 `3900` 秒、报告上限 `1200` 秒；不要把两者同时继续调高。发现源完成后，系统才按实际剩余时间应用 `PARADIGM_STAGE_RESERVE_SECONDS`，从而避免长冷启动提前吃空机制抽取窗口；`PARADIGM_ANALYSIS_BATCH_SIZE` 与 `PARADIGM_DEEP_BATCH_SIZE` 只是检查点粒度，不是 Top-K。
+`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后，剩余项保留为 backlog。研究完成后候选快照先进入持久化 outbox；多路线报告按路线生成、每条通过即写入 checkpoint，最终总编只处理有界摘要并由程序装配正文。`PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS` 是单次路线/框架请求上限，`PARADIGM_REPORT_TIMEOUT_SECONDS` 是整次渲染上限；前者超时可业务重试，后者中断后由下一轮续跑。GitHub job 的硬超时为 90 分钟，默认研究预算 `3600` 秒、报告上限 `1200` 秒，两者合计 80 分钟，为安装、离线测试、邮件和 artifact 保留约 10 分钟；不要把两者同时继续调高。发现源完成后，系统才按实际剩余时间应用 `PARADIGM_STAGE_RESERVE_SECONDS`，从而避免长冷启动提前吃空机制抽取窗口；`PARADIGM_ANALYSIS_BATCH_SIZE`、`PARADIGM_DEEP_BATCH_SIZE` 与 `PARADIGM_REPORT_ROUTE_CONCURRENCY` 都只是执行粒度，不是 Top-K。
 
 `PARADIGM_RESEARCHER_PROFILE_LIMIT` 是兼容性的档案安全上限，`PARADIGM_KEY_RESEARCHER_LIMIT` 才控制每条路线实际核验与写入报告的关键人物数。默认优先一作、官方标注的通讯/负责人、末位资深作者与重点研究者；普通共同作者仍留在论文作者名单中，但不会因缺少联系方式阻断路线交付。
 

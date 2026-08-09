@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -63,6 +64,7 @@ async def send_failure_email(context: dict | None = None) -> bool:
         "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT", ""),
         "step_outcome": os.getenv("PIPELINE_STEP_OUTCOME", "failure"),
         "audit_artifact": os.getenv("AUDIT_ARTIFACT_NAME", ""),
+        **_local_failure_context(),
         **(context or {}),
     }
     await asyncio.to_thread(_send_failure_sync, payload)
@@ -198,16 +200,87 @@ def _send_failure_sync(context: dict) -> None:
         lines.extend([f"运行详情：{run_url}"])
     if audit_artifact:
         lines.extend([f"审计 artifact：{audit_artifact}"])
+    if context.get("failure_stage"):
+        lines.extend([f"最后失败阶段：{context['failure_stage']}"])
+    if context.get("failure_detail"):
+        lines.extend([f"可见失败原因：{context['failure_detail']}"])
+    if context.get("outbox_status"):
+        lines.extend(
+            [
+                f"交付 outbox：{context['outbox_status']}",
+                f"待交付路线：{context.get('candidate_count', 0)} 条",
+                f"已保存路线草稿：{context.get('fragment_count', 0)} 条",
+            ]
+        )
     lines.extend(
         [
             "",
             "研究检查点会独立保存；未成功发送的报告仍保留在交付 outbox，"
             "不会被误标为已交付，也不需要重新消耗整轮研究 tokens。"
-            "请查看运行日志与审计 artifact 后重试。",
+            "若上面显示待交付 outbox，请保持 reset_state=false 重新运行；"
+            "系统会复用候选快照和已保存路线草稿。请同时查看运行日志与审计 artifact。",
         ]
     )
     message.set_content("\n".join(lines))
     _deliver_message(message)
+
+
+def _local_failure_context() -> dict[str, object]:
+    """Expose the last public failure boundary without leaking prompts/secrets."""
+
+    context: dict[str, object] = {}
+    try:
+        if config.PARADIGM_DB_PATH.is_file():
+            from database.paradigm_store import ParadigmStore
+
+            store = ParadigmStore(config.PARADIGM_DB_PATH)
+            job = store.load_pending_report_job()
+            if job is not None:
+                context.update(
+                    {
+                        "outbox_status": job.status,
+                        "candidate_count": len(job.candidates),
+                        "fragment_count": len(
+                            store.load_report_fragments(job.delivery_key)
+                        ),
+                    }
+                )
+                if job.last_error:
+                    context["failure_detail"] = job.last_error[:500]
+    except Exception as exc:
+        logger.warning("失败提醒读取 outbox 状态失败: %s", exc)
+
+    try:
+        audit_path = Path("logs/run_audit_latest.json")
+        if audit_path.is_file():
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            failed_calls = [
+                value
+                for value in (audit.get("llm_calls") or [])
+                if value.get("status") == "failed"
+            ]
+            if failed_calls:
+                last = failed_calls[-1]
+                context.setdefault("failure_stage", str(last.get("stage", "")))
+                if last.get("error"):
+                    # LLM 审计记录的是最内层请求异常，通常比 outbox 的业务层
+                    # 包装错误更能直接说明是超时、限流还是响应结构问题。
+                    context["failure_detail"] = str(last.get("error", ""))[:500]
+            if not context.get("failure_stage"):
+                failed_events = [
+                    value
+                    for value in (audit.get("events") or [])
+                    if value.get("status") in {"failed", "render_failed", "send_failed"}
+                ]
+                if failed_events:
+                    last = failed_events[-1]
+                    context["failure_stage"] = str(last.get("stage", ""))
+                    context.setdefault(
+                        "failure_detail", str(last.get("detail", ""))[:500]
+                    )
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("失败提醒读取审计摘要失败: %s", exc)
+    return context
 
 
 def _missing_smtp_config() -> list[str]:

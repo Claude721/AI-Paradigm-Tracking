@@ -101,6 +101,14 @@ class ParadigmStore:
                     updated_at TEXT NOT NULL,
                     delivered_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS report_render_fragments (
+                    delivery_key TEXT NOT NULL,
+                    fragment_key TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(delivery_key, fragment_key)
+                );
                 CREATE TABLE IF NOT EXISTS paradigm_evidence (
                     paradigm_key TEXT NOT NULL,
                     fingerprint TEXT NOT NULL,
@@ -118,6 +126,8 @@ class ParadigmStore:
                     ON paradigms(total_score DESC);
                 CREATE INDEX IF NOT EXISTS idx_report_outbox_status
                     ON report_outbox(status, created_at);
+                CREATE INDEX IF NOT EXISTS idx_report_fragments_delivery
+                    ON report_render_fragments(delivery_key);
                 """
             )
             # Version 3 adds a delivery identifier to legacy delivery rows.
@@ -429,6 +439,41 @@ class ParadigmStore:
                 (content, now, delivery_key),
             )
 
+    def load_report_fragments(self, delivery_key: str) -> dict[str, str]:
+        """恢复已通过路线级闸门的总编辑中间制品。"""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT fragment_key, content FROM report_render_fragments
+                WHERE delivery_key=? ORDER BY fragment_key
+                """,
+                (delivery_key,),
+            ).fetchall()
+        return {str(key): str(content) for key, content in rows}
+
+    def save_report_fragment(
+        self,
+        delivery_key: str,
+        fragment_key: str,
+        content: str,
+    ) -> None:
+        """单条路线起草成功后立即落盘，后续超时不重新消耗它。"""
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO report_render_fragments (
+                    delivery_key, fragment_key, content, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(delivery_key, fragment_key) DO UPDATE SET
+                    content=excluded.content,
+                    updated_at=excluded.updated_at
+                """,
+                (delivery_key, fragment_key, content, now, now),
+            )
+
     def begin_delivery_attempt(self, delivery_key: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
@@ -493,6 +538,10 @@ class ParadigmStore:
                 WHERE delivery_key=?
                 """,
                 (now, now, delivery_key),
+            )
+            conn.execute(
+                "DELETE FROM report_render_fragments WHERE delivery_key=?",
+                (delivery_key,),
             )
 
     def attach_history(
@@ -775,7 +824,19 @@ def _report_job_from_row(row: tuple) -> ReportOutboxJob:
 
 
 def _safe_error_text(error: Exception | str) -> str:
-    value = str(error).replace("\n", " ")
+    if isinstance(error, BaseException):
+        parts = []
+        current: BaseException | None = error
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen and len(parts) < 4:
+            seen.add(id(current))
+            detail = str(current).replace("\n", " ").strip()
+            label = type(current).__name__
+            parts.append(f"{label}: {detail}" if detail else label)
+            current = current.__cause__ or current.__context__
+        value = " <- ".join(parts)
+    else:
+        value = str(error).replace("\n", " ")
     for name in (
         "LLM_API_KEY",
         "SUB_AGENT_API_KEY",
