@@ -350,7 +350,7 @@ PARADIGM_SEED_ARXIV_IDS: list[str] = _env_csv("PARADIGM_SEED_ARXIV_IDS")
 PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
     3, min(_env_int("PARADIGM_RESEARCHER_PROFILE_LIMIT", 6), 10)
 )
-PARADIGM_STATE_SCHEMA_VERSION: int = 2
+PARADIGM_STATE_SCHEMA_VERSION: int = 3
 
 # 云端任务必须在 GitHub 的硬超时之前主动收尾。该预算只决定本轮执行到
 # backlog 的哪个位置，不参与 Rubric、排序分数或研究去留；未处理项会持久化
@@ -358,10 +358,12 @@ PARADIGM_STATE_SCHEMA_VERSION: int = 2
 PARADIGM_RUN_BUDGET_SECONDS: int = max(
     0, _env_int("PARADIGM_RUN_BUDGET_SECONDS", 3900)
 )
-# 每个后续阶段预留的时间：原点机制抽取会为深挖和最终报告各预留一份，
-# 深挖/历史刷新会为最终报告预留一份。
+# 研究阶段内部的收尾余量；报告渲染已经独立使用下方超时和 durable outbox。
 PARADIGM_STAGE_RESERVE_SECONDS: int = max(
-    60, _env_int("PARADIGM_STAGE_RESERVE_SECONDS", 600)
+    60, _env_int("PARADIGM_STAGE_RESERVE_SECONDS", 1200)
+)
+PARADIGM_REPORT_TIMEOUT_SECONDS: int = max(
+    60, _env_int("PARADIGM_REPORT_TIMEOUT_SECONDS", 1200)
 )
 # 批次大小只是可取消、可检查点的执行粒度，不是候选数量上限。
 PARADIGM_ANALYSIS_BATCH_SIZE: int = max(
@@ -382,6 +384,9 @@ EMAIL_PUSH_ENABLED: bool = _env_bool("EMAIL_PUSH_ENABLED", False)
 # 开启邮件后默认将投递视为必需步骤。发送失败时让进程返回失败，避免云端
 # 调度看似成功、实际没有收到报告。
 EMAIL_PUSH_REQUIRED: bool = _env_bool("EMAIL_PUSH_REQUIRED", True)
+EMAIL_MAX_ATTACHMENT_BYTES: int = max(
+    1_000_000, _env_int("EMAIL_MAX_ATTACHMENT_BYTES", 10_000_000)
+)
 SMTP_HOST: str = os.getenv("SMTP_HOST", "")
 SMTP_PORT: int = _env_int("SMTP_PORT", 465)
 SMTP_USERNAME: str = os.getenv("SMTP_USERNAME", "")

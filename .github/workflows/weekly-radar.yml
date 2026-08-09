@@ -95,11 +95,13 @@ jobs:
       # 软预算只决定本轮处理到 backlog 的哪里；Rubric 仍是唯一研究门槛。
       # 3900 秒会在 90 分钟 job 硬超时前为报告、邮件和 artifact 留出余量。
       PARADIGM_RUN_BUDGET_SECONDS: ${{ vars.PARADIGM_RUN_BUDGET_SECONDS || '3900' }}
-      PARADIGM_STAGE_RESERVE_SECONDS: ${{ vars.PARADIGM_STAGE_RESERVE_SECONDS || '600' }}
+      PARADIGM_STAGE_RESERVE_SECONDS: ${{ vars.PARADIGM_STAGE_RESERVE_SECONDS || '1200' }}
+      PARADIGM_REPORT_TIMEOUT_SECONDS: ${{ vars.PARADIGM_REPORT_TIMEOUT_SECONDS || '1200' }}
       PARADIGM_ANALYSIS_BATCH_SIZE: ${{ vars.PARADIGM_ANALYSIS_BATCH_SIZE || '6' }}
       PARADIGM_DEEP_BATCH_SIZE: ${{ vars.PARADIGM_DEEP_BATCH_SIZE || '1' }}
       EMAIL_PUSH_ENABLED: "true"
       EMAIL_PUSH_REQUIRED: "true"
+      EMAIL_MAX_ATTACHMENT_BYTES: ${{ vars.EMAIL_MAX_ATTACHMENT_BYTES || '10000000' }}
       SMTP_HOST: smtp.qq.com
       SMTP_PORT: "465"
       SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
@@ -126,6 +128,11 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
 
+      - name: 运行离线回归测试
+        run: |
+          python -m unittest discover -s tests -v
+          python -m compileall -q agents database notifications paradigms reports skills sources main.py config.py run_audit.py
+
       - name: 恢复上一次去重状态
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
         id: restore-state
@@ -141,9 +148,8 @@ jobs:
 
           artifact_url="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=paradigm-radar-state&per_page=100" --jq '.artifacts | map(select(.expired == false)) | sort_by(.created_at) | last | .archive_download_url // empty')"
           if [ -z "$artifact_url" ]; then
-            echo "没有可恢复的状态 artifact"
-            echo "restored=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "未找到状态 artifact。为避免意外冷启动，请手动以 reset_state=true 初始化。"
+            exit 1
           fi
 
           mkdir -p /tmp/paradigm-radar-restore
@@ -157,16 +163,14 @@ jobs:
           fi
 
           if [ ! -f /tmp/paradigm-radar-restore/paradigm_radar.db ]; then
-            echo "状态 artifact 缺少数据库文件，本轮从空状态开始"
-            echo "restored=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "状态 artifact 缺少数据库文件；拒绝静默从空状态启动"
+            exit 1
           fi
 
           state_schema="$(jq -r '.schema_version // empty' /tmp/paradigm-radar-restore/state-meta.json 2>/dev/null || true)"
           if ! python -m database.state_migration /tmp/paradigm-radar-restore/paradigm_radar.db --from-version "$state_schema"; then
-            echo "状态 artifact 无法安全迁移，本轮从空状态开始"
-            echo "restored=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "状态 artifact 无法安全迁移；拒绝静默从空状态启动"
+            exit 1
           fi
 
           mkdir -p database
@@ -186,24 +190,23 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
         run: python main.py
 
-      - name: 主流程失败邮件提醒
-        if: ${{ always() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) && steps.pipeline.outcome != 'success' }}
-        continue-on-error: true
-        env:
-          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          PIPELINE_STEP_OUTCOME: ${{ steps.pipeline.outcome }}
-          AUDIT_ARTIFACT_NAME: paradigm-radar-audit-${{ github.run_id }}
-        run: python main.py --notify-failure
-
       - name: 记录状态对应的代码版本
-        if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
+        id: prepare-state
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         run: |
+          if [ ! -f database/paradigm_radar.db ]; then
+            echo "本轮没有产生可保存的范式数据库"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python -m database.state_migration database/paradigm_radar.db --from-version "$(python -m database.state_migration --print-current-version)"
           landscape_version="$(jq -r '.version' taxonomy/frontier_landscape.json)"
           state_schema="$(python -m database.state_migration --print-current-version)"
           printf '{"schema_version":%s,"landscape_version":"%s","commit_sha":"%s","run_id":"%s"}\n' "$state_schema" "$landscape_version" "$GITHUB_SHA" "$GITHUB_RUN_ID" > database/state-meta.json
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
       - name: 保存跨周去重状态
-        if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
+        if: ${{ always() && steps.prepare-state.outputs.available == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: paradigm-radar-state
@@ -214,7 +217,7 @@ jobs:
           if-no-files-found: error
 
       - name: 保存本期报告
-        if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) && hashFiles('reports/output/*.md') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: paradigm-radar-report-${{ github.run_id }}
@@ -234,3 +237,12 @@ jobs:
             logs/smoke_test_latest.json
           retention-days: 90
           if-no-files-found: warn
+
+      - name: 任一生产步骤失败邮件提醒
+        if: ${{ always() && failure() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
+        continue-on-error: true
+        env:
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PIPELINE_STEP_OUTCOME: ${{ steps.pipeline.outcome || 'not-run' }}
+          AUDIT_ARTIFACT_NAME: paradigm-radar-audit-${{ github.run_id }}
+        run: python main.py --notify-failure

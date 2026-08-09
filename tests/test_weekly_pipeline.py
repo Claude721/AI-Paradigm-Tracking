@@ -191,6 +191,22 @@ class WeeklyPipelineTests(unittest.TestCase):
         self.assertIn("学术索引请求健康度", markdown)
         self.assertIn("HTTP 请求 7；429 2", markdown)
 
+    def test_run_audit_redacts_secrets_inside_nested_payloads(self) -> None:
+        secret = "super-secret-token"
+        audit = RunAudit()
+        with (
+            patch.object(config, "TAVILY_API_KEY", secret),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            result = audit.write(
+                {"nested": [{"error": f"request failed with {secret}"}]},
+                output_dir=directory,
+            )
+            content = Path(result["audit_json_path"]).read_text(encoding="utf-8")
+
+        self.assertNotIn(secret, content)
+        self.assertIn("***", content)
+
     def test_required_email_failure_fails_the_task(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "paradigm_radar_2026-07-18.md"
@@ -210,7 +226,7 @@ class WeeklyPipelineTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "邮件发送失败"):
                     asyncio.run(send_report_email(report, {}))
 
-    def test_failed_pipeline_rolls_back_dedup_state(self) -> None:
+    def test_failed_pipeline_preserves_completed_checkpoints(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "radar.db"
             database.write_bytes(b"state-before-run")
@@ -227,7 +243,34 @@ class WeeklyPipelineTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "email failed"):
                     asyncio.run(app_main.run_pipeline())
 
-            self.assertEqual(database.read_bytes(), b"state-before-run")
+            self.assertEqual(database.read_bytes(), b"partial-failed-run")
+
+    def test_email_uses_deterministic_delivery_message_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "paradigm_radar_2026-08-09.md"
+            report.write_text("# Radar", encoding="utf-8")
+            with (
+                patch.object(config, "SMTP_HOST", "smtp.example.com"),
+                patch.object(config, "SMTP_PORT", 465),
+                patch.object(config, "SMTP_USERNAME", "sender@example.com"),
+                patch.object(config, "SMTP_PASSWORD", "app-password"),
+                patch.object(config, "SMTP_FROM", "sender@example.com"),
+                patch.object(config, "SMTP_TO", ["receiver@example.com"]),
+                patch.object(config, "SMTP_USE_SSL", True),
+                patch("notifications.email_notifier.smtplib.SMTP_SSL") as smtp,
+            ):
+                _send_sync(report, {}, delivery_key="delivery-123")
+
+            message = (
+                smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+            )
+            self.assertEqual(
+                message["Message-ID"],
+                "<ai-paradigm-radar.delivery-123@delivery.invalid>",
+            )
+            self.assertEqual(
+                message["X-AI-Radar-Delivery-Key"], "delivery-123"
+            )
 
 
 if __name__ == "__main__":

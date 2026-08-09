@@ -53,6 +53,21 @@ _REQUIRED_COLUMNS = {
         "payload_json",
         "delivered_at",
         "report_kind",
+        "delivery_key",
+    },
+    "report_outbox": {
+        "delivery_key",
+        "report_date",
+        "report_name",
+        "status",
+        "candidate_payload_json",
+        "stats_json",
+        "report_content",
+        "attempt_count",
+        "last_error",
+        "created_at",
+        "updated_at",
+        "delivered_at",
     },
     "paradigm_evidence": {
         "paradigm_key",
@@ -69,10 +84,10 @@ def migrate_state(
 ) -> int:
     """Validate an artifact and apply all backwards-compatible migrations.
 
-    Version 1 and version 2 share the same core tables.  Version 2 adds
-    ``radar_meta`` via ``CREATE TABLE IF NOT EXISTS``, so opening the database
-    with :class:`ParadigmStore` is the migration.  Future versions must extend
-    this function before raising ``PARADIGM_STATE_SCHEMA_VERSION``.
+    Version 2 added ``radar_meta``; version 3 adds the durable report outbox and
+    a delivery identifier.  All additions are backwards-compatible, so opening
+    the database with :class:`ParadigmStore` performs the migration.  Future
+    versions must extend this function before raising the schema version.
     """
 
     path = Path(db_path)
@@ -141,12 +156,15 @@ def _validate_sqlite(path: Path, *, require_current: bool) -> None:
 
     required = set(_REQUIRED_TABLES)
     if require_current:
-        required.add("radar_meta")
+        required.update({"radar_meta", "report_outbox"})
     missing = required - tables
     if missing:
         raise ValueError(f"状态数据库缺少必需表: {sorted(missing)}")
     for table in required:
-        missing_columns = _REQUIRED_COLUMNS[table] - columns.get(table, set())
+        expected_columns = set(_REQUIRED_COLUMNS[table])
+        if not require_current and table == "report_deliveries":
+            expected_columns.discard("delivery_key")
+        missing_columns = expected_columns - columns.get(table, set())
         if missing_columns:
             raise ValueError(
                 f"状态数据库表 {table} 缺少字段: {sorted(missing_columns)}"

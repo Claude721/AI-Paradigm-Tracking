@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import config
+
 
 class RunAudit:
     def __init__(self) -> None:
@@ -34,6 +36,10 @@ class RunAudit:
         usage = getattr(response, "usage", None)
         completion_details = getattr(usage, "completion_tokens_details", None)
         prompt_details = getattr(usage, "prompt_tokens_details", None)
+        choices = getattr(response, "choices", None) or []
+        first_choice = choices[0] if choices else None
+        message = getattr(first_choice, "message", None)
+        content = getattr(message, "content", "") or ""
         self.llm_calls.append(
             {
                 "stage": stage,
@@ -52,6 +58,10 @@ class RunAudit:
                 "cached_tokens": _integer(
                     getattr(prompt_details, "cached_tokens", 0)
                 ),
+                "finish_reason": _clean(
+                    str(getattr(first_choice, "finish_reason", "") or ""), 40
+                ),
+                "response_characters": len(content),
                 "error": _clean(str(error), 300) if error else "",
             }
         )
@@ -70,6 +80,11 @@ class RunAudit:
                 "detail": _clean(detail, 500),
             }
         )
+
+    def checkpoint(self, stats: dict[str, Any]) -> None:
+        """保留最近一份部分运行统计，供中途异常审计使用。"""
+
+        self.last_stats = _safe_payload(stats)
 
     def write(
         self,
@@ -162,6 +177,8 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- 用户 safety limit 延后深挖：{stats.get('candidate_safety_deferred_count', 0)}",
         f"- 软时间预算延后深挖：{stats.get('candidate_budget_deferred_count', 0)}",
         f"- 历史路线刷新延后：{stats.get('refresh_deferred_count', 0)}",
+        f"- 已准入但人物交付信息待补全：{stats.get('delivery_profile_deferred_count', 0)}",
+        f"- 已准入但一手链接待补全：{stats.get('delivery_source_deferred_count', 0)}",
         f"- 最终可报告：{stats.get('high_value_count', 0)}",
         f"- 报告 safety limit 延后：{stats.get('report_safety_deferred_count', 0)}",
         "",
@@ -226,6 +243,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
                 f"{planned}；"
                 f"HTTP 请求 {value.get('requests', 0)}；"
                 f"429 {value.get('rate_limited_requests', 0)}；"
+                f"短暂故障重试 {value.get('transient_retries', 0)}；"
                 f"结果 {value.get('results', 0)}；"
                 f"未执行 {value.get('not_executed_queries', 0)}"
             )
@@ -325,22 +343,31 @@ def _render_markdown(payload: dict[str, Any]) -> str:
 
 
 def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    safe: dict[str, Any] = {}
-    for key, value in payload.items():
-        if isinstance(value, Path):
-            safe[key] = str(value)
-        elif isinstance(value, (str, int, float, bool)) or value is None:
-            safe[key] = _clean(value, 1000) if isinstance(value, str) else value
-        elif isinstance(value, dict):
-            safe[key] = _safe_payload(value)
-        elif isinstance(value, (list, tuple, set)):
-            safe[key] = [
-                _clean(item, 500) if isinstance(item, str) else item
-                for item in value
-            ]
-        else:
-            safe[key] = _clean(str(value), 500)
-    return safe
+    # 审计可以被外部网页元数据和模型结构化字段间接影响。递归裁剪，避免
+    # 任意深对象、超长数组或密钥意外进入邮件附件。
+    return {
+        _clean(key, 120): _safe_value(value, depth=0)
+        for key, value in list(payload.items())[:200]
+    }
+
+
+def _safe_value(value: Any, *, depth: int) -> Any:
+    if depth >= 6:
+        return _clean(value, 500)
+    if isinstance(value, Path):
+        return _clean(str(value), 1000)
+    if isinstance(value, str):
+        return _clean(value, 1000)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {
+            _clean(key, 120): _safe_value(item, depth=depth + 1)
+            for key, item in list(value.items())[:200]
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_value(item, depth=depth + 1) for item in list(value)[:200]]
+    return _clean(str(value), 500)
 
 
 def _rubric_summary(item: dict[str, Any]) -> str:
@@ -382,7 +409,23 @@ def _integer(value: Any) -> int:
 
 
 def _clean(value: Any, limit: int) -> str:
-    return str(value or "").replace("\x00", "")[:limit]
+    text = str(value or "").replace("\x00", "")
+    for name in (
+        "LLM_API_KEY",
+        "SUB_AGENT_API_KEY",
+        "MAIN_AGENT_API_KEY",
+        "OPENALEX_API_KEY",
+        "SEMANTIC_SCHOLAR_API_KEY",
+        "GITHUB_TOKEN",
+        "TWITTER_BEARER_TOKEN",
+        "TAVILY_API_KEY",
+        "REDDIT_CLIENT_SECRET",
+        "SMTP_PASSWORD",
+    ):
+        secret = str(getattr(config, name, "") or "")
+        if len(secret) >= 6:
+            text = text.replace(secret, "***")
+    return text[:limit]
 
 
 run_audit = RunAudit()

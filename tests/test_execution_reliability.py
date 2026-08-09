@@ -9,8 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import config
+import main as app_main
 from agents.paradigm_orchestrator import (
     ParadigmOrchestrator,
+    _delivery_primary_source_ready,
+    _delivery_profile_ready,
     _execution_deadlines,
     _origin_analysis_priority,
     _origin_execution_order,
@@ -18,8 +21,15 @@ from agents.paradigm_orchestrator import (
 from database.paradigm_store import ParadigmStore
 from database.state_migration import migrate_state
 from notifications.email_notifier import send_failure_email
-from paradigms.models import EvidenceType, ParadigmExtraction, TechnicalEvidence
+from paradigms.models import (
+    EvidenceType,
+    ParadigmCandidate,
+    ParadigmExtraction,
+    ResearcherProfile,
+    TechnicalEvidence,
+)
 from reports.paradigm_generator import ParadigmReportGenerator
+from run_audit import run_audit
 
 
 def _origin(title: str, *, priority: int = 1) -> TechnicalEvidence:
@@ -105,6 +115,15 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 }
             self.assertEqual(version, config.PARADIGM_STATE_SCHEMA_VERSION)
             self.assertIn("radar_meta", tables)
+            self.assertIn("report_outbox", tables)
+            with sqlite3.connect(database) as connection:
+                delivery_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(report_deliveries)"
+                    )
+                }
+            self.assertIn("delivery_key", delivery_columns)
 
     def test_future_state_schema_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -181,6 +200,190 @@ class ExecutionReliabilityTests(unittest.TestCase):
             backlog = store.load_pending_origins()
 
         self.assertEqual([item.summary for item in backlog], [changed.summary])
+
+    def test_report_outbox_preserves_research_and_commits_delivery_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            evidence = _origin("2608.00005")
+            candidate = ParadigmCandidate(
+                key="durable-route",
+                name="Durable route",
+                thesis="改变能力边界",
+                problem_shift="从旧问题转向新问题",
+                mechanism="新的训练接口",
+                evidence=[evidence],
+            )
+            store.mark_evidence([evidence], analyzed=True)
+            store.save_candidates([candidate])
+            job = store.enqueue_report(
+                [candidate],
+                {"origin_count": 1, "new_paradigms": 1},
+                report_date="2026-08-09",
+            )
+
+            store.record_delivery_failure(
+                job.delivery_key, "renderer failed", rendered=False
+            )
+            pending = store.load_pending_report_job()
+            self.assertIsNotNone(pending)
+            self.assertEqual(pending.candidates[0].key, candidate.key)
+            self.assertEqual(store.load_pending_origins(), [])
+
+            store.save_rendered_report(job.delivery_key, "# validated report")
+            store.begin_delivery_attempt(job.delivery_key)
+            store.mark_delivery_delivered(
+                job.delivery_key, Path("reports/output/report.md")
+            )
+
+            self.assertIsNone(store.load_pending_report_job())
+            with sqlite3.connect(store.db_path) as connection:
+                reported = connection.execute(
+                    "SELECT last_reported_signature FROM paradigms "
+                    "WHERE paradigm_key=?",
+                    (candidate.key,),
+                ).fetchone()[0]
+                outbox_status = connection.execute(
+                    "SELECT status FROM report_outbox WHERE delivery_key=?",
+                    (job.delivery_key,),
+                ).fetchone()[0]
+                report_content = connection.execute(
+                    "SELECT report_content FROM report_outbox WHERE delivery_key=?",
+                    (job.delivery_key,),
+                ).fetchone()[0]
+            self.assertEqual(reported, candidate.report_signature)
+            self.assertEqual(outbox_status, "delivered")
+            self.assertEqual(report_content, "")
+
+    def test_email_failure_reuses_validated_report_without_rerunning_research(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            candidate = ParadigmCandidate(
+                key="retry-route",
+                name="Retry route",
+                thesis="改变能力边界",
+                problem_shift="从旧问题转向新问题",
+                mechanism="新的训练接口",
+                evidence=[_origin("2608.00006")],
+            )
+            store.save_candidates([candidate])
+            job = store.enqueue_report(
+                [candidate], {"new_paradigms": 1}, report_date="2026-08-09"
+            )
+            report_path = Path(directory) / job.report_name
+
+            async def render(*_args, **_kwargs):
+                report_path.write_text("# validated report", encoding="utf-8")
+                return report_path
+
+            generator = SimpleNamespace(
+                output_dir=Path(directory), generate=AsyncMock(side_effect=render)
+            )
+            audit_result = {
+                "audit_markdown_path": str(Path(directory) / "audit.md"),
+                "audit_json_path": str(Path(directory) / "audit.json"),
+            }
+            with (
+                patch.object(config, "EMAIL_PUSH_ENABLED", True),
+                patch.object(config, "PARADIGM_REPORT_TIMEOUT_SECONDS", 30),
+                patch.object(run_audit, "write", return_value=audit_result),
+                patch(
+                    "notifications.email_notifier.send_report_email",
+                    new=AsyncMock(side_effect=RuntimeError("smtp unavailable")),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "smtp unavailable"):
+                    asyncio.run(
+                        app_main._deliver_paradigm_job(
+                            store, generator, job, recovered=False
+                        )
+                    )
+
+            pending = store.load_pending_report_job()
+            self.assertIsNotNone(pending)
+            self.assertEqual(pending.status, "rendered")
+            self.assertEqual(pending.report_content, "# validated report")
+            self.assertEqual(generator.generate.await_count, 1)
+
+            with (
+                patch.object(config, "EMAIL_PUSH_ENABLED", True),
+                patch.object(run_audit, "write", return_value=audit_result),
+                patch(
+                    "notifications.email_notifier.send_report_email",
+                    new=AsyncMock(return_value=True),
+                ) as sender,
+            ):
+                asyncio.run(
+                    app_main._deliver_paradigm_job(
+                        store, generator, pending, recovered=True
+                    )
+                )
+
+            self.assertEqual(generator.generate.await_count, 1)
+            sender.assert_awaited_once()
+            self.assertIsNone(store.load_pending_report_job())
+
+    def test_empty_outbox_key_changes_when_coverage_materially_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            first = store.enqueue_report(
+                [],
+                {"origin_count": 0, "run_incomplete": True, "pending_work_count": 5},
+                report_date="2026-08-09",
+            )
+            duplicate = store.enqueue_report(
+                [],
+                {"origin_count": 0, "run_incomplete": True, "pending_work_count": 5},
+                report_date="2026-08-09",
+            )
+            completed = store.enqueue_report(
+                [],
+                {"origin_count": 10, "run_incomplete": False, "pending_work_count": 0},
+                report_date="2026-08-09",
+            )
+
+        self.assertEqual(first.delivery_key, duplicate.delivery_key)
+        self.assertNotEqual(first.delivery_key, completed.delivery_key)
+
+    def test_identity_seed_alone_does_not_satisfy_person_delivery_contract(self) -> None:
+        item = ParadigmCandidate(
+            key="person-contract",
+            name="Person contract",
+            thesis="改变能力边界",
+            problem_shift="新的研究问题",
+            mechanism="新的训练接口",
+            researchers=[
+                ResearcherProfile(
+                    name="A. Researcher",
+                    current_affiliation="Example Lab",
+                    contact_search_notes=["已从当前论文作者列表建立身份种子"],
+                )
+            ],
+        )
+        self.assertFalse(_delivery_profile_ready(item))
+        item.researchers[0].contact_search_notes.append(
+            "已检索 OpenAlex Authors 并用当前论文题目核验身份"
+        )
+        self.assertTrue(_delivery_profile_ready(item))
+
+    def test_primary_source_delivery_contract_rejects_local_or_missing_links(self) -> None:
+        item = ParadigmCandidate(
+            key="source-contract",
+            name="Source contract",
+            thesis="改变能力边界",
+            problem_shift="新的研究问题",
+            mechanism="新的训练接口",
+            evidence=[
+                TechnicalEvidence(
+                    source="paper",
+                    evidence_type=EvidenceType.PRIMARY_PAPER,
+                    title="Unsafe source",
+                    url="http://127.0.0.1/private",
+                )
+            ],
+        )
+        self.assertFalse(_delivery_primary_source_ready(item))
+        item.evidence[0].url = "https://arxiv.org/abs/2608.00007"
+        self.assertTrue(_delivery_primary_source_ready(item))
 
     def test_priority_order_is_operational_not_a_truncation(self) -> None:
         ordinary = _origin("ordinary", priority=1)
@@ -285,8 +488,11 @@ class ExecutionReliabilityTests(unittest.TestCase):
         )
         self.assertIn("database.state_migration", workflow)
         self.assertIn("PARADIGM_RUN_BUDGET_SECONDS", workflow)
+        self.assertIn("运行离线回归测试", workflow)
         self.assertIn("--notify-failure", workflow)
-        self.assertIn("steps.pipeline.outcome != 'success'", workflow)
+        self.assertIn("always() && failure()", workflow)
+        self.assertIn("拒绝静默从空状态启动", workflow)
+        self.assertIn("steps.prepare-state.outputs.available == 'true'", workflow)
         self.assertNotIn('if [ "$state_schema" !=', workflow)
 
 

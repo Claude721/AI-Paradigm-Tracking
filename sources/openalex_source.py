@@ -30,11 +30,15 @@ class OpenAlexSource:
         lookback_days: int = 7,
         per_query: int = 100,
         searches: list[str] | None = None,
+        concurrency: int = 2,
     ):
         self.lookback_days = max(lookback_days, 1)
         self.per_query = min(max(per_query, 1), 100)
         self.searches = searches or DEFAULT_SEARCHES
+        self.concurrency = max(concurrency, 1)
         self.request_count = 0
+        self.rate_limited_requests = 0
+        self.transient_retries = 0
         self.failed_queries = 0
         self.completed_queries = 0
         self.result_count = 0
@@ -53,53 +57,55 @@ class OpenAlexSource:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
         date_filter = f"from_publication_date:{cutoff.date().isoformat()}"
         headers = {"User-Agent": "AI-Paradigm-Radar/3.2"}
+        semaphore = asyncio.Semaphore(self.concurrency)
 
         async def search_one(client: httpx.AsyncClient, query: str) -> list[dict]:
-            cursor = "*"
-            works: list[dict] = []
-            consecutive_irrelevant_pages = 0
-            while cursor:
-                self.request_count += 1
-                response = await client.get(
-                    OPENALEX_WORKS_API,
-                    params={
-                        "api_key": config.OPENALEX_API_KEY,
-                        "search": query,
-                        "filter": date_filter,
-                        # 时间窗已经由 filter 限定，先按检索相关性排序。
-                        "sort": "relevance_score:desc,publication_date:desc",
-                        # per_query 是传输页大小，不是每周候选上限。
-                        "per-page": self.per_query,
-                        "cursor": cursor,
-                    },
-                )
-                response.raise_for_status()
-                payload = response.json()
-                page = payload.get("results", [])
-                relevant_page = [
-                    work
-                    for work in page
-                    if _work_strongly_matches_query(work, query)
-                ]
-                works.extend(relevant_page)
-                consecutive_irrelevant_pages = (
-                    0
-                    if relevant_page
-                    else consecutive_irrelevant_pages + 1
-                )
-                next_cursor = str((payload.get("meta") or {}).get("next_cursor") or "")
-                # OpenAlex search 可能把摘要弱命中分页到很深。这里不是固定
-                # Top-K：只有在按相关性排序后连续两页都没有标题/主题强命中
-                # 时才认为该已知路线的有效证据耗尽。
-                if (
-                    not page
-                    or not next_cursor
-                    or next_cursor == cursor
-                    or consecutive_irrelevant_pages >= 2
-                ):
-                    break
-                cursor = next_cursor
-            return works
+            async with semaphore:
+                cursor = "*"
+                works: list[dict] = []
+                consecutive_irrelevant_pages = 0
+                while cursor:
+                    response = await self._get_with_backoff(
+                        client,
+                        {
+                            "api_key": config.OPENALEX_API_KEY,
+                            "search": query,
+                            "filter": date_filter,
+                            # 时间窗已经由 filter 限定，先按检索相关性排序。
+                            "sort": "relevance_score:desc,publication_date:desc",
+                            # per_query 是传输页大小，不是每周候选上限。
+                            "per-page": self.per_query,
+                            "cursor": cursor,
+                        },
+                    )
+                    payload = response.json()
+                    page = payload.get("results", [])
+                    relevant_page = [
+                        work
+                        for work in page
+                        if _work_strongly_matches_query(work, query)
+                    ]
+                    works.extend(relevant_page)
+                    consecutive_irrelevant_pages = (
+                        0
+                        if relevant_page
+                        else consecutive_irrelevant_pages + 1
+                    )
+                    next_cursor = str(
+                        (payload.get("meta") or {}).get("next_cursor") or ""
+                    )
+                    # OpenAlex search 可能把摘要弱命中分页到很深。这里不是固定
+                    # Top-K：只有在按相关性排序后连续两页都没有标题/主题强命中
+                    # 时才认为该已知路线的有效证据耗尽。
+                    if (
+                        not page
+                        or not next_cursor
+                        or next_cursor == cursor
+                        or consecutive_irrelevant_pages >= 2
+                    ):
+                        break
+                    cursor = next_cursor
+                return works
 
         async with httpx.AsyncClient(timeout=30, headers=headers) as client:
             tasks = [
@@ -124,6 +130,49 @@ class OpenAlexSource:
         self.result_count = len(deduped)
         return deduped
 
+    async def _get_with_backoff(
+        self,
+        client: httpx.AsyncClient,
+        params: dict,
+    ) -> httpx.Response:
+        last_response: httpx.Response | None = None
+        for attempt in range(4):
+            self.request_count += 1
+            try:
+                response = await client.get(OPENALEX_WORKS_API, params=params)
+            except httpx.TransportError:
+                if attempt >= 3:
+                    raise
+                self.transient_retries += 1
+                await asyncio.sleep(min(float(2**attempt), 10.0))
+                continue
+            last_response = response
+            retryable = response.status_code == 429 or response.status_code in {
+                408,
+                425,
+                500,
+                502,
+                503,
+                504,
+            }
+            if not retryable:
+                response.raise_for_status()
+                return response
+            if response.status_code == 429:
+                self.rate_limited_requests += 1
+            else:
+                self.transient_retries += 1
+            if attempt < 3:
+                retry_after = response.headers.get("Retry-After", "")
+                try:
+                    delay = float(retry_after)
+                except (TypeError, ValueError):
+                    delay = float(2**attempt)
+                await asyncio.sleep(max(0.5, min(delay, 10.0)))
+        assert last_response is not None
+        last_response.raise_for_status()
+        return last_response
+
     def coverage(self) -> dict[str, int | str]:
         return {
             "status": (
@@ -133,12 +182,16 @@ class OpenAlexSource:
                 if self.failed_queries and not self.completed_queries
                 else "partial"
                 if self.failed_queries
+                else "completed_after_retry"
+                if self.rate_limited_requests or self.transient_retries
                 else "completed"
             ),
             "queries": len(self.searches),
             "completed_queries": self.completed_queries,
             "failed_queries": self.failed_queries,
             "requests": self.request_count,
+            "rate_limited_requests": self.rate_limited_requests,
+            "transient_retries": self.transient_retries,
             "results": self.result_count,
         }
 
@@ -186,13 +239,18 @@ class OpenAlexSource:
                 "doi": (work.get("doi") or "").removeprefix("https://doi.org/"),
             }
             identifiers = {k: v for k, v in identifiers.items() if v}
+            doi_url = (
+                f"https://doi.org/{identifiers['doi']}"
+                if identifiers.get("doi")
+                else ""
+            )
             results.append(
                 TechnicalEvidence(
                     source=self.source_name,
                     evidence_type=EvidenceType.PRIMARY_PAPER,
                     title=title,
-                    url=(work.get("primary_location") or {}).get("landing_page_url")
-                    or work.get("doi")
+                    url=doi_url
+                    or (work.get("primary_location") or {}).get("landing_page_url")
                     or work.get("id", ""),
                     summary=abstract,
                     published_at=work.get("publication_date", ""),

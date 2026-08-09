@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import smtplib
 from datetime import datetime
 from email.message import EmailMessage
@@ -15,7 +16,12 @@ import config
 logger = logging.getLogger(__name__)
 
 
-async def send_report_email(report_path: Path, stats: dict) -> bool:
+async def send_report_email(
+    report_path: Path,
+    stats: dict,
+    *,
+    delivery_key: str = "",
+) -> bool:
     """发送报告附件；必需投递模式下失败会让任务明确失败。"""
     if not config.EMAIL_PUSH_ENABLED:
         logger.info("邮件推送未启用，报告仅保存在本地")
@@ -29,7 +35,9 @@ async def send_report_email(report_path: Path, stats: dict) -> bool:
         return False
 
     try:
-        await asyncio.to_thread(_send_sync, report_path, stats)
+        await asyncio.to_thread(
+            _send_sync, report_path, stats, delivery_key=delivery_key
+        )
         logger.info("报告邮件已发送至 %s 个收件人", len(config.SMTP_TO))
         return True
     except Exception as exc:
@@ -62,8 +70,19 @@ async def send_failure_email(context: dict | None = None) -> bool:
     return True
 
 
-def _send_sync(report_path: Path, stats: dict) -> None:
+def _send_sync(
+    report_path: Path,
+    stats: dict,
+    *,
+    delivery_key: str = "",
+) -> None:
     content = report_path.read_text(encoding="utf-8")
+    content_bytes = content.encode("utf-8")
+    if len(content_bytes) > config.EMAIL_MAX_ATTACHMENT_BYTES:
+        raise ValueError(
+            "报告附件超过邮件安全上限: "
+            f"{len(content_bytes)} > {config.EMAIL_MAX_ATTACHMENT_BYTES} bytes"
+        )
     sender = config.SMTP_FROM or config.SMTP_USERNAME
     is_paradigm = report_path.stem.startswith("paradigm_radar_")
     report_date = report_path.stem.removeprefix(
@@ -85,6 +104,12 @@ def _send_sync(report_path: Path, stats: dict) -> None:
         )
     message["From"] = sender
     message["To"] = ", ".join(config.SMTP_TO)
+    if delivery_key:
+        safe_key = re.sub(r"[^a-zA-Z0-9._-]", "", delivery_key)[:64]
+        message["Message-ID"] = (
+            f"<ai-paradigm-radar.{safe_key}@delivery.invalid>"
+        )
+        message["X-AI-Radar-Delivery-Key"] = delivery_key
     if is_paradigm:
         body = (
             "AI 技术范式雷达本期报告已生成。\n\n"
@@ -110,7 +135,7 @@ def _send_sync(report_path: Path, stats: dict) -> None:
         )
     message.set_content(body)
     message.add_attachment(
-        content.encode("utf-8"),
+        content_bytes,
         maintype="text",
         subtype="markdown",
         filename=report_path.name,
@@ -163,8 +188,9 @@ def _send_failure_sync(context: dict) -> None:
     lines.extend(
         [
             "",
-            "去重状态只会在完整报告和邮件成功后发布；"
-            "本次失败不会被误标为已交付。请查看运行日志与审计 artifact 后重试。",
+            "研究检查点会独立保存；未成功发送的报告仍保留在交付 outbox，"
+            "不会被误标为已交付，也不需要重新消耗整轮研究 tokens。"
+            "请查看运行日志与审计 artifact 后重试。",
         ]
     )
     message.set_content("\n".join(lines))

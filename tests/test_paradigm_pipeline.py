@@ -34,7 +34,12 @@ from paradigms.rubric import evaluate_rubric, load_rubric
 from paradigms.scoring import is_reportable, score_candidate
 from reports.paradigm_generator import (
     ParadigmReportGenerator,
+    _attach_primary_source_index,
+    _attach_researcher_index,
     _candidate_dossier,
+    _editorial_advisories,
+    _editorial_violations,
+    _momentum_evidence,
     _valid_editorial_report,
 )
 from skills.loader import SkillLoader
@@ -174,6 +179,15 @@ def candidate(evidence: list[TechnicalEvidence] | None = None) -> ParadigmCandid
         solidity_score=8,
         scope_score=9,
         incremental_penalty=0,
+    )
+
+
+def verified_researcher(name: str = "A. Researcher") -> ResearcherProfile:
+    return ResearcherProfile(
+        name=name,
+        current_affiliation="Example Lab",
+        background_summary="长期研究世界模型与机器人学习。",
+        contact_search_notes=["已检索公开主页，未发现额外职业联系方式"],
     )
 
 
@@ -991,6 +1005,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             f"{memo}\n\n## **技术路线**正在形成新的能力边界\n\n"
             f"{body} **关键机制**仍需独立复现。A. Researcher 是关键作者，"
             "公开入口：[ORCID](https://orcid.org/0000-0000-0000-0001)。\n\n"
+            "**讨论势能判断：** 当前仍是单点提出，尚未看到独立复现；"
+            "本轮社区覆盖有限，因此暂不判断为扩散。\n\n"
             "## 接下来真正值得盯的信号\n\n观察独立复现与有内容的二次讨论。"
         )
         response = SimpleNamespace(
@@ -1011,23 +1027,93 @@ class ParadigmPipelineTests(unittest.TestCase):
             )
             content = path.read_text(encoding="utf-8")
         self.assertIn("https://orcid.org/0000-0000-0000-0001", content)
+        self.assertIn("## 原文与一手资料", content)
+        self.assertIn("https://arxiv.org/abs/2607.00001", content)
         self.assertNotIn("@example", content)
         self.assertIn("## 本期研究 Memo", content)
         self.assertNotIn("评分拆解", content)
         self.assertNotIn("| 新颖性 |", content)
 
+    def test_researcher_index_keeps_completed_search_trace_when_no_contact_exists(self) -> None:
+        item = candidate()
+        item.researchers = [
+            ResearcherProfile(
+                name="A. Researcher",
+                current_affiliation="Example Lab",
+                background_summary="长期研究世界模型。",
+                contact_search_notes=[
+                    "已检索 OpenAlex Authors 并用当前论文题目核验身份"
+                ],
+            )
+        ]
+        content = _attach_researcher_index(
+            "# Radar\n\n## 接下来真正值得盯的信号\n\n继续观察。",
+            [item],
+        )
+        self.assertIn("未找到可核验的公开联系入口", content)
+        self.assertIn("检索记录", content)
+        self.assertIn("已检索 OpenAlex Authors", content)
+
+    def test_momentum_dossier_excludes_self_release_and_search_index_noise(self) -> None:
+        item = candidate()
+        item.evidence.extend(
+            [
+                TechnicalEvidence(
+                    source="reddit",
+                    evidence_type=EvidenceType.COMMUNITY_DISCUSSION,
+                    title="Independent technical discussion",
+                    url="https://reddit.com/r/MachineLearning/comments/independent",
+                    metrics={"score": 42, "comments": 13},
+                    raw={"relationship": "independent_discussion"},
+                ),
+                TechnicalEvidence(
+                    source="x-title-search",
+                    evidence_type=EvidenceType.SECONDARY_INTERPRETATION,
+                    title="Author announcement",
+                    url="https://x.com/author/status/1",
+                    raw={"relationship": "author_self_release"},
+                ),
+                TechnicalEvidence(
+                    source="tavily-social-web",
+                    evidence_type=EvidenceType.COMMUNITY_DISCUSSION,
+                    title="Indexed result only",
+                    url="https://example.com/indexed",
+                    raw={"indexed_discovery_only": True},
+                ),
+            ]
+        )
+
+        selected = _momentum_evidence(item)
+        self.assertEqual(
+            [value.title for value in selected],
+            ["Independent technical discussion"],
+        )
+        dossier = _candidate_dossier(item)
+        self.assertEqual(len(dossier["momentum_evidence"]), 1)
+        self.assertEqual(dossier["momentum_evidence"][0]["metrics"]["score"], 42)
+
     def test_editorial_gate_rejects_scores_and_tables(self) -> None:
         item = candidate()
-        item.researchers = [ResearcherProfile(name="A. Researcher")]
+        item.researchers = [verified_researcher()]
         memo = "本期技术路线从旧方法的边界出发，解释设计思想如何落到训练与推理。" * 18
         body = "技术部分继续分析问题、机制、证据和应用价值。" * 25
         report = (
             "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
             f"{memo}\n\n## **技术路线**开始改变能力边界\n\n"
             f"{body} **关键机制**值得继续验证。A. Researcher 是本期关键作者。\n\n"
+            "**讨论势能判断：** 目前出现少量有内容的社区讨论，但尚无独立复现；"
+            "本轮覆盖不足以判断跨平台扩散。\n\n"
             "## 接下来真正值得盯的信号\n\n观察独立复现与有内容的二次讨论。"
         )
+        report = _attach_researcher_index(report, [item])
+        report = _attach_primary_source_index(report, [item])
         self.assertTrue(_valid_editorial_report(report, [item]))
+        self.assertFalse(
+            _valid_editorial_report(
+                report.replace("**讨论势能判断：**", "**传播情况：**"),
+                [item],
+            )
+        )
         self.assertFalse(_valid_editorial_report(report + "\n\n总分：92", [item]))
         self.assertFalse(
             _valid_editorial_report(report + "\n\n| 项目 | 数据 |\n|---|---|", [item])
@@ -1039,8 +1125,122 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         self.assertFalse(_valid_editorial_report(report + f"\n\n{english}", [item]))
 
+    def test_report_gate_parses_memo_before_level_three_route_heading(self) -> None:
+        item = candidate()
+        memo = "本期从旧系统的运行边界出发，解释新机制改变了什么关键接口以及为什么值得继续观察。" * 14
+        body = "这条路线继续说明训练信号、推理路径、客观证据与应用边界。" * 28
+        report = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
+            f"{memo}\n\n### 路线从状态预测转向可行动表示\n\n"
+            f"{body} **关键机制**需要复现。A. Researcher 是关键作者。\n\n"
+            "## 接下来真正值得盯的信号\n\n继续观察独立承接。"
+        )
+        item.researchers = [verified_researcher()]
+        report = _attach_researcher_index(report, [item])
+        report = _attach_primary_source_index(report, [item])
+        violations = _editorial_violations(report, [item])
+        self.assertFalse(
+            any("Memo 中文长度" in value for value in violations), violations
+        )
+
+    def test_original_source_index_is_deterministic_and_hard_required(self) -> None:
+        first = candidate([paper("1")])
+        second = candidate([paper("2")])
+        second.key = "second-route"
+        second.name = "Second route"
+        second.route_family = "A second technical route"
+        memo = "本期技术路线从旧方法边界出发，解释新设计如何改变训练与推理接口。" * 16
+        body = "技术部分继续分析问题、机制、证据和应用价值。" * 28
+        draft = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
+            f"{memo}\n\n## 路线分析\n\n{body}\n\n"
+            "## 接下来真正值得盯的信号\n\n观察独立复现。"
+        )
+        without_index = _editorial_violations(draft, [first, second])
+        self.assertIn("缺少确定性的原文与一手资料索引", without_index)
+
+        report = _attach_primary_source_index(draft, [first, second])
+        self.assertIn("## 原文与一手资料", report)
+        self.assertIn("https://arxiv.org/abs/2607.00001", report)
+        self.assertIn("https://arxiv.org/abs/2607.00002", report)
+        self.assertLess(
+            report.index("## 原文与一手资料"),
+            report.index("## 接下来真正值得盯的信号"),
+        )
+        self.assertFalse(
+            any("一手材料" in value or "原文" in value for value in _editorial_violations(report, [first, second]))
+        )
+
+    def test_missing_primary_url_stops_report_even_when_model_draft_is_valid(self) -> None:
+        item = candidate(
+            [
+                TechnicalEvidence(
+                    source="arxiv",
+                    evidence_type=EvidenceType.PRIMARY_PAPER,
+                    title="Missing URL paper",
+                    url="",
+                )
+            ]
+        )
+        item.researchers = [verified_researcher()]
+        memo = "本期从旧系统的能力边界出发，解释技术设计如何改变训练与推理。" * 18
+        body = "这条路线的背景、机制、客观证据与应用边界需要放在一起理解。" * 26
+        editorial = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
+            f"{memo}\n\n## **技术路线**改变能力边界\n\n"
+            f"{body} **关键机制**需要复现。A. Researcher 是关键作者。\n\n"
+            "## 接下来真正值得盯的信号\n\n观察独立承接。"
+        )
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=editorial))]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=AsyncMock(return_value=response))
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            generator = ParadigmReportGenerator(directory, client=client, model="test")
+            with self.assertRaises(RuntimeError):
+                asyncio.run(generator.generate([item], {"origin_count": 1}))
+            self.assertEqual(list(Path(directory).glob("*.md")), [])
+
+    def test_presentation_target_is_advisory_without_full_rewrite(self) -> None:
+        memo = "本期先建立低分辨率运行图，再沿关键接口逐步提高理解分辨率。" * 11
+        report = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
+            f"{memo}\n\n## 路线分析\n\n" + "这条路线解释技术机制与边界。" * 50
+            + "A. Researcher 是这条路线的关键研究者。"
+            + "\n\n**讨论势能判断：** 当前证据不足，尚不能判断形成独立承接。"
+            + "\n\n## 接下来真正值得盯的信号\n\n观察独立复现。"
+        )
+        self.assertTrue(_editorial_advisories(report))
+        self.assertFalse(
+            any("行内重点强调" in value for value in _editorial_violations(report, [], require_primary_sources=False))
+        )
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=report))]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=AsyncMock(return_value=response))
+            )
+        )
+        item = candidate()
+        item.researchers = [verified_researcher()]
+        with tempfile.TemporaryDirectory() as directory:
+            path = asyncio.run(
+                ParadigmReportGenerator(
+                    directory, client=client, model="test"
+                ).generate([item], {"origin_count": 1})
+            )
+            content = path.read_text(encoding="utf-8")
+        self.assertEqual(client.chat.completions.create.await_count, 1)
+        self.assertIn("## 原文与一手资料", content)
+
     def test_report_generation_fails_instead_of_sending_raw_fallback(self) -> None:
         item = candidate()
+        item.researchers = [verified_researcher()]
         invalid = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="too short"))]
         )
@@ -1158,6 +1358,8 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertIn("最小实例", editorial)
         self.assertIn("训练过程与推理过程必须分开", editorial)
         self.assertIn("先建立低分辨率运行图", editorial)
+        self.assertIn("primary_sources", editorial)
+        self.assertIn("完整且原样的 URL", editorial)
 
         revision = SkillLoader().render(
             "weekly_memo_revision",
@@ -1169,6 +1371,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             mental_model_method="先建立低分辨率运行图，再逐层提高分辨率。",
         )
         self.assertIn("严禁复制英文摘要", revision)
+        self.assertIn("primary_sources", revision)
+        self.assertIn("不得凭记忆改写或猜测任何 URL", revision)
 
     def test_skill_loader_keeps_embedded_json_valid(self) -> None:
         prompt = SkillLoader().render(
@@ -1688,6 +1892,34 @@ class ParadigmPipelineTests(unittest.TestCase):
             )
         self.assertEqual(result, [])
         self.assertEqual(transport.get.await_count, 2)
+
+    def test_openalex_retries_429_and_reports_recovery(self) -> None:
+        request = httpx.Request("GET", "https://api.openalex.org/works")
+        rate_limited = httpx.Response(
+            429, headers={"Retry-After": "0"}, request=request
+        )
+        recovered = httpx.Response(
+            200,
+            json={"results": [], "meta": {"next_cursor": ""}},
+            request=request,
+        )
+        transport = MagicMock()
+        transport.get = AsyncMock(side_effect=[rate_limited, recovered])
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        source = OpenAlexSource(searches=['"world model"'], concurrency=1)
+        with (
+            patch.object(config, "OPENALEX_API_KEY", "configured"),
+            patch("sources.openalex_source.httpx.AsyncClient", return_value=context),
+            patch("sources.openalex_source.asyncio.sleep", new=AsyncMock()),
+        ):
+            result = asyncio.run(source.fetch())
+
+        self.assertEqual(result, [])
+        self.assertEqual(transport.get.await_count, 2)
+        self.assertEqual(source.coverage()["status"], "completed_after_retry")
+        self.assertEqual(source.coverage()["rate_limited_requests"], 1)
 
     def test_openalex_known_route_lane_ignores_abstract_only_tail(self) -> None:
         def page(results: list[dict], cursor: str) -> httpx.Response:

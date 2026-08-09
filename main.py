@@ -17,23 +17,58 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import shutil
 import sys
-import tempfile
+from contextlib import contextmanager
+from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import config
 
 
+def _redacted_log_text(value: str) -> str:
+    secret_names = (
+        "LLM_API_KEY",
+        "SUB_AGENT_API_KEY",
+        "MAIN_AGENT_API_KEY",
+        "OPENALEX_API_KEY",
+        "SEMANTIC_SCHOLAR_API_KEY",
+        "GITHUB_TOKEN",
+        "TWITTER_BEARER_TOKEN",
+        "TAVILY_API_KEY",
+        "REDDIT_CLIENT_SECRET",
+        "SMTP_PASSWORD",
+    )
+    result = value
+    for name in secret_names:
+        secret = str(getattr(config, name, "") or "")
+        if len(secret) < 6:
+            continue
+        result = result.replace(secret, "***")
+        encoded = quote(secret, safe="")
+        if encoded != secret:
+            result = result.replace(encoded, "***")
+    return result
+
+
+class _SecretRedactingFormatter(logging.Formatter):
+    """Redact configured secrets from messages and formatted tracebacks."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _redacted_log_text(super().format(record))
+
+
 def setup_logging() -> None:
-    log_formatter = logging.Formatter(
+    log_formatter = _SecretRedactingFormatter(
         "%(asctime)s | %(levelname)-7s | %(name)-25s | %(message)s",
         datefmt="%H:%M:%S"
     )
     
-    handlers = [logging.StreamHandler(sys.stdout)]
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(log_formatter)
+    handlers = [stream_handler]
     
     # 添加滚动文件日志支持
     log_dir = Path("logs")
@@ -68,6 +103,55 @@ def setup_logging() -> None:
 
 
 logger = logging.getLogger("main")
+
+
+@contextmanager
+def _pipeline_lock():
+    """Prevent two local processes from mutating one SQLite/outbox concurrently."""
+
+    db_path = (
+        config.DB_PATH
+        if config.PIPELINE_MODE == "legacy"
+        else config.PARADIGM_DB_PATH
+    )
+    lock_path = db_path.with_suffix(db_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    lock_backend = ""
+    try:
+        try:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_backend = "fcntl"
+        except ImportError:
+            import msvcrt
+
+            handle.seek(0)
+            if not handle.read(1):
+                handle.write("0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            lock_backend = "msvcrt"
+        except BlockingIOError as exc:
+            raise RuntimeError("已有另一份 AI Radar 流水线正在运行") from exc
+        except OSError as exc:
+            raise RuntimeError("已有另一份 AI Radar 流水线正在运行") from exc
+        yield
+    finally:
+        try:
+            if lock_backend == "fcntl":
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            elif lock_backend == "msvcrt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        handle.close()
 
 
 def _check_env() -> None:
@@ -106,37 +190,69 @@ def _print_model_banner() -> None:
         logger.info(f"  (子Agent 与 主Agent 使用同一模型: {sub.label})")
 
 
-async def _run_pipeline_once() -> dict:
-    """执行一次流水线；由 run_pipeline 负责失败回滚。"""
+async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> dict:
+    """渲染并投递一个持久化 outbox 任务，不重新执行研究。"""
+
+    from notifications.email_notifier import send_report_email
     from run_audit import run_audit
 
-    run_audit.reset()
-    _check_env()
-    _print_model_banner()
-    if config.PIPELINE_MODE == "legacy":
-        from agents.orchestrator import Orchestrator
-        orchestrator = Orchestrator()
-    else:
-        from agents.paradigm_orchestrator import ParadigmOrchestrator
-        orchestrator = ParadigmOrchestrator()
-    stats = await orchestrator.run()
-    report_path = stats.get("report_path")
-    if not report_path:
-        # 即使本周没有新项目，也生成并推送一份空报告，便于确认定时任务正常执行。
-        if config.PIPELINE_MODE == "legacy":
-            report_path = await orchestrator.report_gen.generate(
-                orchestrator.store.get_today_projects(),
-                orchestrator.store.get_stats(),
-                stats,
-            )
-        else:
-            report_path = await orchestrator.report_gen.generate([], stats)
-        stats["report_path"] = str(report_path)
+    stats = dict(job.stats)
+    stats["delivery_key"] = job.delivery_key
+    stats["delivery_recovered"] = recovered
+    if job.status == "delivered":
+        stats["delivery_duplicate_skipped"] = True
+        run_audit.event(
+            "report_outbox",
+            "duplicate_skipped",
+            f"交付任务 {job.delivery_key[:12]} 已完成，不重复发送邮件",
+        )
+        stats.update(run_audit.write(stats, status="duplicate_skipped"))
+        stats["email_sent"] = False
+        return stats
 
+    report_path = generator.output_dir / job.report_name
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = bool(job.report_content)
+    if rendered:
+        report_path.write_text(job.report_content, encoding="utf-8")
+        run_audit.event(
+            "report_outbox",
+            "reused",
+            f"复用已通过质量门槛的报告制品 {job.delivery_key[:12]}",
+        )
+    else:
+        try:
+            report_path = await asyncio.wait_for(
+                generator.generate(
+                    job.candidates,
+                    stats,
+                    report_date=job.report_date,
+                ),
+                timeout=config.PARADIGM_REPORT_TIMEOUT_SECONDS,
+            )
+            store.save_rendered_report(
+                job.delivery_key,
+                report_path.read_text(encoding="utf-8"),
+            )
+            rendered = True
+        except Exception as exc:
+            store.record_delivery_failure(
+                job.delivery_key, exc, rendered=False
+            )
+            run_audit.event(
+                "report_outbox",
+                "render_failed",
+                f"报告任务 {job.delivery_key[:12]} 渲染失败，已保留候选快照",
+            )
+            raise
+
+    stats["report_path"] = str(report_path)
     audit_summary = run_audit.write(
         stats,
         status=(
-            "completed_with_backlog"
+            "recovered_delivery"
+            if recovered
+            else "completed_with_backlog"
             if stats.get("run_incomplete")
             else "completed"
         ),
@@ -147,52 +263,146 @@ async def _run_pipeline_once() -> dict:
         "logs/current_run.log",
     ]
 
-    from notifications.email_notifier import send_report_email
-    email_sent = await send_report_email(Path(report_path), stats)
+    if not config.EMAIL_PUSH_ENABLED:
+        store.mark_delivery_delivered(job.delivery_key, report_path)
+        stats["email_sent"] = False
+        return stats
+
+    store.begin_delivery_attempt(job.delivery_key)
+    try:
+        email_sent = await send_report_email(
+            report_path,
+            stats,
+            delivery_key=job.delivery_key,
+        )
+    except Exception as exc:
+        store.record_delivery_failure(job.delivery_key, exc, rendered=rendered)
+        run_audit.event(
+            "report_outbox",
+            "send_failed",
+            f"报告任务 {job.delivery_key[:12]} 邮件失败，已保留报告制品",
+        )
+        raise
     stats["email_sent"] = email_sent
-    if config.PIPELINE_MODE != "legacy":
-        # 开启邮件时，只有实际发送成功才算交付；关闭邮件时仍保留原有的
-        # “生成本地报告即交付”语义。
-        if email_sent or not config.EMAIL_PUSH_ENABLED:
-            orchestrator.store.mark_reported(
-                orchestrator.pending_delivery, Path(report_path)
+    if email_sent:
+        store.mark_delivery_delivered(job.delivery_key, report_path)
+    else:
+        store.record_delivery_failure(
+            job.delivery_key,
+            "SMTP 未确认发送，保留为待交付",
+            rendered=rendered,
+        )
+    return stats
+
+
+async def _run_pipeline_once() -> dict:
+    """执行一次流水线；研究检查点与正式交付使用独立状态。"""
+
+    from run_audit import run_audit
+
+    run_audit.reset()
+    _check_env()
+    _print_model_banner()
+    if config.PIPELINE_MODE == "legacy":
+        from agents.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator()
+    else:
+        from agents.paradigm_orchestrator import ParadigmOrchestrator
+        from reports.paradigm_generator import ParadigmReportGenerator
+
+        orchestrator = ParadigmOrchestrator()
+        generator = ParadigmReportGenerator()
+        pending_job = orchestrator.store.load_pending_report_job()
+        if pending_job is not None:
+            logger.warning(
+                "发现未完成交付 %s（状态=%s），先复用研究结果完成报告/邮件",
+                pending_job.delivery_key[:12],
+                pending_job.status,
             )
+            await _deliver_paradigm_job(
+                orchestrator.store,
+                generator,
+                pending_job,
+                recovered=True,
+            )
+            run_audit.reset()
+            run_audit.event(
+                "report_outbox",
+                "recovered",
+                f"已完成历史待交付任务 {pending_job.delivery_key[:12]}",
+            )
+
+    stats = await orchestrator.run()
+    if config.PIPELINE_MODE != "legacy":
+        report_date = datetime.now().astimezone().strftime("%Y-%m-%d")
+        job = orchestrator.store.enqueue_report(
+            orchestrator.pending_delivery,
+            stats,
+            report_date=report_date,
+        )
+        return await _deliver_paradigm_job(
+            orchestrator.store,
+            generator,
+            job,
+            recovered=False,
+        )
+
+    report_path = stats.get("report_path")
+    if not report_path:
+        report_path = await orchestrator.report_gen.generate(
+            orchestrator.store.get_today_projects(),
+            orchestrator.store.get_stats(),
+            stats,
+        )
+        stats["report_path"] = str(report_path)
+
+    audit_summary = run_audit.write(stats)
+    stats.update(audit_summary)
+    stats["audit_attachments"] = [
+        audit_summary["audit_markdown_path"],
+        "logs/current_run.log",
+    ]
+    from notifications.email_notifier import send_report_email
+
+    stats["email_sent"] = await send_report_email(Path(report_path), stats)
     return stats
 
 
 async def run_pipeline() -> dict:
-    """执行流水线；失败时回滚本次状态，保证修复后可以完整重试。"""
-    db_path = (
-        config.DB_PATH
-        if config.PIPELINE_MODE == "legacy"
-        else config.PARADIGM_DB_PATH
-    )
-    existed_before = db_path.exists()
-    with tempfile.TemporaryDirectory(prefix="ai-sourcing-state-") as directory:
-        backup_path = Path(directory) / db_path.name
-        if existed_before:
-            shutil.copy2(db_path, backup_path)
-        try:
-            return await _run_pipeline_once()
-        except Exception:
-            logger.exception("本次任务失败，正在回滚本次数据库状态")
-            from run_audit import run_audit
+    """执行流水线；失败时保留研究检查点和未完成交付供下次续跑。"""
 
-            run_audit.event("pipeline", "failed", "本轮失败并回滚数据库状态")
+    try:
+        with _pipeline_lock():
+            return await _run_pipeline_once()
+    except Exception:
+        logger.exception("本次任务失败；保留已完成研究检查点供下次续跑")
+        from run_audit import run_audit
+
+        try:
+            run_audit.event(
+                "pipeline",
+                "failed",
+                "本轮失败；研究检查点未回滚，未成功发送的报告仍处于待交付状态",
+            )
             run_audit.write(
                 run_audit.last_stats
                 or {"pipeline_mode": config.PIPELINE_MODE},
                 status="failed",
             )
-            if existed_before:
-                shutil.copy2(backup_path, db_path)
-            else:
-                db_path.unlink(missing_ok=True)
-            raise
+        except Exception:
+            # 审计属于故障证据，写盘失败必须可见，但不能覆盖原始业务异常。
+            logger.exception("失败审计写盘失败")
+        raise
 
 
 async def regenerate_report() -> dict:
-    """仅重新生成报告（不拉取新数据）"""
+    """续投待交付任务，或基于最近已交付候选重新生成报告。"""
+    with _pipeline_lock():
+        return await _regenerate_report_once()
+
+
+async def _regenerate_report_once() -> dict:
     from run_audit import run_audit
 
     run_audit.reset()
@@ -210,6 +420,15 @@ async def regenerate_report() -> dict:
         from reports.paradigm_generator import ParadigmReportGenerator
         store = ParadigmStore()
         generator = ParadigmReportGenerator()
+        pending_job = store.load_pending_report_job()
+        if pending_job is not None:
+            logger.info(
+                "--report 发现待交付任务 %s，优先复用研究快照/报告制品续投",
+                pending_job.delivery_key[:12],
+            )
+            return await _deliver_paradigm_job(
+                store, generator, pending_job, recovered=True
+            )
         candidates = store.latest_reported_candidates()
         stats = store.stats()
         stats["new_paradigms"] = sum(
@@ -295,7 +514,7 @@ def main() -> None:
     parser.add_argument(
         "--report",
         action="store_true",
-        help="不拉取新数据，重新生成最近报告并按配置发送邮件",
+        help="优先续投失败报告；否则不拉取新数据，重生成最近报告并发送邮件",
     )
     parser.add_argument(
         "--doctor",

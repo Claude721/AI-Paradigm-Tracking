@@ -181,6 +181,7 @@ SMTP_FROM=完整发件邮箱
 SMTP_TO=你的收件邮箱
 SMTP_USE_SSL=true
 SMTP_USE_STARTTLS=false
+EMAIL_MAX_ATTACHMENT_BYTES=10000000
 ```
 
 常见服务器：
@@ -201,6 +202,8 @@ SMTP_USE_STARTTLS=true
 ```
 
 Gmail 需要先启用两步验证，再生成应用密码。
+
+`EMAIL_MAX_ATTACHMENT_BYTES` 是单份报告正文的安全上限，不包含小型审计附件。超过上限时任务会明确失败并保留 outbox，不会把候选标记为已交付；应先检查报告异常膨胀的原因，不建议直接无限调大。
 
 ## D. Rubric 与运行熔断
 
@@ -223,7 +226,8 @@ PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
 PARADIGM_SEED_ARXIV_IDS=
 PARADIGM_RESEARCHER_PROFILE_LIMIT=6
 PARADIGM_RUN_BUDGET_SECONDS=3900
-PARADIGM_STAGE_RESERVE_SECONDS=600
+PARADIGM_STAGE_RESERVE_SECONDS=1200
+PARADIGM_REPORT_TIMEOUT_SECONDS=1200
 PARADIGM_ANALYSIS_BATCH_SIZE=6
 PARADIGM_DEEP_BATCH_SIZE=1
 ```
@@ -232,7 +236,7 @@ PARADIGM_DEEP_BATCH_SIZE=1
 
 五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版 `PARADIGM_MIN_*` 与 `PARADIGM_MAX_*` 已停用，GitHub 中即使残留也不会影响新逻辑。
 
-`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制一次云端运行的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后生成本期报告并发送邮件，剩余项保留为 backlog。GitHub job 的硬超时为 90 分钟，推荐软预算 `3900` 秒，最多不要超过 `4500` 秒。`PARADIGM_ANALYSIS_BATCH_SIZE` 与 `PARADIGM_DEEP_BATCH_SIZE` 只是检查点粒度，不是 Top-K。
+`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后，剩余项保留为 backlog。研究完成后候选快照先进入持久化 outbox，报告器再使用独立的 `PARADIGM_REPORT_TIMEOUT_SECONDS` 完成写稿。GitHub job 的硬超时为 90 分钟，默认研究预算 `3900` 秒、报告上限 `1200` 秒；不要把两者同时继续调高。`PARADIGM_STAGE_RESERVE_SECONDS` 用于研究阶段内部留出深挖/收尾余量；`PARADIGM_ANALYSIS_BATCH_SIZE` 与 `PARADIGM_DEEP_BATCH_SIZE` 只是检查点粒度，不是 Top-K。
 
 第一次运行前必须先做专用 smoke test。它每个接口只发有总时限的最小请求、模型只要求回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。探针不导入或调用生产召回器：arXiv 只查一个稳定 ID，官方研究页只取一个索引页，RSS/Follow Builders 只取一个 Feed，GitHub 只发一次 Search，OpenAlex/OpenReview 也各只请求一页。它不会执行领域、人物、报告、详情页、cursor 或 offset 分页。
 

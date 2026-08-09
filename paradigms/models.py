@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
+from urllib.parse import urlsplit
 
 
 class EvidenceType(str, Enum):
@@ -24,6 +26,43 @@ class EvidenceType(str, Enum):
     COMMUNITY_DISCUSSION = "community_discussion"
     SECONDARY_INTERPRETATION = "secondary_interpretation"
     PRODUCT_ADOPTION = "product_adoption"
+
+
+def safe_public_contact_target(label: str, target: str) -> str:
+    """过滤旧状态或外部资料中不安全/格式异常的职业联系入口。"""
+
+    value = str(target).strip()
+    if label == "email":
+        return (
+            value
+            if re.fullmatch(
+                r"[^@\s<>()[\]]+@[^@\s<>()[\]]+\.[^@\s<>()[\]]+",
+                value,
+            )
+            else ""
+        )
+    if any(character.isspace() for character in value) or any(
+        character in value for character in "<>\\"
+    ):
+        return ""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return ""
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
+        return ""
+    hostname = parsed.hostname.casefold()
+    if parsed.username or parsed.password:
+        return ""
+    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(
+        ".local"
+    ):
+        return ""
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return value
+    return value if address.is_global else ""
 
 
 @dataclass
@@ -82,10 +121,37 @@ class ResearcherProfile:
     @property
     def public_contacts(self) -> dict[str, str]:
         """只输出已由公开来源返回的联系方式，不猜测邮箱。"""
-        contacts = dict(self.profile_urls)
+        contacts = {
+            label: safe
+            for label, value in self.profile_urls.items()
+            if (safe := safe_public_contact_target(label, value))
+        }
         if self.public_email and self.public_email_source:
-            contacts["email"] = self.public_email
+            email = safe_public_contact_target("email", self.public_email)
+            if email:
+                contacts["email"] = email
         return contacts
+
+    @property
+    def contact_lookup_completed(self) -> bool:
+        """身份种子不等于完成过公开联系入口检索。"""
+
+        if self.public_contacts:
+            return True
+        completed_markers = (
+            "已检索",
+            "检索失败",
+            "检索返回",
+            "已检查公开个人主页",
+            "个人主页返回",
+            "个人主页读取失败",
+        )
+        return any(
+            any(marker in note for marker in completed_markers)
+            and "未配置" not in note
+            and "未执行" not in note
+            for note in self.contact_search_notes
+        )
 
 
 @dataclass

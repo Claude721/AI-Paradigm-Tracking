@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,19 @@ from paradigms.models import (
 )
 
 
+@dataclass
+class ReportOutboxJob:
+    delivery_key: str
+    report_date: str
+    report_name: str
+    status: str
+    candidates: list[ParadigmCandidate]
+    stats: dict
+    report_content: str = ""
+    attempt_count: int = 0
+    last_error: str = ""
+
+
 class ParadigmStore:
     def __init__(self, db_path: Path | str | None = None):
         self.db_path = Path(db_path) if db_path else config.PARADIGM_DB_PATH
@@ -28,7 +42,8 @@ class ParadigmStore:
 
     @contextmanager
     def _connect(self):
-        connection = sqlite3.connect(self.db_path)
+        connection = sqlite3.connect(self.db_path, timeout=30)
+        connection.execute("PRAGMA busy_timeout=30000")
         try:
             yield connection
             connection.commit()
@@ -69,7 +84,22 @@ class ParadigmStore:
                     payload_json TEXT NOT NULL,
                     delivered_at TEXT NOT NULL,
                     report_kind TEXT NOT NULL,
+                    delivery_key TEXT NOT NULL DEFAULT '',
                     UNIQUE(paradigm_key, report_signature)
+                );
+                CREATE TABLE IF NOT EXISTS report_outbox (
+                    delivery_key TEXT PRIMARY KEY,
+                    report_date TEXT NOT NULL,
+                    report_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    candidate_payload_json TEXT NOT NULL,
+                    stats_json TEXT NOT NULL,
+                    report_content TEXT NOT NULL DEFAULT '',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    delivered_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS paradigm_evidence (
                     paradigm_key TEXT NOT NULL,
@@ -86,8 +116,21 @@ class ParadigmStore:
                     ON evidence_state(last_seen_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_paradigm_score
                     ON paradigms(total_score DESC);
+                CREATE INDEX IF NOT EXISTS idx_report_outbox_status
+                    ON report_outbox(status, created_at);
                 """
             )
+            # Version 3 adds a delivery identifier to legacy delivery rows.
+            # CREATE TABLE IF NOT EXISTS does not add columns to an existing table.
+            delivery_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(report_deliveries)")
+            }
+            if "delivery_key" not in delivery_columns:
+                conn.execute(
+                    "ALTER TABLE report_deliveries "
+                    "ADD COLUMN delivery_key TEXT NOT NULL DEFAULT ''"
+                )
 
     def is_bootstrap_required(self) -> bool:
         """空状态或覆盖地图升级时使用较长发现窗口。"""
@@ -262,6 +305,195 @@ class ParadigmStore:
                     candidate.report_kind = "new"
                 selected.append(candidate)
         return selected
+
+    def enqueue_report(
+        self,
+        candidates: list[ParadigmCandidate],
+        stats: dict,
+        *,
+        report_date: str,
+    ) -> ReportOutboxJob:
+        """Durably record research-ready material before report rendering.
+
+        The delivery key is deterministic for a date and candidate-signature set.
+        Retrying the same weekly result therefore reuses one outbox item instead of
+        creating another email after a renderer or SMTP failure.
+        """
+
+        report_name = f"paradigm_radar_{report_date}.md"
+        identity = {
+            "report_date": report_date,
+            "candidates": sorted(
+                (candidate.key, candidate.report_signature)
+                for candidate in candidates
+            ),
+        }
+        # 空报告同样是一项研究结果，但同一天可能先经历一次覆盖不完整的
+        # 运行、随后又完成补跑。没有候选签名可区分这两种结果时，把覆盖和
+        # backlog 摘要纳入幂等键；完全相同的重跑仍不会重复发信。
+        if not candidates:
+            identity["empty_result_basis"] = {
+                key: stats.get(key)
+                for key in (
+                    "origin_count",
+                    "planned_analysis_count",
+                    "analysis_completed_count",
+                    "pending_work_count",
+                    "run_incomplete",
+                    "frontier_coverage",
+                )
+            }
+        delivery_key = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        candidate_payload = json.dumps(
+            [candidate.to_dict() for candidate in candidates],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        stats_payload = json.dumps(stats, ensure_ascii=False, sort_keys=True)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO report_outbox (
+                    delivery_key, report_date, report_name, status,
+                    candidate_payload_json, stats_json, created_at, updated_at
+                ) VALUES (?, ?, ?, 'pending_render', ?, ?, ?, ?)
+                ON CONFLICT(delivery_key) DO UPDATE SET
+                    candidate_payload_json=CASE
+                        WHEN report_outbox.status = 'delivered'
+                            THEN report_outbox.candidate_payload_json
+                        ELSE excluded.candidate_payload_json
+                    END,
+                    stats_json=CASE
+                        WHEN report_outbox.status = 'delivered'
+                            THEN report_outbox.stats_json
+                        ELSE excluded.stats_json
+                    END,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    delivery_key,
+                    report_date,
+                    report_name,
+                    candidate_payload,
+                    stats_payload,
+                    now,
+                    now,
+                ),
+            )
+        job = self.get_report_job(delivery_key)
+        assert job is not None
+        return job
+
+    def get_report_job(self, delivery_key: str) -> ReportOutboxJob | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT delivery_key, report_date, report_name, status,
+                       candidate_payload_json, stats_json, report_content,
+                       attempt_count, last_error
+                FROM report_outbox WHERE delivery_key=?
+                """,
+                (delivery_key,),
+            ).fetchone()
+        return _report_job_from_row(row) if row else None
+
+    def load_pending_report_job(self) -> ReportOutboxJob | None:
+        """Return the oldest research-ready report that is not yet delivered."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT delivery_key, report_date, report_name, status,
+                       candidate_payload_json, stats_json, report_content,
+                       attempt_count, last_error
+                FROM report_outbox
+                WHERE status != 'delivered'
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+        return _report_job_from_row(row) if row else None
+
+    def save_rendered_report(self, delivery_key: str, content: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE report_outbox
+                SET report_content=?, status='rendered', last_error='', updated_at=?
+                WHERE delivery_key=? AND status != 'delivered'
+                """,
+                (content, now, delivery_key),
+            )
+
+    def begin_delivery_attempt(self, delivery_key: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE report_outbox
+                SET status='sending', attempt_count=attempt_count + 1,
+                    last_error='', updated_at=?
+                WHERE delivery_key=? AND status != 'delivered'
+                """,
+                (now, delivery_key),
+            )
+
+    def record_delivery_failure(
+        self, delivery_key: str, error: Exception | str, *, rendered: bool
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        retry_status = "rendered" if rendered else "pending_render"
+        safe_error = _safe_error_text(error)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE report_outbox
+                SET status=?, last_error=?, updated_at=?
+                WHERE delivery_key=? AND status != 'delivered'
+                """,
+                (retry_status, safe_error, now, delivery_key),
+            )
+
+    def mark_delivery_delivered(
+        self, delivery_key: str, report_path: Path
+    ) -> None:
+        """Atomically mark the outbox item and its route signatures delivered."""
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT candidate_payload_json FROM report_outbox
+                WHERE delivery_key=?
+                """,
+                (delivery_key,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"不存在交付任务: {delivery_key}")
+            candidates = [
+                candidate_from_dict(value) for value in json.loads(row[0])
+            ]
+            for candidate in candidates:
+                self._mark_candidate_reported(
+                    conn,
+                    candidate,
+                    report_path,
+                    now,
+                    delivery_key=delivery_key,
+                )
+            conn.execute(
+                """
+                UPDATE report_outbox
+                SET status='delivered', delivered_at=?, updated_at=?,
+                    last_error='', report_content=''
+                WHERE delivery_key=?
+                """,
+                (now, now, delivery_key),
+            )
 
     def attach_history(
         self, candidates: list[ParadigmCandidate]
@@ -442,53 +674,124 @@ class ParadigmStore:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             for candidate in candidates:
-                conn.execute(
-                    """
-                    UPDATE paradigms
-                    SET last_reported_signature=?, last_reported_at=?
-                    WHERE paradigm_key=?
-                    """,
-                    (candidate.report_signature, now, candidate.key),
+                self._mark_candidate_reported(
+                    conn, candidate, report_path, now, delivery_key=""
                 )
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO report_deliveries (
-                        paradigm_key, report_signature, report_path, payload_json,
-                        delivered_at, report_kind
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        candidate.key,
-                        candidate.report_signature,
-                        str(report_path),
-                        json.dumps(candidate.to_dict(), ensure_ascii=False, sort_keys=True),
-                        now,
-                        candidate.report_kind,
-                    ),
-                )
+
+    @staticmethod
+    def _mark_candidate_reported(
+        conn: sqlite3.Connection,
+        candidate: ParadigmCandidate,
+        report_path: Path,
+        delivered_at: str,
+        *,
+        delivery_key: str,
+    ) -> None:
+        conn.execute(
+            """
+            UPDATE paradigms
+            SET last_reported_signature=?, last_reported_at=?
+            WHERE paradigm_key=?
+            """,
+            (candidate.report_signature, delivered_at, candidate.key),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO report_deliveries (
+                paradigm_key, report_signature, report_path, payload_json,
+                delivered_at, report_kind, delivery_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                candidate.key,
+                candidate.report_signature,
+                str(report_path),
+                json.dumps(candidate.to_dict(), ensure_ascii=False, sort_keys=True),
+                delivered_at,
+                candidate.report_kind,
+                delivery_key,
+            ),
+        )
 
     def stats(self) -> dict[str, int]:
         with self._connect() as conn:
             paradigms = conn.execute("SELECT COUNT(*) FROM paradigms").fetchone()[0]
             evidence = conn.execute("SELECT COUNT(*) FROM evidence_state").fetchone()[0]
             deliveries = conn.execute("SELECT COUNT(*) FROM report_deliveries").fetchone()[0]
-        return {"paradigms": paradigms, "evidence": evidence, "deliveries": deliveries}
+            pending_deliveries = conn.execute(
+                "SELECT COUNT(*) FROM report_outbox WHERE status != 'delivered'"
+            ).fetchone()[0]
+        return {
+            "paradigms": paradigms,
+            "evidence": evidence,
+            "deliveries": deliveries,
+            "pending_deliveries": pending_deliveries,
+        }
 
     def latest_reported_candidates(self, limit: int = 20) -> list[ParadigmCandidate]:
         with self._connect() as conn:
-            rows = conn.execute(
+            latest = conn.execute(
                 """
-                SELECT payload_json FROM report_deliveries
-                WHERE report_path = (
-                    SELECT report_path FROM report_deliveries
-                    ORDER BY delivered_at DESC LIMIT 1
-                )
-                ORDER BY delivered_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+                SELECT delivery_key, report_path FROM report_deliveries
+                ORDER BY delivered_at DESC LIMIT 1
+                """
+            ).fetchone()
+            if latest is None:
+                return []
+            delivery_key, report_path = latest
+            if delivery_key:
+                rows = conn.execute(
+                    """
+                    SELECT payload_json FROM report_deliveries
+                    WHERE delivery_key=?
+                    ORDER BY delivered_at DESC LIMIT ?
+                    """,
+                    (delivery_key, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT payload_json FROM report_deliveries
+                    WHERE report_path=?
+                    ORDER BY delivered_at DESC LIMIT ?
+                    """,
+                    (report_path, limit),
+                ).fetchall()
         return [candidate_from_dict(json.loads(row[0])) for row in rows]
+
+
+def _report_job_from_row(row: tuple) -> ReportOutboxJob:
+    return ReportOutboxJob(
+        delivery_key=str(row[0]),
+        report_date=str(row[1]),
+        report_name=str(row[2]),
+        status=str(row[3]),
+        candidates=[candidate_from_dict(value) for value in json.loads(row[4])],
+        stats=dict(json.loads(row[5]) or {}),
+        report_content=str(row[6] or ""),
+        attempt_count=int(row[7] or 0),
+        last_error=str(row[8] or ""),
+    )
+
+
+def _safe_error_text(error: Exception | str) -> str:
+    value = str(error).replace("\n", " ")
+    for name in (
+        "LLM_API_KEY",
+        "SUB_AGENT_API_KEY",
+        "MAIN_AGENT_API_KEY",
+        "OPENALEX_API_KEY",
+        "SEMANTIC_SCHOLAR_API_KEY",
+        "GITHUB_TOKEN",
+        "TWITTER_BEARER_TOKEN",
+        "TAVILY_API_KEY",
+        "REDDIT_CLIENT_SECRET",
+        "SMTP_PASSWORD",
+    ):
+        secret = str(getattr(config, name, "") or "")
+        if len(secret) >= 6:
+            value = value.replace(secret, "***")
+    return value[:500]
 
 
 def _content_signature(item: TechnicalEvidence) -> str:

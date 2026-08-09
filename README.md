@@ -21,7 +21,7 @@
           ↓
  从低分辨率运行图递进构建技术心智模型
           ↓
- 研究总编辑合并技术路线并生成每周 Memo
+ 研究结果持久化 → 研究总编辑生成 Memo → 邮件 outbox 交付
 ```
 
 信源被分成三类，职责不能混用：
@@ -52,11 +52,11 @@ Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，�
 
 ## 每周交付物
 
-报告文件位于 `reports/output/paradigm_radar_YYYY-MM-DD.md`。候选通过初筛后会调用 [`technical-mental-model`](skills/technical-mental-model/SKILL.md)：先选择一条能统摄技术的训练、推理、表示或行动流程，用二到四句建立低分辨率运行图，再沿真正改变理解的接口逐层提高分辨率并纠正错误直觉。研究总编辑据此写约 500 字的本期 Memo，并按共同 background 把多篇工作组织成技术路线。内部脚手架不会作为固定字段输出，完整方法见 [从低分辨率到高分辨率的技术心智模型写作法](docs/MENTAL_MODEL_WRITING_METHOD.md)。正文必须用中文转述；论文名和必要术语可以保留英文，但英文摘要或长句会触发自动重写，重写仍不合格则任务失败且不发送邮件。
+报告文件位于 `reports/output/paradigm_radar_YYYY-MM-DD.md`。候选通过初筛后会调用 [`technical-mental-model`](skills/technical-mental-model/SKILL.md)：先选择一条能统摄技术的训练、推理、表示或行动流程，用二到四句建立低分辨率运行图，再沿真正改变理解的接口逐层提高分辨率并纠正错误直觉。研究总编辑据此写约 500 字的本期 Memo，并按共同 background 把多篇工作组织成技术路线。内部脚手架不会作为固定字段输出，完整方法见 [从低分辨率到高分辨率的技术心智模型写作法](docs/MENTAL_MODEL_WRITING_METHOD.md)。每条路线还必须用一小段 `讨论势能判断` 交付“克制结论—客观依据—覆盖边界”：说明非作者主体在哪个平台讨论了什么、是否出现复现或采用，以及当前为什么只能判断为单点提出、开始承接、多团队扩散或证据不足；不展示内部评分。正文必须用中文转述；论文名和必要术语可以保留英文，但英文摘要或长句会触发自动重写。每份非空报告还会确定性生成“关键人物与公开联系入口”和“原文与一手资料”两个索引；人物只使用已核验的公开职业信息，原文链接直接来自候选证据。人物背景/联系方式检索未完成、任一路线缺少一手 URL 或遗漏势能判断都会阻止残缺报告发送，并把候选保留到后续补全。
 
 每条重要路线都会追踪前三位作者、末位/资深作者和重点名单中的关键作者；官方项目页明确标注共同一作/通讯关系时按贡献角色组织，不能把大型合作论文写成“某位大佬的论文”。人物档案优先核验当前机构、代表作、研究连续性、个人主页、ORCID、GitHub、LinkedIn 与公开邮箱；没有公开联系方式时，报告必须保留检索过的公开来源和能够确认的最低背景。
 
-系统使用独立的 `database/paradigm_radar.db`。同一证据按 DOI、arXiv ID 或稳定 URL 去重；观察池和已报告路线会在每周重新检索近期讨论。同一范式只有在证据签名发生实质变化时才会以“进展更新”再次出现，因此相邻周不会原样重复。所有计划材料均完成判断后，如果没有候选跨过联合门槛，会正常发送一份空雷达；若仍有执行 backlog，邮件会标注“覆盖进行中”，不能把尚未分析误写成零创新。
+系统使用独立的 `database/paradigm_radar.db`。同一证据按 DOI、arXiv ID 或稳定 URL 去重；观察池和已报告路线会在每周重新检索近期讨论。同一范式只有在证据签名发生实质变化时才会以“进展更新”再次出现，因此相邻周不会原样重复。研究检查点与报告交付是两个状态：研究完成后先把候选快照写入持久化 outbox，报告生成或 SMTP 失败不会撤销已经完成的研究；下一次运行会先复用快照/已验证报告完成续投，再开始新一轮研究。SMTP 接受邮件后若进程在数据库确认前硬退出，系统按同一 `Message-ID` 至少一次重试，无法承诺所有邮箱服务商上的绝对 exactly-once。所有计划材料均完成判断后，如果没有候选跨过联合门槛，会正常发送一份空雷达；若仍有执行 backlog，邮件会标注“覆盖进行中”，不能把尚未分析误写成零创新。
 
 ## 配置与运行
 
@@ -74,7 +74,7 @@ cp .env.example .env
 ```bash
 python main.py             # 立即执行一次
 python main.py --schedule  # 每周五按配置持续运行
-python main.py --report    # 不联网，重建最近报告并按配置发送邮件
+python main.py --report    # 优先续投 outbox；否则不重新抓取，调用总编辑重建最近报告并发信
 python main.py --status    # 查看模型配置
 python main.py --doctor    # 零网络检查配置是否齐全
 python main.py --smoke-test # 小成本真实检查接口；SMTP 只登录、不发邮件
@@ -92,7 +92,8 @@ PARADIGM_RECALL_OVERLAP_DAYS=30
 PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED=true
 PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
 PARADIGM_RUN_BUDGET_SECONDS=3900
-PARADIGM_STAGE_RESERVE_SECONDS=600
+PARADIGM_STAGE_RESERVE_SECONDS=1200
+PARADIGM_REPORT_TIMEOUT_SECONDS=1200
 SCHEDULE_DAY_OF_WEEK=fri
 SCHEDULE_HOUR=9
 SCHEDULE_MINUTE=15
@@ -114,9 +115,10 @@ SMTP_FROM=your-email@qq.com
 SMTP_TO=recipient@example.com
 SMTP_USE_SSL=true
 SMTP_USE_STARTTLS=false
+EMAIL_MAX_ATTACHMENT_BYTES=10000000
 ```
 
-邮件主题会显示“新范式”和“进展更新”数量，完整 Markdown 作为附件发送。没有合格候选且研究判断已完成时会发送空雷达；若有软预算积压，主题和正文会明确标注覆盖尚未闭合。主流程失败或被 GitHub 取消时，云端另有独立失败提醒，不依赖报告文件已经生成。
+邮件主题会显示“新范式”和“进展更新”数量，完整 Markdown 作为附件发送。没有合格候选且研究判断已完成时会发送空雷达；若有软预算积压，主题和正文会明确标注覆盖尚未闭合。普通步骤失败时，云端另有独立失败提醒，不依赖报告文件已经生成；GitHub 直接取消整个 job 或达到硬超时时无法保证后置提醒仍被执行，因此仍需依赖软时间预算主动收尾。
 
 手动执行 `python main.py` 与每周调度使用同一个流水线，都会在报告生成后发送邮件。开启
 `EMAIL_PUSH_REQUIRED=true` 后，SMTP 失败会让任务明确失败，且不会登记为“已交付”。

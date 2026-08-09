@@ -22,8 +22,8 @@ from paradigms.clustering import (
 )
 from paradigms.discovery import ParadigmDiscovery
 from paradigms.enrichment import EvidenceEnricher
+from paradigms.models import EvidenceType, safe_public_contact_target
 from paradigms.scoring import is_reportable, score_candidate
-from reports.paradigm_generator import ParadigmReportGenerator
 from run_audit import run_audit
 
 logger = logging.getLogger(__name__)
@@ -45,14 +45,13 @@ class ParadigmOrchestrator:
         self.enricher = EvidenceEnricher()
         self.synthesizer = ParadigmSynthesizer()
         self.trajectory = ResearcherTrajectoryAnalyzer()
-        self.report_gen = ParadigmReportGenerator()
         # 由统一入口在邮件成功后再登记交付，避免“数据库显示已交付但邮件失败”。
         self.pending_delivery: list = []
 
     async def run(self) -> dict:
         started = datetime.now(timezone.utc)
         started_monotonic = time.monotonic()
-        run_deadline, origin_deadline, deep_deadline, effective_reserve = (
+        _, origin_deadline, deep_deadline, effective_reserve = (
             _execution_deadlines(started_monotonic)
         )
         stats: dict = {
@@ -68,6 +67,7 @@ class ParadigmOrchestrator:
         stats["supporting_count"] = len(batch.supporting)
         stats["source_counts"] = batch.source_counts
         stats["frontier_coverage"] = batch.coverage
+        run_audit.checkpoint(stats)
         run_audit.event(
             "frontier_coverage",
             (
@@ -107,7 +107,7 @@ class ParadigmOrchestrator:
         degraded_indexes = [
             name
             for name, value in academic_indexes.items()
-            if value.get("status") != "completed"
+            if value.get("status") not in {"completed", "completed_after_retry"}
         ]
         run_audit.event(
             "academic_index_coverage",
@@ -119,7 +119,8 @@ class ParadigmOrchestrator:
                     f"{value.get('queries', 0)}，requests "
                     f"{value.get('requests', 0)}，results "
                     f"{value.get('results', 0)}，429 "
-                    f"{value.get('rate_limited_requests', 0)}"
+                    f"{value.get('rate_limited_requests', 0)}，短暂故障重试 "
+                    f"{value.get('transient_retries', 0)}"
                 )
                 for name, value in academic_indexes.items()
             )
@@ -250,6 +251,7 @@ class ParadigmOrchestrator:
         stats["pending_origin_backlog_remaining"] = stats[
             "analysis_deferred_count"
         ]
+        run_audit.checkpoint(stats)
         if budget_deferred_origins:
             run_audit.event(
                 "origin_analysis_budget",
@@ -308,6 +310,7 @@ class ParadigmOrchestrator:
             budget_deferred_candidates
         )
         stats["candidate_deferred_count"] = len(deferred_candidates)
+        run_audit.checkpoint(stats)
         if budget_deferred_candidates:
             run_audit.event(
                 "deep_analysis_budget",
@@ -344,6 +347,7 @@ class ParadigmOrchestrator:
             len(refresh_safety_deferred) + len(refresh_budget_deferred)
         )
         stats["refreshed_paradigms"] = len(refreshed)
+        run_audit.checkpoint(stats)
         candidates = [*new_candidates, *refreshed]
         # Tavily/Reddit 的用户正文只供本轮综合与人物核验，之后即清除；
         # 数据库和邮件只保留链接、指标、覆盖状态和已提炼的分析。
@@ -390,6 +394,58 @@ class ParadigmOrchestrator:
             analyzed=False,
         )
         reportable = [candidate for candidate in candidates if is_reportable(candidate)]
+        delivery_profile_deferred = [
+            candidate
+            for candidate in reportable
+            if not _delivery_profile_ready(candidate)
+        ]
+        if delivery_profile_deferred:
+            deferred_keys = {
+                candidate.key for candidate in delivery_profile_deferred
+            }
+            reportable = [
+                candidate
+                for candidate in reportable
+                if candidate.key not in deferred_keys
+            ]
+            for candidate in delivery_profile_deferred:
+                candidate.status = "pending_deep"
+            run_audit.event(
+                "delivery_profile_readiness",
+                "warning",
+                f"{len(delivery_profile_deferred)} 条已通过研究准入的路线缺少"
+                "可交付人物背景/联系方式检索记录；保留 pending_deep，"
+                "不降低 Rubric 结论，也不发送残缺报告",
+            )
+        delivery_source_deferred = [
+            candidate
+            for candidate in reportable
+            if not _delivery_primary_source_ready(candidate)
+        ]
+        if delivery_source_deferred:
+            deferred_keys = {
+                candidate.key for candidate in delivery_source_deferred
+            }
+            reportable = [
+                candidate
+                for candidate in reportable
+                if candidate.key not in deferred_keys
+            ]
+            for candidate in delivery_source_deferred:
+                candidate.status = "pending_deep"
+            run_audit.event(
+                "delivery_primary_source_readiness",
+                "warning",
+                f"{len(delivery_source_deferred)} 条已通过研究准入的路线缺少"
+                "安全的一手论文/官方材料 URL；保留 pending_deep，不发送"
+                "无法追溯原文的报告",
+            )
+        stats["delivery_profile_deferred_count"] = len(
+            delivery_profile_deferred
+        )
+        stats["delivery_source_deferred_count"] = len(
+            delivery_source_deferred
+        )
         stats["reportable_count"] = len(reportable)
         reportable = self.store.prepare_report(reportable)
         reportable = sorted(
@@ -409,11 +465,15 @@ class ParadigmOrchestrator:
             stats["analysis_deferred_count"]
             or stats["candidate_deferred_count"]
             or stats["refresh_deferred_count"]
+            or stats["delivery_profile_deferred_count"]
+            or stats["delivery_source_deferred_count"]
         )
         stats["pending_work_count"] = (
             stats["analysis_deferred_count"]
             + stats["candidate_deferred_count"]
             + stats["refresh_deferred_count"]
+            + stats["delivery_profile_deferred_count"]
+            + stats["delivery_source_deferred_count"]
         )
         stats["run_budget_exhausted"] = bool(
             stats["analysis_budget_deferred_count"]
@@ -422,31 +482,21 @@ class ParadigmOrchestrator:
         )
 
         self.store.save_candidates([*candidates, *deferred_candidates])
-        report_remaining = _remaining_seconds(run_deadline)
-        if report_remaining <= 0:
-            raise TimeoutError("流水线软时间预算已用尽，未留下报告生成时间")
-        try:
-            report_path = await asyncio.wait_for(
-                self.report_gen.generate(reportable, stats),
-                timeout=report_remaining,
-            )
-        except TimeoutError as exc:
-            raise TimeoutError("报告生成超过流水线软时间预算") from exc
         # 全部发现结果已先持久化为 pending，因此这里登记的是“覆盖地图已完成
-        # 发现基线”，不是声称 backlog 已全部完成研究判断。
+        # 发现基线”，不是声称 backlog 已全部完成研究判断。报告和邮件属于
+        # 独立交付阶段，失败时不得撤销该研究检查点。
         self.store.mark_landscape_version()
         self.pending_delivery = reportable
-        stats["report_path"] = str(report_path)
         stats["saved_count"] = len(candidates) + len(deferred_candidates)
         stats["elapsed_seconds"] = (
             datetime.now(timezone.utc) - started
         ).total_seconds()
+        run_audit.checkpoint(stats)
         logger.info(
-            "范式雷达完成：原始材料=%s，范式候选=%s，交付=%s，报告=%s",
+            "范式研究阶段完成：原始材料=%s，范式候选=%s，待交付=%s",
             stats["origin_count"],
             len(candidates),
             len(reportable),
-            report_path,
         )
         return stats
 
@@ -687,7 +737,7 @@ def _execution_deadlines(started: float) -> tuple[float, float, float, int]:
     budget = config.PARADIGM_RUN_BUDGET_SECONDS
     if budget <= 0:
         return float("inf"), float("inf"), float("inf"), 0
-    # 防止极小测试预算被固定 reserve 全部吃掉；正常云端配置仍使用 600 秒。
+    # 防止极小测试预算被固定 reserve 全部吃掉；正常云端配置使用显式值。
     reserve = min(
         config.PARADIGM_STAGE_RESERVE_SECONDS,
         max(budget // 4, 1),
@@ -732,4 +782,32 @@ def _record_deferred_candidate(candidate, reason: str) -> None:
             "rubric_score": candidate.screening_rubric.get("score", 0),
             "rubric_decision": "not_executed",
         }
+    )
+
+
+def _delivery_profile_ready(candidate) -> bool:
+    """Operational completeness gate; it never changes the research Rubric."""
+
+    named = [profile for profile in candidate.researchers if profile.name.strip()]
+    if not named:
+        return False
+    return all(
+        bool(
+            profile.current_affiliation
+            or profile.background_summary
+            or profile.prior_affiliations
+            or profile.research_trajectory
+            or profile.key_person_reason
+        )
+        and profile.contact_lookup_completed
+        for profile in named
+    )
+
+
+def _delivery_primary_source_ready(candidate) -> bool:
+    return any(
+        evidence.evidence_type
+        in {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG}
+        and safe_public_contact_target("source", evidence.url)
+        for evidence in candidate.evidence
     )
