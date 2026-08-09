@@ -16,7 +16,9 @@ from paradigms.models import (
     ParadigmCandidate,
     ResearcherProfile,
     TechnicalEvidence,
+    key_researcher_profiles,
     safe_public_contact_target,
+    verified_organization_attribution,
 )
 from run_audit import run_audit
 from skills.loader import SkillLoader
@@ -257,15 +259,17 @@ class ParadigmReportGenerator:
                 f"解析零链接 {official.get('parse_zero_links', 0)}、"
                 f"详情失败 {official.get('detail_failures', 0)}"
             )
+        pending_work = int(stats.get("pending_work_count", 0) or 0)
+        run_incomplete = bool(
+            stats.get("run_incomplete") or pending_work or incomplete_parts
+        )
         coverage_note = (
-            "\n\n但本轮存在**召回覆盖未闭合**："
+            "\n\n本轮存在**召回覆盖未闭合**："
             + "；".join(incomplete_parts)
-            + "。因此这是一份运行不完整的空报告，"
-            "不能解释为这些领域没有创新；请结合随信附带的运行审计重试。"
+            + "。这会降低结论置信度，具体失败车道与重试线索见随信审计。"
             if incomplete_parts
             else ""
         )
-        pending_work = int(stats.get("pending_work_count", 0) or 0)
         if pending_work:
             progress_note = (
                 "\n\n本轮还存在**尚未完成研究判断的执行积压**："
@@ -275,23 +279,59 @@ class ParadigmReportGenerator:
                 f"待深挖 {stats.get('candidate_deferred_count', 0)} 条，"
                 f"待刷新 {stats.get('refresh_deferred_count', 0)} 条，"
                 f"待补全人物交付信息 {stats.get('delivery_profile_deferred_count', 0)} 条，"
-                f"待补全一手链接 {stats.get('delivery_source_deferred_count', 0)} 条。"
+                f"待补全一手链接 {stats.get('delivery_source_deferred_count', 0)} 条，"
+                f"因显式报告 safety limit 延后 {stats.get('report_safety_deferred_count', 0)} 条。"
                 "这些材料只是因软时间预算或显式 safety limit 延后，"
                 "并未被 Rubric 淘汰；因此本期空白不能解释为近期没有新范式。"
             )
         else:
             progress_note = ""
+        if run_incomplete:
+            memo_heading = "## 本期运行状态 Memo"
+            memo = (
+                f"本轮已发现 {stats.get('origin_count', 0)} 篇论文、Technical Report "
+                "与官方技术博客，但研究链路**尚未完成**，因此当前 0 条交付"
+                "不是技术判断，也不能解释为本周没有值得关注的新工作。系统"
+                "不会用未完成样本冒充完整周报；已发现材料与已完成研究检查点"
+                "均已保留，后续运行会从 backlog 继续。"
+            )
+            closing = (
+                "优先恢复未闭合的召回车道、机制抽取、深挖与人物/原文交付"
+                "契约；在这些步骤完成前，不对近期技术演变做负面结论。"
+            )
+        else:
+            memo_heading = "## 本期研究 Memo"
+            memo = (
+                f"本期共扫描 {stats.get('origin_count', 0)} 篇论文、Technical Report "
+                "与官方技术博客；在覆盖完整且已经完成研究判断的材料中，没有"
+                "内容同时跨过**技术外延、发布者可信度和外部承接**三道门槛。"
+                "技术范式不会按周出现，这一期不为了维持篇幅把局部 benchmark "
+                "改进或作者的宏大叙事包装成趋势。"
+            )
+            closing = (
+                "继续观察新的原始机制是否出现独立复现、跨团队承接或有内容的"
+                "二次讨论。只有当讨论开始围绕设计思想、适用边界和新能力展开，"
+                "而不只是转发论文标题时，扩散信号才真正成立。"
+            )
+        ordinary_window = stats.get(
+            "ordinary_discovery_lookback_days",
+            config.SOURCING_LOOKBACK_DAYS,
+        )
+        high_signal_window = stats.get(
+            "high_signal_discovery_lookback_days",
+            stats.get("discovery_lookback_days", ordinary_window),
+        )
         return f"""# AI 技术范式雷达
 
-> {date} · 发现窗口 {stats.get('discovery_lookback_days', config.SOURCING_LOOKBACK_DAYS)} 天
+> {date} · 普通发现 {ordinary_window} 天 · 高信号回补 {high_signal_window} 天
 
-## 本期研究 Memo
+{memo_heading}
 
-本期共扫描 {stats.get('origin_count', 0)} 篇论文、Technical Report 与官方技术博客，但在本轮已经完成研究判断的材料中，没有内容同时跨过**技术外延、发布者可信度和外部承接**三道门槛。技术范式不会按周出现，这一期不为了维持篇幅把局部 benchmark 改进或作者的宏大叙事包装成趋势。{coverage_note}{progress_note}
+{memo}{coverage_note}{progress_note}
 
 ## 接下来真正值得盯的信号
 
-继续观察新的原始机制是否出现独立复现、跨团队承接或有内容的二次讨论。只有当讨论开始围绕设计思想、适用边界和新能力展开，而不只是转发论文标题时，扩散信号才真正成立。
+{closing}
 """
 
 def _candidate_dossier(item: ParadigmCandidate) -> dict:
@@ -323,6 +363,7 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         "open_questions": item.open_questions,
         "publisher_tier": item.publisher_tier,
         "publisher_evidence": item.publisher_evidence,
+        "verified_organization_attribution": verified_organization_attribution(item),
         "admission_reason": item.admission_reason,
         "is_formal_technical_report": item.is_formal_technical_report,
         "marketing_overclaim_risk": item.marketing_overclaim_risk,
@@ -338,9 +379,10 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         "evidence": [_evidence_dossier(value) for value in item.evidence[:20]],
         "researchers": [
             _researcher_dossier(value)
-            for value in item.researchers[
-                : config.PARADIGM_RESEARCHER_PROFILE_LIMIT
-            ]
+            for value in key_researcher_profiles(
+                item.researchers,
+                config.PARADIGM_KEY_RESEARCHER_LIMIT,
+            )
         ],
     }
 
@@ -381,6 +423,9 @@ def _researcher_dossier(profile: ResearcherProfile) -> dict:
 def _public_stats(stats: dict) -> dict:
     keys = {
         "origin_count",
+        "ordinary_discovery_lookback_days",
+        "high_signal_discovery_lookback_days",
+        "source_counts",
         "planned_analysis_count",
         "analysis_count",
         "analysis_completed_count",
@@ -389,7 +434,10 @@ def _public_stats(stats: dict) -> dict:
         "refresh_deferred_count",
         "delivery_profile_deferred_count",
         "delivery_source_deferred_count",
+        "report_safety_deferred_count",
+        "recall_coverage_incomplete",
         "run_incomplete",
+        "result_kind",
         "candidate_extractions",
         "new_paradigms",
         "updated_paradigms",
@@ -654,12 +702,23 @@ def _researcher_profile_violations(
 
     violations = []
     grouped: OrderedDict[str, list[ResearcherProfile]] = OrderedDict()
+    organizations: dict[str, list[dict[str, str]]] = {}
     for candidate in candidates:
         route = candidate.route_family or candidate.lineage_parent or candidate.name
-        grouped.setdefault(route, []).extend(candidate.researchers)
+        grouped.setdefault(route, []).extend(
+            key_researcher_profiles(
+                candidate.researchers,
+                config.PARADIGM_KEY_RESEARCHER_LIMIT,
+            )
+        )
+        organization = verified_organization_attribution(candidate)
+        if organization:
+            organizations.setdefault(route, []).append(organization)
     for route, profiles in grouped.items():
         named = [profile for profile in profiles if profile.name.strip()]
         if not named:
+            if organizations.get(route):
+                continue
             violations.append(f"路线「{route}」缺少可核验关键人物")
             continue
         missing_background = [
@@ -700,14 +759,26 @@ def _attach_researcher_index(
         return content
     value = _without_researcher_index(content).strip()
     grouped: OrderedDict[str, list[ResearcherProfile]] = OrderedDict()
+    organizations: dict[str, list[dict[str, str]]] = {}
     for candidate in candidates:
         route = candidate.route_family or candidate.lineage_parent or candidate.name
         bucket = grouped.setdefault(route, [])
         seen = {profile.name.casefold() for profile in bucket if profile.name}
-        for profile in candidate.researchers:
+        for profile in key_researcher_profiles(
+            candidate.researchers,
+            config.PARADIGM_KEY_RESEARCHER_LIMIT,
+        ):
             if profile.name and profile.name.casefold() not in seen:
                 bucket.append(profile)
                 seen.add(profile.name.casefold())
+        organization = verified_organization_attribution(candidate)
+        if organization:
+            organization_bucket = organizations.setdefault(route, [])
+            if all(
+                item["name"].casefold() != organization["name"].casefold()
+                for item in organization_bucket
+            ):
+                organization_bucket.append(organization)
 
     lines = [
         "## 关键人物与公开联系入口",
@@ -719,10 +790,20 @@ def _attach_researcher_index(
         lines.append(f"### {_markdown_label(route)}")
         lines.append("")
         if not profiles:
-            lines.append("- 缺少可核验关键人物。")
+            organization_entries = organizations.get(route, [])
+            if organization_entries:
+                for organization in organization_entries:
+                    lines.append(
+                        f"- **{_markdown_label(organization['name'])}**（组织发布）："
+                        "一手材料未披露可可靠归因的自然人贡献角色，因此不猜测"
+                        "负责人；"
+                        f"[核验发布入口](<{organization['source_url']}>）。"
+                    )
+            else:
+                lines.append("- 缺少可核验关键人物或发布组织。")
             lines.append("")
             continue
-        for profile in profiles[: config.PARADIGM_RESEARCHER_PROFILE_LIMIT]:
+        for profile in profiles[: config.PARADIGM_KEY_RESEARCHER_LIMIT]:
             affiliation = profile.current_affiliation or "机构待进一步核验"
             background = (
                 profile.background_summary
@@ -922,8 +1003,16 @@ def _covers_researchers(
     for candidate in candidates:
         route = candidate.route_family or candidate.lineage_parent or candidate.name
         by_route.setdefault(route, set()).update(
-            profile.name for profile in candidate.researchers if profile.name
+            profile.name
+            for profile in key_researcher_profiles(
+                candidate.researchers,
+                config.PARADIGM_KEY_RESEARCHER_LIMIT,
+            )
+            if profile.name
         )
+        organization = verified_organization_attribution(candidate)
+        if not by_route[route] and organization:
+            by_route[route].add(organization["name"])
     if not candidates:
         return True
     if not by_route or any(not names for names in by_route.values()):

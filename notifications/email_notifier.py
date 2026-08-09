@@ -91,12 +91,18 @@ def _send_sync(
 
     message = EmailMessage()
     if is_paradigm:
-        progress = "｜覆盖进行中" if stats.get("run_incomplete") else ""
-        message["Subject"] = (
-            f"AI 技术范式雷达｜{report_date}｜"
-            f"{stats.get('new_paradigms', 0)} 个新范式 + "
-            f"{stats.get('updated_paradigms', 0)} 个进展{progress}"
-        )
+        if stats.get("run_incomplete"):
+            message["Subject"] = (
+                f"[研究未完成] AI 技术范式雷达｜{report_date}｜"
+                f"已交付 {stats.get('high_value_count', 0)} 条，"
+                f"待续研 {stats.get('pending_work_count', 0)} 项"
+            )
+        else:
+            message["Subject"] = (
+                f"AI 技术范式雷达｜{report_date}｜"
+                f"{stats.get('new_paradigms', 0)} 个新范式 + "
+                f"{stats.get('updated_paradigms', 0)} 个进展"
+            )
     else:
         message["Subject"] = (
             f"AI Sourcing 周报｜{report_date}｜"
@@ -111,8 +117,15 @@ def _send_sync(
         )
         message["X-AI-Radar-Delivery-Key"] = delivery_key
     if is_paradigm:
+        status_line = (
+            "本轮研究链路尚未完成；附件是进度状态/阶段性 memo，"
+            "不能把 0 条交付理解为本周没有重要技术。"
+            if stats.get("run_incomplete")
+            else "AI 技术范式雷达本期研究与交付已完成。"
+        )
         body = (
-            "AI 技术范式雷达本期报告已生成。\n\n"
+            status_line
+            + "\n\n"
             f"回看窗口：最近 {config.SOURCING_LOOKBACK_DAYS} 天\n"
             f"扫描论文/技术博客：{stats.get('origin_count', 0)}\n"
             f"首次捕捉范式：{stats.get('new_paradigms', 0)}\n"

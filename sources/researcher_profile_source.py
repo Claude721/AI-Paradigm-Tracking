@@ -35,7 +35,10 @@ class ResearcherProfileClient:
         existing: list[ResearcherProfile],
         limit: int | None = None,
     ) -> list[ResearcherProfile]:
-        limit = limit or config.PARADIGM_RESEARCHER_PROFILE_LIMIT
+        limit = limit or min(
+            config.PARADIGM_RESEARCHER_PROFILE_LIMIT,
+            config.PARADIGM_KEY_RESEARCHER_LIMIT,
+        )
         profiles = _seed_profiles(evidence, existing, limit)
 
         async with httpx.AsyncClient(
@@ -359,16 +362,24 @@ def _seed_profiles(
     ]
     has_collective_signature = len(individual_authors) != len(evidence.authors)
     selected: list[str] = []
-    # 研究负责人选择是分层配额，不是论文作者列表的机械截断：
-    # 先保留最可能主导方法的前三位，再保留末位/资深作者和名单中的长期
-    # 前沿研究者，最后补入项目页明确标注的其他贡献角色。
-    selected.extend(individual_authors[:3])
-    if (
-        len(individual_authors) > 1
-        and not has_collective_signature
-        and len(individual_authors) <= 50
-    ):
-        selected.append(individual_authors[-1])
+    # 研究负责人选择是分层配额，不是论文作者列表的机械截断：第一位具名
+    # 作者、明确通讯/负责人、重点研究者和末位资深作者各占一层；其余共同
+    # 一作只在仍有配额时补入。完整作者名单仍保留在 evidence.authors。
+    selected.extend(individual_authors[:1])
+    selected.extend(
+        name
+        for name, role in roles.items()
+        if any(
+            marker in role.casefold()
+            for marker in (
+                "通讯",
+                "corresponding",
+                "lead",
+                "负责人",
+                "资深",
+            )
+        )
+    )
     priority_names = {
         re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", value.casefold())
         for value in config.PRIORITY_RESEARCHERS
@@ -379,6 +390,21 @@ def _seed_profiles(
         if re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", name.casefold())
         in priority_names
     )
+    if (
+        len(individual_authors) > 1
+        and not has_collective_signature
+        and len(individual_authors) <= 50
+    ):
+        selected.append(individual_authors[-1])
+    selected.extend(
+        name
+        for name, role in roles.items()
+        if any(
+            marker in role.casefold()
+            for marker in ("第一作者", "共同第一", "共同一作")
+        )
+    )
+    selected.extend(individual_authors[1:3])
     selected.extend(name for name in roles if not _is_collective_author(name))
     selected = list(dict.fromkeys(name for name in selected if name))[:limit]
 
@@ -404,6 +430,11 @@ def _seed_profiles(
                 role = "前列作者/共同一作待核验"
             else:
                 role = "共同作者"
+        normalized_name = re.sub(
+            r"[^a-z0-9\u4e00-\u9fff]", "", name.casefold()
+        )
+        if normalized_name in priority_names and "重点研究者" not in role:
+            role = f"{role}/重点研究者"
         profile = by_name.setdefault(
             name.casefold(),
             ResearcherProfile(

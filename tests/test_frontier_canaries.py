@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 from database.paradigm_store import ParadigmStore
 from paradigms.clustering import cluster_extractions, is_priority_review
@@ -141,6 +143,9 @@ class FrontierCoverageTests(unittest.TestCase):
             domain_ids,
         )
         queries = " ".join(item["query"] for item in arxiv_query_plan()).casefold()
+        self.assertNotIn('all:"', queries)
+        self.assertIn('ti:"world model"', queries)
+        self.assertIn('abs:"world model"', queries)
         for marker in (
             "tactile robotics",
             "dexterous manipulation",
@@ -259,6 +264,34 @@ class FrontierCoverageTests(unittest.TestCase):
             item.extra["origin_classification_reason"],
             "report_query_unconfirmed",
         )
+
+    def test_report_recall_lane_discards_unverified_query_false_positive(self) -> None:
+        ordinary = T_REX_ATOM.replace(
+            "T-Rex: Tactile-Reactive Dexterous Manipulation",
+            "Calibration for Small Robot Policies",
+        ).replace(
+            "We introduce a vision-language-action system with asynchronous tactile feedback for dexterous robot manipulation.",
+            "We compare against a technical report and improve calibration on one benchmark.",
+        )
+        source = ArxivSource(
+            lookback_days=7,
+            high_signal_lookback_days=60,
+            seed_arxiv_ids=[],
+        )
+        source._request = AsyncMock(return_value=MagicMock(text=ordinary))
+
+        received = asyncio.run(
+            source._fetch_query(
+                MagicMock(),
+                "technical report",
+                force_technical_report=True,
+                query_group="technical_reports",
+                lookback_days=60,
+            )
+        )
+
+        self.assertEqual(received, [])
+        self.assertEqual(source.technical_query_false_positives, 1)
 
     def test_brand_named_official_document_uses_system_scope_not_title_suffix(self) -> None:
         body = " ".join(
@@ -403,6 +436,11 @@ class FrontierCoverageTests(unittest.TestCase):
             <= set(by_name)
         )
         self.assertEqual(by_name["Zekai Wang"].role, "共同第一作者")
+        focused = _seed_profiles(evidence, [], 3)
+        self.assertEqual(
+            [profile.name for profile in focused],
+            ["Dantong Niu", "Fei-Fei Li", "Trevor Darrell"],
+        )
 
     def test_collective_team_author_is_publisher_not_person_profile(self) -> None:
         evidence = TechnicalEvidence(

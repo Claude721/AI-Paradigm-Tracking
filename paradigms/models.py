@@ -154,6 +154,76 @@ class ResearcherProfile:
         )
 
 
+def key_researcher_profiles(
+    profiles: list[ResearcherProfile],
+    limit: int = 3,
+) -> list[ResearcherProfile]:
+    """选择需要承担路线归因的人物，而不是机械要求每位合作者过闸门。
+
+    一手材料明确标注的一作/通讯/负责人优先，其次是末位资深作者和已经
+    形成关键人物判断的人。若元数据没有角色，至少保留第一位具名作者。
+    这只影响人物核验与报告篇幅，不会改变完整作者名单或技术 Rubric。
+    """
+
+    named = [profile for profile in profiles if profile.name.strip()]
+    if not named:
+        return []
+    target = max(int(limit or 0), 1)
+    primary_markers = (
+        "第一作者",
+        "共同第一",
+        "共同一作",
+        "first author",
+        "lead author",
+        "通讯",
+        "corresponding",
+        "负责人",
+        "project lead",
+        "重点研究者",
+        "priority researcher",
+    )
+    senior_markers = (
+        "末位",
+        "资深",
+        "senior",
+        "principal investigator",
+        r"\bpi\b",
+    )
+
+    def matches(profile: ResearcherProfile, markers: tuple[str, ...]) -> bool:
+        role = profile.role.casefold()
+        return any(
+            re.search(marker, role) if marker.startswith("\\b") else marker in role
+            for marker in markers
+        )
+
+    selected: list[ResearcherProfile] = []
+
+    def add(profile: ResearcherProfile) -> None:
+        if (
+            len(selected) < target
+            and all(item.name.casefold() != profile.name.casefold() for item in selected)
+        ):
+            selected.append(profile)
+
+    # 每类先取一位，避免多位“前列作者/共同一作待核验”挤掉明确的资深作者。
+    primary = next((item for item in named if matches(item, primary_markers)), None)
+    senior = next((item for item in named if matches(item, senior_markers)), None)
+    if primary:
+        add(primary)
+    if senior:
+        add(senior)
+    for profile in named:
+        if profile.key_person_reason.strip():
+            add(profile)
+    for profile in named:
+        if matches(profile, primary_markers) or matches(profile, senior_markers):
+            add(profile)
+    if not selected:
+        add(named[0])
+    return selected
+
+
 @dataclass
 class ParadigmExtraction:
     evidence: TechnicalEvidence
@@ -280,6 +350,44 @@ class ParadigmCandidate:
             "evidence": [item.to_dict() for item in self.evidence],
             "researchers": [asdict(item) for item in self.researchers],
         }
+
+
+def verified_organization_attribution(
+    candidate: ParadigmCandidate,
+) -> dict[str, str]:
+    """为未披露自然人贡献结构的正式组织发布保留可核验归因。
+
+    不把组织虚构成人物，也不允许未知网页借此绕过人物契约。只有已建立
+    发布者，或已核验组织的正式技术报告，且存在安全一手 URL 时才成立。
+    """
+
+    official_organization_release = any(
+        evidence.evidence_type == EvidenceType.TECHNICAL_BLOG
+        and str(evidence.raw.get("origin_kind", "")).startswith("official_")
+        for evidence in candidate.evidence
+    )
+    if candidate.publisher_tier == "established":
+        publisher_ready = bool(
+            candidate.is_formal_technical_report or official_organization_release
+        )
+    else:
+        publisher_ready = bool(
+            candidate.publisher_tier == "verified"
+            and candidate.is_formal_technical_report
+        )
+    if not publisher_ready:
+        return {}
+    for evidence in candidate.evidence:
+        if evidence.evidence_type not in {
+            EvidenceType.PRIMARY_PAPER,
+            EvidenceType.TECHNICAL_BLOG,
+        }:
+            continue
+        organization = evidence.organization.strip()
+        source_url = safe_public_contact_target("source", evidence.url)
+        if organization and source_url:
+            return {"name": organization, "source_url": source_url}
+    return {}
 
 
 def normalize_paradigm_name(text: str) -> str:

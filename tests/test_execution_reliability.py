@@ -365,6 +365,59 @@ class ExecutionReliabilityTests(unittest.TestCase):
         )
         self.assertTrue(_delivery_profile_ready(item))
 
+    def test_non_key_coauthor_does_not_block_person_delivery_contract(self) -> None:
+        item = ParadigmCandidate(
+            key="key-person-contract",
+            name="Key person contract",
+            thesis="改变能力边界",
+            problem_shift="新的研究问题",
+            mechanism="新的训练接口",
+            researchers=[
+                ResearcherProfile(
+                    name="Lead Researcher",
+                    role="第一作者",
+                    current_affiliation="Example Lab",
+                    contact_search_notes=["已检索 OpenAlex Authors 并核验身份"],
+                ),
+                ResearcherProfile(
+                    name="Contributing Researcher",
+                    role="共同作者",
+                ),
+                ResearcherProfile(
+                    name="Senior Researcher",
+                    role="末位作者/资深作者线索",
+                    current_affiliation="Example University",
+                    contact_search_notes=["已检索 OpenAlex Authors 并核验身份"],
+                ),
+            ],
+        )
+        self.assertTrue(_delivery_profile_ready(item))
+
+    def test_verified_team_report_can_use_organization_attribution(self) -> None:
+        item = ParadigmCandidate(
+            key="team-report",
+            name="Team technical report",
+            thesis="改变系统能力边界",
+            problem_shift="新的系统问题",
+            mechanism="新的系统机制",
+            publisher_tier="established",
+            is_formal_technical_report=True,
+            evidence=[
+                TechnicalEvidence(
+                    source="arxiv",
+                    evidence_type=EvidenceType.PRIMARY_PAPER,
+                    title="Team technical report",
+                    url="https://arxiv.org/abs/2608.00008",
+                    authors=["Example Research Team"],
+                    organization="Example Research Lab",
+                )
+            ],
+        )
+        self.assertTrue(_delivery_profile_ready(item))
+
+        item.publisher_tier = "unknown"
+        self.assertFalse(_delivery_profile_ready(item))
+
     def test_primary_source_delivery_contract_rejects_local_or_missing_links(self) -> None:
         item = ParadigmCandidate(
             key="source-contract",
@@ -434,8 +487,19 @@ class ExecutionReliabilityTests(unittest.TestCase):
             patch.object(config, "PARADIGM_RUN_BUDGET_SECONDS", 3900),
             patch.object(config, "PARADIGM_STAGE_RESERVE_SECONDS", 600),
         ):
-            run, origin, deep, reserve = _execution_deadlines(100.0)
-        self.assertEqual((run, origin, deep, reserve), (4000.0, 2800.0, 3400.0, 600))
+            run, origin, deep, reserve = _execution_deadlines(100.0, 1600.0)
+        self.assertEqual((run, origin, deep, reserve), (4000.0, 3400.0, 4000.0, 600))
+
+    def test_slow_discovery_cannot_consume_the_entire_origin_stage(self) -> None:
+        with (
+            patch.object(config, "PARADIGM_RUN_BUDGET_SECONDS", 3900),
+            patch.object(config, "PARADIGM_STAGE_RESERVE_SECONDS", 1200),
+        ):
+            run, origin, deep, reserve = _execution_deadlines(100.0, 2500.0)
+        self.assertEqual(run, deep)
+        self.assertEqual(reserve, 750)
+        self.assertGreater(origin, 2500.0)
+        self.assertLess(origin, deep)
 
     def test_empty_report_discloses_runtime_backlog(self) -> None:
         content = ParadigmReportGenerator._empty_report(
@@ -488,6 +552,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
         )
         self.assertIn("database.state_migration", workflow)
         self.assertIn("PARADIGM_RUN_BUDGET_SECONDS", workflow)
+        self.assertIn("PARADIGM_KEY_RESEARCHER_LIMIT", workflow)
         self.assertIn("运行离线回归测试", workflow)
         self.assertIn("--notify-failure", workflow)
         self.assertIn("always() && failure()", workflow)

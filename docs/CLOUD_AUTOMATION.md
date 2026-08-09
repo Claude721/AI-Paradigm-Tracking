@@ -11,7 +11,7 @@
 - 报告若包含英文长段、评分表、字段拼装、缺少关键人物/公开检索记录或缺少任一路线的一手链接，会先自动重写一次；仍不合格则任务失败且不发送邮件。人物与原文索引由结构化证据确定性生成，不依赖模型抄写。
 - 成功邮件除研究 Memo 外，还会附带本轮结构化筛选审计和运行日志；审计记录信源返回量、筛选理由及各阶段 token 用量，不保存 prompt、模型正文或私有推理。
 - 去重数据库会在生产运行结束后以 `always()` 语义保存为私有 Actions artifact，包括报告/SMTP 失败后留下的研究检查点与 outbox。旧版兼容 schema 会先由应用迁移和校验，不能只因元数据版本变化就丢弃状态。除非手动勾选 `reset_state=true`，状态缺失、损坏或不兼容都会 fail closed，不会静默冷启动。
-- 工作流先运行完整离线单元测试与静态编译，再接触生产状态和真实接口。任一普通生产步骤失败时，最后的 `always() && failure()` 步骤会尝试发送独立失败提醒；GitHub 直接取消整个 job、Runner 宕机或达到 90 分钟硬超时时，任何后置步骤都无法保证执行，因此必须依靠软预算主动收尾。若运行成功但仍有 backlog，邮件主题会标注“覆盖进行中”，审计会区分 Rubric 淘汰与运行延后。
+- 工作流先运行完整离线单元测试与静态编译，再接触生产状态和真实接口。任一普通生产步骤失败时，最后的 `always() && failure()` 步骤会尝试发送独立失败提醒；GitHub 直接取消整个 job、Runner 宕机或达到 90 分钟硬超时时，任何后置步骤都无法保证执行，因此必须依靠软预算主动收尾。若运行成功但召回、研究或交付仍未闭合，邮件主题会明确标注 `[研究未完成]`，审计会区分 Rubric 淘汰与运行延后；它不能被理解为“本期无新信号”。
 
 ## 1. 私有 GitHub 仓库
 
@@ -60,13 +60,14 @@
 | `REDDIT_USER_AGENT` | 例如 `python:ai-paradigm-radar:v1.0 (by /u/你的用户名)`；不含密钥，可放 Variable |
 | `TAVILY_REQUEST_SAFETY_LIMIT` | Tavily credit 熔断；默认 `0`，搜索全部通过 Rubric 的深挖候选 |
 | `TAVILY_DISCOVERY_DOMAINS` | 默认留空执行全网发现；只有要限制 Tavily 站点时才填逗号分隔域名 |
-| `PARADIGM_RECALL_OVERLAP_DAYS` | 推荐 `30`；周报仍只交付 7 天新增，发现层重叠扫描一个月并由数据库去重 |
+| `PARADIGM_RECALL_OVERLAP_DAYS` | 推荐 `30`；只用于 Technical Report、重点研究者和官方研究入口的重叠回补，普通发现仍按 `SOURCING_LOOKBACK_DAYS` |
 | `PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED` | 推荐 `true`；启用与领域术语独立的重点研究者 arXiv 召回车道 |
-| `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS` | 推荐 `60`；状态数据库为空或覆盖地图版本变化时使用 |
-| `PARADIGM_RESEARCHER_PROFILE_LIMIT` | 推荐 `6`；覆盖前三位、末位/资深作者和重点研究者 |
+| `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS` | 推荐 `60`；状态数据库为空或覆盖地图版本变化时，只扩大上述高信号车道 |
+| `PARADIGM_RESEARCHER_PROFILE_LIMIT` | 推荐 `6`；兼容性人物档案安全上限，完整作者名单仍保留在证据中 |
+| `PARADIGM_KEY_RESEARCHER_LIMIT` | 推荐 `3`；实际核验并写入报告的一作、通讯/资深作者或重点研究者上限 |
 | `PARADIGM_*_SAFETY_LIMIT` | 可选运行熔断；默认/推荐 `0`，表示数量完全由 Rubric 结果决定 |
 | `PARADIGM_RUN_BUDGET_SECONDS` | 推荐 `3900`；在 90 分钟 Actions 硬超时前主动收尾并续存 backlog，最多不要超过 `4500` |
-| `PARADIGM_STAGE_RESERVE_SECONDS` | 推荐 `1200`；为研究阶段的深挖和检查点收尾保留余量 |
+| `PARADIGM_STAGE_RESERVE_SECONDS` | 推荐 `1200`；发现完成后从实际剩余研究预算中为深挖保留的目标余量 |
 | `PARADIGM_REPORT_TIMEOUT_SECONDS` | 推荐 `1200`；研究快照入 outbox 后，研究总编辑渲染的独立上限 |
 | `PARADIGM_ANALYSIS_BATCH_SIZE` | 推荐 `6`；机制抽取检查点粒度，不是候选上限 |
 | `PARADIGM_DEEP_BATCH_SIZE` | 推荐 `1`；深挖检查点粒度，避免半完成档案入库 |
@@ -98,7 +99,7 @@ GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留�
 - 运行审计 artifact、状态保存与失败提醒使用独立的 `always()` 语义；普通步骤失败时会尽量保留 `current_run.log`、结构化审计、outbox 和包含 Actions 链接的告警。硬取消/Runner 故障仍是平台边界，不能承诺后置步骤执行。
 - 如果连续超过 90 天没有任何可用状态 artifact，下一次生产运行会 fail closed，不会自行当作首跑。人工确认后使用 `reset_state=true` 创建新基线。
 - 代码 commit 变化不会自动丢弃旧状态；兼容的数据库 schema 会迁移。损坏或超出兼容范围时任务会失败，只有用户明确选择 `reset_state` 才冷启动。覆盖地图版本变化会保留旧去重历史并扩大为 60 天补扫。V0 阶段确需清空所有历史时才手动勾选 `reset_state`。
-- 周报没有合格路线且所有计划材料已完成判断时，仍会成功发送“空雷达”；这是研究结论。若软预算到达但仍有 backlog，则邮件与空报告必须明确写“覆盖进行中”，不能把尚未分析冒充零创新。
+- 周报没有合格路线且所有计划材料已完成判断时，仍会成功发送“空雷达”；这是研究结论。若召回覆盖、软预算、人物/一手链接契约或其他 backlog 未闭合，则邮件标题必须标为 `[研究未完成]`，附件只能称为状态/阶段性 memo，不能把尚未分析冒充零创新。
 - GitHub 公共仓库连续 60 天无活动可能停用 scheduled workflow，因此本项目建议使用私有仓库。
 - 修改工作流后，确保更改已经进入默认分支。
 - 工作流使用 Node 24 版本的 `checkout@v6`、`setup-python@v6` 与 `upload-artifact@v7`；任务不执行 git push，因此 checkout 不持久化临时凭据。

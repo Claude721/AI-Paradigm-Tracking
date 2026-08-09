@@ -5,6 +5,7 @@ import json
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 import config
-from agents.paradigm_orchestrator import _apply_safety_limit
+from agents.paradigm_orchestrator import ParadigmOrchestrator, _apply_safety_limit
 from agents.llm_utils import parse_json_object
 from database.paradigm_store import ParadigmStore
 from paradigms.analyzer import (
@@ -22,6 +23,7 @@ from paradigms.analyzer import (
     _validate_mental_model,
 )
 from paradigms.clustering import cluster_extractions
+from paradigms.discovery import ParadigmDiscovery
 from paradigms.enrichment import EvidenceEnricher
 from paradigms.models import (
     EvidenceType,
@@ -898,6 +900,37 @@ class ParadigmPipelineTests(unittest.TestCase):
                 }
             )
 
+    def test_mental_model_normalizes_semantic_status_aliases(self) -> None:
+        mental_model = {
+            "observation_axis": "沿训练信息流观察。",
+            "low_resolution_model": "先编码再预测。",
+            "decisive_intervention": "改写训练信号。",
+            "minimal_simulation": "一个样本进入编码器。",
+            "counterfactual_and_boundary": "移除信号后能力消失。",
+            "resolution_ladder": [
+                {
+                    "question": "训练事实是什么？",
+                    "answer": "使用预测损失。",
+                    "evidence_status": "source factual",
+                    "model_update": "确认训练对象。",
+                },
+                {
+                    "question": "为何可能泛化？",
+                    "answer": "这是对机制的压缩解释。",
+                    "evidence_status": "interpretation",
+                    "model_update": "补上迁移直觉。",
+                },
+            ],
+            "training_causal_chain": ["样本 → 编码 → 预测损失 → 参数更新"],
+            "runtime_causal_chain": [],
+            "unresolved_interfaces": [],
+        }
+        _validate_mental_model(mental_model)
+        self.assertEqual(
+            [item["evidence_status"] for item in mental_model["resolution_ladder"]],
+            ["source_fact", "interpretive_compression"],
+        )
+
     def test_technical_mental_model_skill_requires_progressive_correction(self) -> None:
         method = SkillLoader().load("technical-mental-model")
         self.assertIn("先建立低分辨率运行图", method)
@@ -1053,6 +1086,20 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertIn("未找到可核验的公开联系入口", content)
         self.assertIn("检索记录", content)
         self.assertIn("已检索 OpenAlex Authors", content)
+
+    def test_researcher_index_discloses_team_attribution_boundary(self) -> None:
+        item = candidate()
+        item.researchers = []
+        item.publisher_tier = "established"
+        item.is_formal_technical_report = True
+        item.evidence[0].organization = "Example Research Lab"
+        content = _attach_researcher_index(
+            "# Radar\n\n## 接下来真正值得盯的信号\n\n继续观察。",
+            [item],
+        )
+        self.assertIn("Example Research Lab", content)
+        self.assertIn("不猜测负责人", content)
+        self.assertIn(item.evidence[0].url, content)
 
     def test_momentum_dossier_excludes_self_release_and_search_index_noise(self) -> None:
         item = candidate()
@@ -1263,6 +1310,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             "2026-07-28",
             {
                 "origin_count": 0,
+                "ordinary_discovery_lookback_days": 7,
+                "high_signal_discovery_lookback_days": 60,
                 "frontier_coverage": {
                     "domains": {},
                     "recall_lanes": {
@@ -1292,10 +1341,56 @@ class ParadigmPipelineTests(unittest.TestCase):
                 },
             },
         )
-        self.assertIn("运行不完整的空报告", content)
+        self.assertIn("本期运行状态 Memo", content)
+        self.assertIn("不是技术判断", content)
         self.assertIn("priority_researchers_1", content)
         self.assertIn("openreview=partial", content)
         self.assertIn("官方入口", content)
+        self.assertIn("普通发现 7 天", content)
+        self.assertIn("高信号回补 60 天", content)
+
+    def test_discovery_assigns_long_window_only_to_high_signal_lanes(self) -> None:
+        discovery = ParadigmDiscovery(
+            broad_lookback_days=7,
+            high_signal_lookback_days=60,
+        )
+
+        self.assertEqual(discovery.arxiv.lookback_days, 7)
+        self.assertEqual(discovery.arxiv.high_signal_lookback_days, 60)
+        self.assertEqual(discovery.hf.lookback_days, 7)
+        self.assertEqual(discovery.openalex.lookback_days, 7)
+        self.assertEqual(discovery.openreview.lookback_days, 7)
+        self.assertEqual(discovery.priority_pages.lookback_days, 60)
+        self.assertEqual(discovery.evidence_sources[2].lookback_days, 60)
+
+    def test_database_reset_does_not_expand_ordinary_discovery_window(self) -> None:
+        store = MagicMock()
+        store.is_bootstrap_required.return_value = True
+        with (
+            patch(
+                "agents.paradigm_orchestrator.ParadigmStore",
+                return_value=store,
+            ),
+            patch(
+                "agents.paradigm_orchestrator.ParadigmDiscovery"
+            ) as discovery_class,
+            patch("agents.paradigm_orchestrator.ParadigmAnalyzer"),
+            patch("agents.paradigm_orchestrator.EvidenceEnricher"),
+            patch("agents.paradigm_orchestrator.ParadigmSynthesizer"),
+            patch("agents.paradigm_orchestrator.ResearcherTrajectoryAnalyzer"),
+            patch.object(config, "SOURCING_LOOKBACK_DAYS", 7),
+            patch.object(config, "PARADIGM_BOOTSTRAP_LOOKBACK_DAYS", 60),
+        ):
+            orchestrator = ParadigmOrchestrator()
+
+        self.assertTrue(orchestrator.bootstrap_mode)
+        self.assertEqual(
+            discovery_class.call_args.kwargs,
+            {
+                "broad_lookback_days": 7,
+                "high_signal_lookback_days": 60,
+            },
+        )
 
     def test_paradigm_skill_renders_json_contract(self) -> None:
         prompt = SkillLoader().render(
@@ -1510,6 +1605,33 @@ class ParadigmPipelineTests(unittest.TestCase):
             self.assertEqual(asyncio.run(source.fetch()), [])
         self.assertIn("technical_documents", source.failed_recall_lanes)
         self.assertTrue(source.executed_query_groups)
+
+    def test_arxiv_recall_lanes_apply_their_own_windows(self) -> None:
+        source = ArxivSource(
+            max_results=None,
+            lookback_days=7,
+            high_signal_lookback_days=60,
+            seed_arxiv_ids=[],
+        )
+        source._fetch_query = AsyncMock(return_value=[])
+        with patch.object(config, "PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED", False):
+            asyncio.run(source.fetch())
+
+        calls = source._fetch_query.await_args_list
+        self.assertEqual(calls[0].kwargs["query_group"], "technical_reports")
+        self.assertEqual(calls[0].kwargs["lookback_days"], 60)
+        self.assertTrue(
+            all(call.kwargs["lookback_days"] == 7 for call in calls[1:])
+        )
+        coverage = source.recall_coverage()
+        self.assertEqual(
+            coverage["technical_documents"]["lookback_days"],
+            60,
+        )
+        landscape_lane = next(
+            name for name in coverage if name.startswith("landscape:")
+        )
+        self.assertEqual(coverage[landscape_lane]["lookback_days"], 7)
 
     def test_arxiv_exact_seed_runs_before_broad_recall_and_survives_failures(
         self,
@@ -1997,6 +2119,79 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertEqual(
             call.kwargs["params"]["venueid"], "ICLR.cc/2026/Conference"
         )
+        self.assertEqual(call.kwargs["params"]["sort"], "cdate:desc")
+
+    def test_openreview_uses_submission_date_and_filters_weak_search_hits(self) -> None:
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        old_ms = int(
+            (datetime.now(timezone.utc) - timedelta(days=30)).timestamp()
+            * 1000
+        )
+
+        def note(note_id: str, title: str, abstract: str, cdate: int, tmdate: int):
+            return {
+                "id": note_id,
+                "cdate": cdate,
+                "tmdate": tmdate,
+                "content": {
+                    "title": {"value": title},
+                    "abstract": {"value": abstract},
+                    "authors": {"value": ["A. Researcher"]},
+                    "authorids": {"value": ["~A_Researcher1"]},
+                    "venueid": {"value": "ICLR.cc/2026/Conference"},
+                },
+                "details": {"replyCount": 1},
+            }
+
+        response = httpx.Response(
+            200,
+            json={
+                "notes": [
+                    note(
+                        "old-discussion",
+                        "A World Model from 2024",
+                        "world model",
+                        old_ms,
+                        now_ms,
+                    ),
+                    note(
+                        "weak-hit",
+                        "Compiler Scheduling",
+                        "An unrelated systems paper.",
+                        now_ms,
+                        now_ms,
+                    ),
+                    note(
+                        "recent-match",
+                        "Learning a World Model",
+                        "A predictive world model for control.",
+                        now_ms,
+                        now_ms,
+                    ),
+                ]
+            },
+            request=httpx.Request("GET", "https://api2.openreview.net/notes/search"),
+        )
+        transport = MagicMock()
+        transport.get = AsyncMock(return_value=response)
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        source = OpenReviewSource(
+            lookback_days=7,
+            venues=["ICLR.cc/2026/Conference"],
+            searches=["world model"],
+            limit=10,
+        )
+        with patch(
+            "sources.openreview_source.httpx.AsyncClient",
+            return_value=context,
+        ):
+            result = asyncio.run(source.fetch())
+
+        self.assertEqual([item.identifiers["openreview"] for item in result], ["recent-match"])
+        self.assertEqual(result[0].raw["origin_date_basis"], "submission_created_at")
+        self.assertEqual(source.coverage()["relevance_filtered"], 1)
 
     def test_openreview_retries_429_and_exposes_degraded_coverage(self) -> None:
         request = httpx.Request(
@@ -2036,6 +2231,38 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertEqual(transport.get.await_count, 2)
         self.assertEqual(source.coverage()["rate_limited_requests"], 1)
         self.assertEqual(source.coverage()["status"], "completed_after_retry")
+
+    def test_openreview_shared_circuit_stops_rate_limit_storm(self) -> None:
+        request = httpx.Request(
+            "GET", "https://api2.openreview.net/notes/search"
+        )
+        rate_limited = httpx.Response(
+            429,
+            headers={"Retry-After": "0"},
+            request=request,
+        )
+        transport = MagicMock()
+        transport.get = AsyncMock(return_value=rate_limited)
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=transport)
+        context.__aexit__ = AsyncMock(return_value=False)
+        source = OpenReviewSource(
+            venues=["ICLR.cc/2026/Conference", "NeurIPS.cc/2026/Conference"],
+            searches=["world model", "reasoning model"],
+            limit=2,
+            concurrency=1,
+        )
+        with (
+            patch("sources.openreview_source.httpx.AsyncClient", return_value=context),
+            patch("sources.openreview_source.asyncio.sleep", new=AsyncMock()),
+        ):
+            result = asyncio.run(source.fetch())
+
+        self.assertEqual(result, [])
+        self.assertEqual(transport.get.await_count, 3)
+        self.assertEqual(source.coverage()["status"], "rate_limited")
+        self.assertEqual(source.coverage()["failed_queries"], 1)
+        self.assertEqual(source.coverage()["not_executed_queries"], 3)
 
     def test_tavily_budget_is_shared_across_candidates(self) -> None:
         response = httpx.Response(

@@ -33,25 +33,51 @@ class DiscoveryBatch:
 
 
 class ParadigmDiscovery:
-    """发现源只允许论文和技术博客；热榜/社区只作为支持证据。"""
+    """发现源只允许论文和技术博客；热榜/社区只作为支持证据。
 
-    def __init__(self, lookback_days: int | None = None):
-        lookback = lookback_days or config.SOURCING_LOOKBACK_DAYS
-        self.lookback_days = lookback
+    普通领域召回只扫本次任务窗口；较长回补窗口仅用于正式报告、
+    重点研究者与官方研究入口。这是召回车道的语义分工，不是 Top-K。
+    """
+
+    def __init__(
+        self,
+        lookback_days: int | None = None,
+        *,
+        broad_lookback_days: int | None = None,
+        high_signal_lookback_days: int | None = None,
+    ):
+        # lookback_days 保留为旧调用方式；新编排器显式传入两层窗口。
+        legacy = lookback_days or config.SOURCING_LOOKBACK_DAYS
+        self.broad_lookback_days = max(broad_lookback_days or legacy, 1)
+        self.high_signal_lookback_days = max(
+            high_signal_lookback_days or legacy,
+            self.broad_lookback_days,
+        )
+        # 保持兼容：旧属性表示本轮最长发现窗口。
+        self.lookback_days = self.high_signal_lookback_days
         self.arxiv = ArxivSource(
             max_results=config.PARADIGM_DISCOVERY_SAFETY_LIMIT or None,
-            lookback_days=lookback,
+            lookback_days=self.broad_lookback_days,
+            high_signal_lookback_days=self.high_signal_lookback_days,
             seed_arxiv_ids=config.PARADIGM_SEED_ARXIV_IDS,
         )
-        self.hf = HuggingFacePapersSource(lookback_days=lookback)
+        self.hf = HuggingFacePapersSource(
+            lookback_days=self.broad_lookback_days
+        )
         self.follow_builders = FollowBuildersSource()
-        self.priority_pages = PriorityResearchPageSource(lookback_days=lookback)
-        self.openalex = OpenAlexSource(lookback_days=lookback)
-        self.openreview = OpenReviewSource(lookback_days=lookback)
+        self.priority_pages = PriorityResearchPageSource(
+            lookback_days=self.high_signal_lookback_days
+        )
+        self.openalex = OpenAlexSource(
+            lookback_days=self.broad_lookback_days
+        )
+        self.openreview = OpenReviewSource(
+            lookback_days=self.broad_lookback_days
+        )
         self.evidence_sources = [
             self.openalex,
             self.openreview,
-            ResearchFeedSource(lookback_days=lookback),
+            ResearchFeedSource(lookback_days=self.high_signal_lookback_days),
             self.priority_pages,
         ]
 
@@ -71,13 +97,13 @@ class ParadigmDiscovery:
             _follow_builder_blog_to_origin(item)
             for item in follow_raw
             if item.source == "follow-builders-blog"
-            and _within_lookback(item, self.lookback_days)
+            and _within_lookback(item, self.high_signal_lookback_days)
         )
         supporting.extend(
             _follow_builder_to_support(item)
             for item in follow_raw
             if item.source != "follow-builders-blog"
-            and _within_lookback(item, self.lookback_days)
+            and _within_lookback(item, self.broad_lookback_days)
         )
         for batch in native_batches:
             origins.extend(batch)
@@ -126,6 +152,15 @@ class ParadigmDiscovery:
             len(origins),
             len(supporting),
         )
+        logger.info(
+            "发现窗口与信源拆分：普通车道=%s天，高信号回补=%s天；%s",
+            self.broad_lookback_days,
+            self.high_signal_lookback_days,
+            ", ".join(
+                f"{name}={count}"
+                for name, count in sorted(source_counts.items())
+            ),
+        )
         coverage = coverage_report(
             origins,
             executed_groups=self.arxiv.executed_query_groups,
@@ -137,6 +172,21 @@ class ParadigmDiscovery:
             "arxiv": self.arxiv.coverage(),
             "openalex": self.openalex.coverage(),
             "openreview": self.openreview.coverage(),
+        }
+        coverage["recall_windows"] = {
+            "ordinary_origins_days": self.broad_lookback_days,
+            "high_signal_backfill_days": self.high_signal_lookback_days,
+            "source_windows": {
+                "arxiv_landscape": self.broad_lookback_days,
+                "arxiv_technical_documents": self.high_signal_lookback_days,
+                "arxiv_priority_researchers": self.high_signal_lookback_days,
+                "arxiv_explicit_seeds": "exact_unbounded",
+                "huggingface_daily_papers": self.broad_lookback_days,
+                "openalex": self.broad_lookback_days,
+                "openreview_submission_created_at": self.broad_lookback_days,
+                "official_research_pages": self.high_signal_lookback_days,
+                "research_feeds": self.high_signal_lookback_days,
+            },
         }
         return DiscoveryBatch(
             origins=origins,

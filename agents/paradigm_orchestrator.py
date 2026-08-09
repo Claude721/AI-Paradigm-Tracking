@@ -22,7 +22,12 @@ from paradigms.clustering import (
 )
 from paradigms.discovery import ParadigmDiscovery
 from paradigms.enrichment import EvidenceEnricher
-from paradigms.models import EvidenceType, safe_public_contact_target
+from paradigms.models import (
+    EvidenceType,
+    key_researcher_profiles,
+    safe_public_contact_target,
+    verified_organization_attribution,
+)
 from paradigms.scoring import is_reportable, score_candidate
 from run_audit import run_audit
 
@@ -33,13 +38,17 @@ class ParadigmOrchestrator:
     def __init__(self):
         self.store = ParadigmStore()
         self.bootstrap_mode = self.store.is_bootstrap_required()
-        self.discovery_lookback_days = (
+        self.ordinary_discovery_lookback_days = config.SOURCING_LOOKBACK_DAYS
+        self.high_signal_discovery_lookback_days = (
             config.PARADIGM_BOOTSTRAP_LOOKBACK_DAYS
             if self.bootstrap_mode
             else config.PARADIGM_RECALL_OVERLAP_DAYS
         )
+        # 旧统计字段保留为“本轮最长窗口”，便于历史审计兼容。
+        self.discovery_lookback_days = self.high_signal_discovery_lookback_days
         self.discovery = ParadigmDiscovery(
-            lookback_days=self.discovery_lookback_days
+            broad_lookback_days=self.ordinary_discovery_lookback_days,
+            high_signal_lookback_days=self.high_signal_discovery_lookback_days,
         )
         self.analyzer = ParadigmAnalyzer()
         self.enricher = EvidenceEnricher()
@@ -51,23 +60,49 @@ class ParadigmOrchestrator:
     async def run(self) -> dict:
         started = datetime.now(timezone.utc)
         started_monotonic = time.monotonic()
-        _, origin_deadline, deep_deadline, effective_reserve = (
-            _execution_deadlines(started_monotonic)
-        )
         stats: dict = {
             "pipeline_mode": "paradigm",
             "run_budget_seconds": config.PARADIGM_RUN_BUDGET_SECONDS,
-            "stage_reserve_seconds": effective_reserve,
         }
 
         batch = await self.discovery.run()
+        # 发现源的耗时不可预知，尤其冷启动会翻阅更长窗口。研究阶段的份额
+        # 必须在发现完成后按剩余时间重新划分，否则慢发现会把机制抽取窗口
+        # 直接吃完，形成“抓到近两万条、只分析六条”的假运行。
+        _, origin_deadline, deep_deadline, effective_reserve = (
+            _execution_deadlines(started_monotonic, time.monotonic())
+        )
+        stats["stage_reserve_seconds"] = effective_reserve
+        stats["discovery_elapsed_seconds"] = max(
+            time.monotonic() - started_monotonic,
+            0.0,
+        )
         stats["bootstrap_mode"] = self.bootstrap_mode
         stats["discovery_lookback_days"] = self.discovery_lookback_days
+        stats["ordinary_discovery_lookback_days"] = (
+            self.ordinary_discovery_lookback_days
+        )
+        stats["high_signal_discovery_lookback_days"] = (
+            self.high_signal_discovery_lookback_days
+        )
         stats["origin_count"] = len(batch.origins)
         stats["supporting_count"] = len(batch.supporting)
         stats["source_counts"] = batch.source_counts
         stats["frontier_coverage"] = batch.coverage
         run_audit.checkpoint(stats)
+        run_audit.event(
+            "recall_windows",
+            "passed",
+            (
+                f"普通发现 {self.ordinary_discovery_lookback_days} 天；"
+                f"正式报告/重点研究者/官方入口回补 "
+                f"{self.high_signal_discovery_lookback_days} 天；"
+                + ", ".join(
+                    f"{name}={count}"
+                    for name, count in sorted(batch.source_counts.items())
+                )
+            ),
+        )
         run_audit.event(
             "frontier_coverage",
             (
@@ -89,6 +124,7 @@ class ParadigmOrchestrator:
             name
             for name, value in recall_lanes.items()
             if value.get("status") == "query_failed"
+            or str(value.get("status", "")).startswith("not_executed_")
         ]
         zero_lanes = [
             name
@@ -116,7 +152,7 @@ class ParadigmOrchestrator:
                 (
                     f"{name}={value.get('status')}，"
                     f"queries {value.get('completed_queries', 0)}/"
-                    f"{value.get('queries', 0)}，requests "
+                    f"{value.get('planned_queries', value.get('queries', 0))}，requests "
                     f"{value.get('requests', 0)}，results "
                     f"{value.get('results', 0)}，429 "
                     f"{value.get('rate_limited_requests', 0)}，短暂故障重试 "
@@ -146,6 +182,16 @@ class ParadigmOrchestrator:
                 f"详情失败 {official_coverage.get('detail_failures', 0)}；"
                 f"形成原点 {official_coverage.get('evidence', 0)}"
             ),
+        )
+        domain_coverage_incomplete = any(
+            value.get("status") in {"query_failed", "not_executed"}
+            for value in (batch.coverage.get("domains") or {}).values()
+        )
+        stats["recall_coverage_incomplete"] = bool(
+            domain_coverage_incomplete
+            or failed_lanes
+            or degraded_indexes
+            or official_warning
         )
         origins, incremental = self.store.plan_origins(batch.origins)
         stats.update({f"origin_{key}": value for key, value in incremental.items()})
@@ -454,7 +500,16 @@ class ParadigmOrchestrator:
         reportable, report_deferred = _apply_safety_limit(
             reportable, config.PARADIGM_REPORT_SAFETY_LIMIT
         )
+        for candidate in report_deferred:
+            candidate.status = "pending_deep"
         stats["report_safety_deferred_count"] = len(report_deferred)
+        if report_deferred:
+            run_audit.event(
+                "report_safety_limit",
+                "warning",
+                f"{len(report_deferred)} 条已具备交付条件的路线因用户显式"
+                " report safety limit 延后；已保留 pending_deep，不能记作淘汰",
+            )
         stats["high_value_count"] = len(reportable)
         stats["new_paradigms"] = sum(item.report_kind == "new" for item in reportable)
         stats["updated_paradigms"] = sum(
@@ -462,11 +517,13 @@ class ParadigmOrchestrator:
         )
 
         stats["run_incomplete"] = bool(
-            stats["analysis_deferred_count"]
+            stats["recall_coverage_incomplete"]
+            or stats["analysis_deferred_count"]
             or stats["candidate_deferred_count"]
             or stats["refresh_deferred_count"]
             or stats["delivery_profile_deferred_count"]
             or stats["delivery_source_deferred_count"]
+            or stats["report_safety_deferred_count"]
         )
         stats["pending_work_count"] = (
             stats["analysis_deferred_count"]
@@ -474,11 +531,21 @@ class ParadigmOrchestrator:
             + stats["refresh_deferred_count"]
             + stats["delivery_profile_deferred_count"]
             + stats["delivery_source_deferred_count"]
+            + stats["report_safety_deferred_count"]
         )
         stats["run_budget_exhausted"] = bool(
             stats["analysis_budget_deferred_count"]
             or stats["candidate_budget_deferred_count"]
             or stats["refresh_budget_deferred_count"]
+        )
+        stats["result_kind"] = (
+            "partial_memo"
+            if reportable and stats["run_incomplete"]
+            else "research_incomplete"
+            if stats["run_incomplete"]
+            else "complete_memo"
+            if reportable
+            else "complete_no_signal"
         )
 
         self.store.save_candidates([*candidates, *deferred_candidates])
@@ -732,21 +799,34 @@ def _apply_safety_limit(items: list, limit: int) -> tuple[list, list]:
     return items[:limit], items[limit:]
 
 
-def _execution_deadlines(started: float) -> tuple[float, float, float, int]:
-    """为机制抽取、深挖和最终交付划分同一软时间预算。"""
+def _execution_deadlines(
+    started: float,
+    discovery_completed: float | None = None,
+) -> tuple[float, float, float, int]:
+    """发现完成后按剩余时间划分机制抽取与深挖预算。
+
+    返回值仍是 ``run/origin/deep/reserve``。deep deadline 就是研究阶段总
+    deadline；reserve 表示从剩余预算中留给深挖的时间。没有把任何候选按
+    数量截断，时间用尽的材料仍进入持久化 backlog。
+    """
     budget = config.PARADIGM_RUN_BUDGET_SECONDS
     if budget <= 0:
         return float("inf"), float("inf"), float("inf"), 0
-    # 防止极小测试预算被固定 reserve 全部吃掉；正常云端配置使用显式值。
-    reserve = min(
-        config.PARADIGM_STAGE_RESERVE_SECONDS,
-        max(budget // 4, 1),
+    discovery_completed = (
+        started if discovery_completed is None else max(discovery_completed, started)
     )
     run_deadline = started + budget
+    remaining = max(run_deadline - discovery_completed, 0.0)
+    # 配置值是深挖目标份额；若发现已经很慢，最多取剩余时间的一半，确保
+    # 机制抽取和深挖都还有机会执行，不会出现某一阶段被负 deadline 跳过。
+    reserve = min(
+        config.PARADIGM_STAGE_RESERVE_SECONDS,
+        max(int(remaining // 2), 0),
+    )
     return (
         run_deadline,
-        run_deadline - (2 * reserve),
         run_deadline - reserve,
+        run_deadline,
         reserve,
     )
 
@@ -788,9 +868,12 @@ def _record_deferred_candidate(candidate, reason: str) -> None:
 def _delivery_profile_ready(candidate) -> bool:
     """Operational completeness gate; it never changes the research Rubric."""
 
-    named = [profile for profile in candidate.researchers if profile.name.strip()]
-    if not named:
-        return False
+    key_people = key_researcher_profiles(
+        candidate.researchers,
+        config.PARADIGM_KEY_RESEARCHER_LIMIT,
+    )
+    if not key_people:
+        return bool(verified_organization_attribution(candidate))
     return all(
         bool(
             profile.current_affiliation
@@ -800,7 +883,7 @@ def _delivery_profile_ready(candidate) -> bool:
             or profile.key_person_reason
         )
         and profile.contact_lookup_completed
-        for profile in named
+        for profile in key_people
     )
 
 

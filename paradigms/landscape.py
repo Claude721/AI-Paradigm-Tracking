@@ -36,7 +36,13 @@ def arxiv_query_plan(path: str = "") -> list[dict[str, Any]]:
             for domain in domains
             for category in domain["arxiv_categories"]
         )
-        phrase_query = " OR ".join(f'all:"{_escape(phrase)}"' for phrase in phrases)
+        # all: 会把作者、注释与其他元数据中的宽泛词也当成技术
+        # 命中，在冷启动窗口会放大成数万条。普通地景车道只在
+        # 标题/摘要检索明确短语；术语之外的突破由重点作者和官方车道回补。
+        phrase_query = " OR ".join(
+            f'(ti:"{_escape(phrase)}" OR abs:"{_escape(phrase)}")'
+            for phrase in phrases
+        )
         category_query = " OR ".join(f"cat:{category}" for category in categories)
         plan.append(
             {

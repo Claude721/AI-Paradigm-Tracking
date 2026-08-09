@@ -225,6 +225,7 @@ PARADIGM_RECALL_OVERLAP_DAYS=30
 PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
 PARADIGM_SEED_ARXIV_IDS=
 PARADIGM_RESEARCHER_PROFILE_LIMIT=6
+PARADIGM_KEY_RESEARCHER_LIMIT=3
 PARADIGM_RUN_BUDGET_SECONDS=3900
 PARADIGM_STAGE_RESERVE_SECONDS=1200
 PARADIGM_REPORT_TIMEOUT_SECONDS=1200
@@ -232,11 +233,13 @@ PARADIGM_ANALYSIS_BATCH_SIZE=6
 PARADIGM_DEEP_BATCH_SIZE=1
 ```
 
-技术去留由仓库中的 `rubrics/paradigm_rubric.json` 决定；行业覆盖由 `taxonomy/frontier_landscape.json` 决定。前者维护判断问题，后者维护基础模型、推理与软件 Agent、多模态/语音/3D、具身/自动驾驶、World Model、AI4S、系统/端侧/硬件、安全等发现范围。通常两个路径都留空，直接维护仓库内版本并提交。覆盖地图的 `version` 改变后，云端会重新扫描 60 天，避免新增领域继续继承旧召回盲区。
+技术去留由仓库中的 `rubrics/paradigm_rubric.json` 决定；行业覆盖由 `taxonomy/frontier_landscape.json` 决定。前者维护判断问题，后者维护基础模型、推理与软件 Agent、多模态/语音/3D、具身/自动驾驶、World Model、AI4S、系统/端侧/硬件、安全等发现范围。通常两个路径都留空，直接维护仓库内版本并提交。覆盖地图的 `version` 改变后，高信号车道会回看 60 天，新增领域的普通术语车道仍从本次任务窗口建立基线，不在 reset 后引入数万条历史宽匹配。
 
 五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版 `PARADIGM_MIN_*` 与 `PARADIGM_MAX_*` 已停用，GitHub 中即使残留也不会影响新逻辑。
 
-`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后，剩余项保留为 backlog。研究完成后候选快照先进入持久化 outbox，报告器再使用独立的 `PARADIGM_REPORT_TIMEOUT_SECONDS` 完成写稿。GitHub job 的硬超时为 90 分钟，默认研究预算 `3900` 秒、报告上限 `1200` 秒；不要把两者同时继续调高。`PARADIGM_STAGE_RESERVE_SECONDS` 用于研究阶段内部留出深挖/收尾余量；`PARADIGM_ANALYSIS_BATCH_SIZE` 与 `PARADIGM_DEEP_BATCH_SIZE` 只是检查点粒度，不是 Top-K。
+`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后，剩余项保留为 backlog。研究完成后候选快照先进入持久化 outbox，报告器再使用独立的 `PARADIGM_REPORT_TIMEOUT_SECONDS` 完成写稿。GitHub job 的硬超时为 90 分钟，默认研究预算 `3900` 秒、报告上限 `1200` 秒；不要把两者同时继续调高。发现源完成后，系统才按实际剩余时间应用 `PARADIGM_STAGE_RESERVE_SECONDS`，从而避免长冷启动提前吃空机制抽取窗口；`PARADIGM_ANALYSIS_BATCH_SIZE` 与 `PARADIGM_DEEP_BATCH_SIZE` 只是检查点粒度，不是 Top-K。
+
+`PARADIGM_RESEARCHER_PROFILE_LIMIT` 是兼容性的档案安全上限，`PARADIGM_KEY_RESEARCHER_LIMIT` 才控制每条路线实际核验与写入报告的关键人物数。默认优先一作、官方标注的通讯/负责人、末位资深作者与重点研究者；普通共同作者仍留在论文作者名单中，但不会因缺少联系方式阻断路线交付。
 
 第一次运行前必须先做专用 smoke test。它每个接口只发有总时限的最小请求、模型只要求回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。探针不导入或调用生产召回器：arXiv 只查一个稳定 ID，官方研究页只取一个索引页，RSS/Follow Builders 只取一个 Feed，GitHub 只发一次 Search，OpenAlex/OpenReview 也各只请求一页。它不会执行领域、人物、报告、详情页、cursor 或 offset 分页。
 
@@ -252,9 +255,9 @@ SCHEDULE_TIMEZONE=Asia/Shanghai
 ```
 
 - [ ] 周报使用 7 天窗口；月度专题才改成 30 天
-- [ ] `PARADIGM_RECALL_OVERLAP_DAYS=30`：周报仍只交付 7 天新增，发现层重叠扫描一个月，由数据库去重并修复索引晚到、发布页后补报告和单车道短期失败
+- [ ] `PARADIGM_RECALL_OVERLAP_DAYS=30`：只给 Technical Report、重点研究者和官方入口做一个月回补；普通 arXiv/OpenAlex/OpenReview/HF 仍使用 `SOURCING_LOOKBACK_DAYS`
 - [ ] `PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED=true`：让重点研究者近期论文通过独立于术语的 arXiv 车道进入视野；姓名不替代技术与身份核验
-- [ ] `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60`：数据库为空或覆盖地图升级时自动建立近期基线
+- [ ] `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60`：数据库为空或覆盖地图升级时，只扩大高信号回补车道
 - [ ] 常规运行保持 `PARADIGM_SEED_ARXIV_IDS` 为空；只在精确回补/审计漏项时临时填写
 - [ ] Codex 自动任务“AI 技术范式雷达周报”保持启用
 - [ ] 不要同时长期运行 `python main.py --schedule`，避免形成两套调度

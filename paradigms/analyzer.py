@@ -5,14 +5,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 
 import config
 from agents.llm_utils import build_client, parse_json_object
 from run_audit import run_audit
 from skills.loader import SkillLoader
 
-from .models import ParadigmExtraction, TechnicalEvidence
-from .models import ParadigmCandidate, ResearcherProfile
+from .models import (
+    ParadigmCandidate,
+    ParadigmExtraction,
+    ResearcherProfile,
+    TechnicalEvidence,
+    key_researcher_profiles,
+)
 from .rubric import (
     evaluate_rubric,
     legacy_dimension_scores,
@@ -544,7 +550,10 @@ class ResearcherTrajectoryAnalyzer:
             *(
                 analyze(candidate, profile)
                 for candidate in candidates
-                for profile in candidate.researchers[:3]
+                for profile in key_researcher_profiles(
+                    candidate.researchers,
+                    config.PARADIGM_KEY_RESEARCHER_LIMIT,
+                )
             )
         )
         return candidates
@@ -869,6 +878,23 @@ def _validate_mental_model(mental_model: dict[str, object]) -> None:
         "inference",
         "unknown",
     }
+    status_aliases = {
+        "source": "source_fact",
+        "fact": "source_fact",
+        "factual": "source_fact",
+        "direct_evidence": "source_fact",
+        "source_factual": "source_fact",
+        "interpretation": "interpretive_compression",
+        "interpretive": "interpretive_compression",
+        "synthesis": "interpretive_compression",
+        "compression": "interpretive_compression",
+        "inferred": "inference",
+        "reasoning": "inference",
+        "deduction": "inference",
+        "uncertain": "unknown",
+        "unverified": "unknown",
+        "not_available": "unknown",
+    }
     for index, node in enumerate(ladder, start=1):
         if not isinstance(node, dict):
             raise ValueError(f"resolution_ladder 第 {index} 项不是结构化节点")
@@ -882,7 +908,14 @@ def _validate_mental_model(mental_model: dict[str, object]) -> None:
                 f"resolution_ladder 第 {index} 项缺少: "
                 + "、".join(missing_fields)
             )
-        if str(node["evidence_status"]).strip() not in allowed_status:
+        raw_status = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(node["evidence_status"]).strip().casefold(),
+        ).strip("_")
+        normalized_status = status_aliases.get(raw_status, raw_status)
+        node["evidence_status"] = normalized_status
+        if normalized_status not in allowed_status:
             raise ValueError(
                 f"resolution_ladder 第 {index} 项 evidence_status 无效"
             )

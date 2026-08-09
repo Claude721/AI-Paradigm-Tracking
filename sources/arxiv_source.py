@@ -53,9 +53,15 @@ class ArxivSource(BaseSource):
         max_results: int | None = None,
         lookback_days: int = 3,
         seed_arxiv_ids: list[str] | None = None,
+        *,
+        high_signal_lookback_days: int | None = None,
     ):
         self.max_results = max_results
-        self.lookback_days = lookback_days
+        self.lookback_days = max(lookback_days, 1)
+        self.high_signal_lookback_days = max(
+            high_signal_lookback_days or self.lookback_days,
+            self.lookback_days,
+        )
         self.seed_arxiv_ids = _normalize_seed_ids(
             seed_arxiv_ids
             if seed_arxiv_ids is not None
@@ -66,10 +72,12 @@ class ArxivSource(BaseSource):
         self.executed_recall_lanes: set[str] = set()
         self.failed_recall_lanes: set[str] = set()
         self.recall_lane_hits: dict[str, int] = {}
+        self.recall_lane_windows: dict[str, int | str] = {}
         self.not_executed_recall_lanes: dict[str, str] = {}
         self.planned_recall_lanes: set[str] = set()
         self.request_count = 0
         self.rate_limited_requests = 0
+        self.technical_query_false_positives = 0
         self._circuit_open = False
         self.circuit_reason = ""
 
@@ -91,6 +99,24 @@ class ArxivSource(BaseSource):
                 "technical_documents",
                 *(["explicit_seeds"] if self.seed_arxiv_ids else []),
             ]
+        )
+        self.recall_lane_windows.update(
+            {
+                **{
+                    lane: self.lookback_days
+                    for lane in landscape_lanes
+                },
+                **{
+                    lane: self.high_signal_lookback_days
+                    for lane in author_lanes
+                },
+                "technical_documents": self.high_signal_lookback_days,
+                **(
+                    {"explicit_seeds": "exact_unbounded"}
+                    if self.seed_arxiv_ids
+                    else {}
+                ),
+            }
         )
 
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
@@ -125,6 +151,7 @@ class ArxivSource(BaseSource):
                         force_technical_report=True,
                         query_group="technical_reports",
                         result_limit=self._remaining_limit(results),
+                        lookback_days=self.high_signal_lookback_days,
                     )
                     results.extend(batch)
                     self._record_lane("technical_documents", len(batch))
@@ -150,6 +177,7 @@ class ArxivSource(BaseSource):
                         str(query_spec["query"]),
                         query_group="priority_researchers",
                         result_limit=self._remaining_limit(results),
+                        lookback_days=self.high_signal_lookback_days,
                     )
                     results.extend(batch)
                     self._record_lane(lane, len(batch))
@@ -177,6 +205,7 @@ class ArxivSource(BaseSource):
                         query_group=group,
                         domain_ids=list(query_spec["domain_ids"]),
                         result_limit=self._remaining_limit(results),
+                        lookback_days=self.lookback_days,
                     )
                     results.extend(batch)
                     self.executed_query_groups.add(group)
@@ -248,6 +277,9 @@ class ArxivSource(BaseSource):
             "rate_limited_requests": self.rate_limited_requests,
             "results": sum(self.recall_lane_hits.values()),
             "circuit_open": self._circuit_open,
+            "ordinary_lookback_days": self.lookback_days,
+            "high_signal_lookback_days": self.high_signal_lookback_days,
+            "technical_query_false_positives": self.technical_query_false_positives,
         }
 
     def recall_coverage(self) -> dict[str, dict[str, object]]:
@@ -273,6 +305,10 @@ class ArxivSource(BaseSource):
                     )
                 ),
                 "hits": self.recall_lane_hits.get(lane, 0),
+                "lookback_days": self.recall_lane_windows.get(
+                    lane,
+                    self.lookback_days,
+                ),
             }
             for lane in sorted(lanes)
         }
@@ -291,11 +327,14 @@ class ArxivSource(BaseSource):
         domain_ids: list[str] | None = None,
         result_limit: int | None = None,
         ignore_lookback: bool = False,
+        lookback_days: int | None = None,
     ) -> list[RawProject]:
         """按日期窗口自适应翻页；max_results 仅作为显式 safety limit。"""
         if result_limit is not None and result_limit <= 0:
             return []
-        page_size = min(result_limit, 100) if result_limit else 100
+        # 这是传输分页大小，不是候选总量阈值。使用 500 条/页
+        # 减少请求与串行 RTT；通过车道语义闸门的结果都会入库等待 Rubric。
+        page_size = min(result_limit, 500) if result_limit else 500
         start = 0
         results: list[RawProject] = []
         while True:
@@ -310,17 +349,27 @@ class ArxivSource(BaseSource):
             response = await self._request(
                 client, query, request_size, start=start
             )
-            results.extend(
-                self._parse_atom_feed(
-                    response.text,
-                    force_technical_report=force_technical_report,
-                    query_group=query_group,
-                    domain_ids=domain_ids or [],
-                    ignore_lookback=ignore_lookback,
-                )
+            parsed = self._parse_atom_feed(
+                response.text,
+                force_technical_report=force_technical_report,
+                query_group=query_group,
+                domain_ids=domain_ids or [],
+                ignore_lookback=ignore_lookback,
+                lookback_days=lookback_days,
             )
+            if force_technical_report:
+                verified = [
+                    item
+                    for item in parsed
+                    if item.extra.get("origin_kind") == "technical_report"
+                ]
+                self.technical_query_false_positives += len(parsed) - len(verified)
+                parsed = verified
+            results.extend(parsed)
             entry_count, reached_cutoff = self._page_state(
-                response.text, ignore_lookback=ignore_lookback
+                response.text,
+                ignore_lookback=ignore_lookback,
+                lookback_days=lookback_days,
             )
             if entry_count < request_size or reached_cutoff:
                 break
@@ -424,13 +473,18 @@ class ArxivSource(BaseSource):
         raise RuntimeError("arXiv 请求重试后仍失败") from last_error
 
     def _page_state(
-        self, xml_text: str, *, ignore_lookback: bool = False
+        self,
+        xml_text: str,
+        *,
+        ignore_lookback: bool = False,
+        lookback_days: int | None = None,
     ) -> tuple[int, bool]:
         root = ET.fromstring(xml_text)
         entries = root.findall("atom:entry", ARXIV_NS)
         if ignore_lookback:
             return len(entries), False
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        effective_lookback = lookback_days or self.lookback_days
+        cutoff = datetime.now(timezone.utc) - timedelta(days=effective_lookback)
         dates = []
         for entry in entries:
             latest = _latest_entry_date(entry)
@@ -447,9 +501,11 @@ class ArxivSource(BaseSource):
         query_group: str = "",
         domain_ids: list[str] | None = None,
         ignore_lookback: bool = False,
+        lookback_days: int | None = None,
     ) -> list[RawProject]:
         root = ET.fromstring(xml_text)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        effective_lookback = lookback_days or self.lookback_days
+        cutoff = datetime.now(timezone.utc) - timedelta(days=effective_lookback)
         results: list[RawProject] = []
 
         for entry in root.findall("atom:entry", ARXIV_NS):
@@ -553,7 +609,8 @@ class ArxivSource(BaseSource):
                         "query_group": query_group,
                         "query_domain_ids": declared_domains,
                         "frontier_domains": matched_domains or declared_domains,
-                        "discovery_lookback_days": self.lookback_days,
+                        "discovery_lookback_days": effective_lookback,
+                        "recall_lane": query_group or "unclassified",
                         "explicit_seed": query_group == "explicit_seed",
                     },
                 )

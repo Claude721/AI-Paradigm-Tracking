@@ -109,6 +109,35 @@ class WeeklyPipelineTests(unittest.TestCase):
                 message.get_payload()[2].get_filename(), audit.name
             )
 
+    def test_incomplete_research_email_cannot_masquerade_as_empty_week(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "paradigm_radar_2026-08-09.md"
+            report.write_text("# 研究未完成状态", encoding="utf-8")
+            with (
+                patch.object(config, "SMTP_HOST", "smtp.example.com"),
+                patch.object(config, "SMTP_PORT", 465),
+                patch.object(config, "SMTP_USERNAME", "sender@example.com"),
+                patch.object(config, "SMTP_PASSWORD", "app-password"),
+                patch.object(config, "SMTP_FROM", "sender@example.com"),
+                patch.object(config, "SMTP_TO", ["receiver@example.com"]),
+                patch.object(config, "SMTP_USE_SSL", True),
+                patch("notifications.email_notifier.smtplib.SMTP_SSL") as smtp,
+            ):
+                _send_sync(
+                    report,
+                    {
+                        "run_incomplete": True,
+                        "pending_work_count": 88,
+                        "high_value_count": 0,
+                    },
+                )
+
+            message = (
+                smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+            )
+            self.assertIn("[研究未完成]", message["Subject"])
+            self.assertIn("不能把 0 条交付理解", message.get_body().get_content())
+
     def test_run_audit_records_usage_and_decisions_without_model_content(self) -> None:
         response = SimpleNamespace(
             usage=SimpleNamespace(

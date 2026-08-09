@@ -331,15 +331,15 @@ PARADIGM_MIN_SECONDARY_ENGAGEMENT: int = _env_int(
 
 # 周报/月度回顾的抓取时间窗口
 SOURCING_LOOKBACK_DAYS: int = max(_env_int("SOURCING_LOOKBACK_DAYS", 7), 1)
-# 定时周更保留一个月重叠发现窗口。数据库负责按证据指纹去重，因此扫描 30 天
-# 不会重复分析已处理论文，却能覆盖索引晚到、官方文章稍后补挂完整报告、Actions
-# 延迟或某条召回车道短期失败。手动 60/90 天窗口不受缩短。
+# 高信号车道的重叠回补窗口：只用于正式 Technical Report、重点
+# 研究者和官方研究入口。普通领域/聚合索引始终使用
+# SOURCING_LOOKBACK_DAYS，避免冷启动把宽关键词扩大成数万条候选。
 PARADIGM_RECALL_OVERLAP_DAYS: int = max(
     SOURCING_LOOKBACK_DAYS,
     _env_int("PARADIGM_RECALL_OVERLAP_DAYS", 30),
 )
-# 正常周更只看本周新增；数据库为空或用户显式 reset 时使用较长冷启动窗口，
-# 以免项目第一次上线时错过最近形成、但已超出 7/30 天的关键节点。
+# 数据库为空、用户 reset 或覆盖地图升级时，高信号车道使用的冷启动
+# 窗口。它不扩大普通论文聚合索引的召回窗口。
 PARADIGM_BOOTSTRAP_LOOKBACK_DAYS: int = max(
     PARADIGM_RECALL_OVERLAP_DAYS,
     _env_int("PARADIGM_BOOTSTRAP_LOOKBACK_DAYS", 60),
@@ -349,6 +349,11 @@ PARADIGM_BOOTSTRAP_LOOKBACK_DAYS: int = max(
 PARADIGM_SEED_ARXIV_IDS: list[str] = _env_csv("PARADIGM_SEED_ARXIV_IDS")
 PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
     3, min(_env_int("PARADIGM_RESEARCHER_PROFILE_LIMIT", 6), 10)
+)
+# 一条路线只核验真正承担技术归因的少数关键人物。这个上限控制外部人物
+# 检索成本，不是研究筛选阈值；完整作者名单仍保留在一手证据中。
+PARADIGM_KEY_RESEARCHER_LIMIT: int = max(
+    1, min(_env_int("PARADIGM_KEY_RESEARCHER_LIMIT", 3), 6)
 )
 PARADIGM_STATE_SCHEMA_VERSION: int = 3
 
