@@ -37,7 +37,11 @@
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # GitHub dependency-install failures still need stdlib alerts.
+    def load_dotenv(*_args, **_kwargs):
+        return False
 
 from research_watchlist import (
     default_monitored_organization_aliases,
@@ -46,7 +50,12 @@ from research_watchlist import (
     default_researcher_aliases,
 )
 
-load_dotenv()
+if os.getenv("AI_RADAR_SKIP_DOTENV", "").strip().lower() not in {
+    "1",
+    "true",
+    "yes",
+}:
+    load_dotenv()
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -322,11 +331,11 @@ PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED: bool = _env_bool(
 PARADIGM_REFRESH_SAFETY_LIMIT: int = max(
     0, _env_int("PARADIGM_REFRESH_SAFETY_LIMIT", 0)
 )
-PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS: int = _env_int(
-    "PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS", 2
+PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS: int = max(
+    1, _env_int("PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS", 2)
 )
-PARADIGM_MIN_SECONDARY_ENGAGEMENT: int = _env_int(
-    "PARADIGM_MIN_SECONDARY_ENGAGEMENT", 50
+PARADIGM_MIN_SECONDARY_ENGAGEMENT: int = max(
+    1, _env_int("PARADIGM_MIN_SECONDARY_ENGAGEMENT", 50)
 )
 
 # 周报/月度回顾的抓取时间窗口
@@ -366,6 +375,11 @@ PARADIGM_RUN_BUDGET_SECONDS: int = max(
 # 研究阶段内部的收尾余量；报告渲染已经独立使用下方超时和 durable outbox。
 PARADIGM_STAGE_RESERVE_SECONDS: int = max(
     60, _env_int("PARADIGM_STAGE_RESERVE_SECONDS", 1200)
+)
+# 每个并行发现源的墙上时间上限。它不限制召回数量；某个上游卡死时，
+# 其他来源的结果仍会进入检查点，而该来源明确记为 timed_out。
+PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS: int = max(
+    60, _env_int("PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS", 600)
 )
 PARADIGM_REPORT_TIMEOUT_SECONDS: int = max(
     60, _env_int("PARADIGM_REPORT_TIMEOUT_SECONDS", 1200)

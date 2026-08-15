@@ -55,6 +55,7 @@ class ArxivSource(BaseSource):
         seed_arxiv_ids: list[str] | None = None,
         *,
         high_signal_lookback_days: int | None = None,
+        reference_time: datetime | None = None,
     ):
         self.max_results = max_results
         self.lookback_days = max(lookback_days, 1)
@@ -66,6 +67,13 @@ class ArxivSource(BaseSource):
             seed_arxiv_ids
             if seed_arxiv_ids is not None
             else config.PARADIGM_SEED_ARXIV_IDS
+        )
+        if reference_time is not None and reference_time.tzinfo is None:
+            reference_time = reference_time.replace(tzinfo=timezone.utc)
+        self.reference_time = (
+            reference_time.astimezone(timezone.utc)
+            if reference_time is not None
+            else None
         )
         self.executed_query_groups: set[str] = set()
         self.failed_query_groups: set[str] = set()
@@ -80,6 +88,15 @@ class ArxivSource(BaseSource):
         self.technical_query_false_positives = 0
         self._circuit_open = False
         self.circuit_reason = ""
+
+    def _now(self) -> datetime:
+        """Return one injectable UTC clock for all lookback decisions.
+
+        Production callers use wall time. Date-window unit tests pass a fixed
+        reference time so CI behavior is independent of the calendar date.
+        """
+
+        return self.reference_time or datetime.now(timezone.utc)
 
     async def fetch(self) -> list[RawProject]:
         landscape_plan = arxiv_query_plan()
@@ -484,7 +501,7 @@ class ArxivSource(BaseSource):
         if ignore_lookback:
             return len(entries), False
         effective_lookback = lookback_days or self.lookback_days
-        cutoff = datetime.now(timezone.utc) - timedelta(days=effective_lookback)
+        cutoff = self._now() - timedelta(days=effective_lookback)
         dates = []
         for entry in entries:
             latest = _latest_entry_date(entry)
@@ -505,7 +522,7 @@ class ArxivSource(BaseSource):
     ) -> list[RawProject]:
         root = ET.fromstring(xml_text)
         effective_lookback = lookback_days or self.lookback_days
-        cutoff = datetime.now(timezone.utc) - timedelta(days=effective_lookback)
+        cutoff = self._now() - timedelta(days=effective_lookback)
         results: list[RawProject] = []
 
         for entry in root.findall("atom:entry", ARXIV_NS):
@@ -602,6 +619,10 @@ class ArxivSource(BaseSource):
                         "publisher_evidence": publisher_evidence,
                         "origin_kind": origin_kind,
                         "origin_priority": 3 if is_report else (2 if priority_author else 1),
+                        # 队列优先级与编辑复核资格必须分账。这个字段只表达
+                        # 署名是否命中重点研究者车道；explicit seed 本身永远
+                        # 不能因此获得研究价值背书。
+                        "priority_researcher_match": priority_author,
                         "arxiv_comment": arxiv_comment,
                         "origin_classification_reason": classification_reason,
                         "document_format": classification.document_format,

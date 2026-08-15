@@ -48,7 +48,9 @@ Product Hunt、普通 GitHub Trending 和产品热榜不再决定候选，只在
 
 Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，可长期增删问题、调整 option 权重与阶段阈值。研究池与最终去留不固定取前 100、30 或 16 个；Rubric 分数与回答只进入审计，不进入最终报告。云端单次运行另有墙上时间软预算：它只让任务在 GitHub 硬超时前分批收尾，未处理材料会保留到后续运行，不会被写成 Rubric 淘汰。
 
-行业发现范围位于 [`taxonomy/frontier_landscape.json`](taxonomy/frontier_landscape.json)。发现层不是一张关键词表，而是并行运行领域术语、重点研究者完整姓名、正式文档类型、官方研究索引、Hugging Face 策展和人工精确补录等独立车道。每次审计同时显示逐领域状态、每条召回车道和逐个官方入口健康度，避免“报告为零”掩盖某家公司页面解析失败。普通论文和学术聚合索引只扫本次任务窗口（默认 7 天）；正式 Technical Report、重点研究者和官方入口使用 30 天回补，空数据库或地图升级时仅这些高信号车道扩到 60 天。T‑Rex 与 Kimi‑K3 被保留为两类离线黄金样例，但生产逻辑没有把论文标题写成白名单。
+每个并行发现源另有独立墙上时间上限。上游卡死、请求失败与真实零命中会分别记为 `timed_out`、`query_failed` 和完成但零结果；前两者会把本轮标成覆盖未闭合，不能生成“本期没有新信号”的确定性结论。
+
+行业发现范围位于 [`taxonomy/frontier_landscape.json`](taxonomy/frontier_landscape.json)。发现层不是一张关键词表，而是并行运行领域术语、重点研究者完整姓名、正式文档类型、官方研究索引、Hugging Face 策展和人工精确补录等独立车道。每次审计同时显示逐领域状态、每条召回车道和逐个官方入口健康度，避免“报告为零”掩盖某家公司页面解析失败。普通论文和学术聚合索引只扫本次任务窗口（默认 7 天）；正式 Technical Report、重点研究者和官方入口使用 30 天回补，空数据库或地图升级时仅这些高信号车道扩到 60 天。历史漏项只用于定位通用失效模式；修复完成后，发布门验证抽象召回契约，不再重复追踪某篇历史论文。
 
 ## 每周交付物
 
@@ -82,7 +84,7 @@ python main.py --smoke-test # 小成本真实检查接口；SMTP 只登录、不
 
 第一次完整运行前先执行 `python main.py --smoke-test`。它不会运行流水线、不会创建报告或修改范式数据库，结果保存在 `logs/smoke_test_latest.json`，且不记录密钥和响应正文。Smoke 使用与生产召回器隔离的单请求探针：例如 arXiv 只查一个稳定 ID、GitHub 只发一次 Search，不会运行领域/人物/报告车道或详情页抓取。鉴权失败、404 与响应结构变化会返回非零；公共服务的 429、5xx、网络错误或超时会标为带 `failure_kind` 的 `degraded`，保留风险但不把一次第三方抖动误判成代码不可部署。OpenReview、RSS、HN 等辅助源失败也会显式降级。
 
-完整运行还会生成 `logs/run_audit_latest.md`、`logs/run_audit_latest.json` 和 `logs/current_run.log`。其中包含信源返回量、漏斗、每条材料/路线的结构化去留理由，以及各阶段模型 token 用量；不会保存 prompt、模型回答正文或模型私有推理。启用邮件后，Markdown 审计和本轮日志会随报告一起发送。若软预算、召回覆盖或交付契约尚未闭合，邮件标题会明确标为“研究未完成”，附件是状态/阶段性 memo，不能把 0 条交付解释为本周没有重要技术。
+完整运行还会生成 `logs/run_audit_latest.md`、`logs/run_audit_latest.json` 和 `logs/current_run.log`。其中包含信源返回量、漏斗、每条材料/路线的结构化去留理由，以及各阶段模型 token 用量；不会保存 prompt、模型回答正文或模型私有推理。信源部分失败、全部失败、超时和真实零命中会分别记账；机制抽取后先保存可续跑候选，再把原文标为已分析，避免中途异常造成永久漏项。启用邮件后，Markdown 审计和本轮日志会随报告一起发送。若软预算、召回覆盖或交付契约尚未闭合，邮件标题会明确标为“研究未完成”，附件是状态/阶段性 memo，不能把 0 条交付解释为本周没有重要技术。
 
 定时参数：
 
@@ -95,6 +97,7 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT=6
 PARADIGM_KEY_RESEARCHER_LIMIT=3
 PARADIGM_RUN_BUDGET_SECONDS=3600
 PARADIGM_STAGE_RESERVE_SECONDS=1200
+PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=600
 PARADIGM_REPORT_TIMEOUT_SECONDS=1200
 PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS=360
 PARADIGM_REPORT_ROUTE_CONCURRENCY=2

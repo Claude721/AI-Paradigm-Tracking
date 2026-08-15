@@ -65,10 +65,10 @@ jobs:
       GITHUB_TOKEN: ${{ github.token }}
       OPENREVIEW_VENUES: ${{ vars.OPENREVIEW_VENUES }}
       RESEARCH_FEED_URLS: ${{ vars.RESEARCH_FEED_URLS }}
-      RESEARCH_WATCHLIST_MODE: ${{ vars.RESEARCH_WATCHLIST_MODE }}
+      RESEARCH_WATCHLIST_MODE: ${{ vars.RESEARCH_WATCHLIST_MODE || 'merge' }}
       PRIORITY_RESEARCH_PAGES: ${{ vars.PRIORITY_RESEARCH_PAGES }}
       PRIORITY_RESEARCH_LINK_SAFETY_LIMIT: ${{ vars.PRIORITY_RESEARCH_LINK_SAFETY_LIMIT || '0' }}
-      PRIORITY_RESEARCH_CONCURRENCY: ${{ vars.PRIORITY_RESEARCH_CONCURRENCY }}
+      PRIORITY_RESEARCH_CONCURRENCY: ${{ vars.PRIORITY_RESEARCH_CONCURRENCY || '6' }}
       ESTABLISHED_RESEARCH_ORGANIZATIONS: ${{ vars.ESTABLISHED_RESEARCH_ORGANIZATIONS }}
       MONITORED_RESEARCH_ORGANIZATIONS: ${{ vars.MONITORED_RESEARCH_ORGANIZATIONS }}
       PRIORITY_RESEARCHERS: ${{ vars.PRIORITY_RESEARCHERS }}
@@ -78,7 +78,7 @@ jobs:
       TAVILY_REQUEST_SAFETY_LIMIT: ${{ vars.TAVILY_REQUEST_SAFETY_LIMIT || '0' }}
       REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
       REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
-      REDDIT_API_ACCESS_APPROVED: ${{ vars.REDDIT_API_ACCESS_APPROVED }}
+      REDDIT_API_ACCESS_APPROVED: ${{ vars.REDDIT_API_ACCESS_APPROVED || 'false' }}
       REDDIT_USER_AGENT: ${{ vars.REDDIT_USER_AGENT }}
       # 0 表示不限制；这些只是显式运行熔断，研究去留由版本化 Rubric 决定。
       PARADIGM_DISCOVERY_SAFETY_LIMIT: ${{ vars.PARADIGM_DISCOVERY_SAFETY_LIMIT || '0' }}
@@ -89,6 +89,8 @@ jobs:
       SOURCING_LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '7' }}
       PARADIGM_RECALL_OVERLAP_DAYS: ${{ vars.PARADIGM_RECALL_OVERLAP_DAYS || '30' }}
       PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED: ${{ vars.PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED || 'true' }}
+      PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS: ${{ vars.PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS || '2' }}
+      PARADIGM_MIN_SECONDARY_ENGAGEMENT: ${{ vars.PARADIGM_MIN_SECONDARY_ENGAGEMENT || '50' }}
       PARADIGM_BOOTSTRAP_LOOKBACK_DAYS: ${{ vars.PARADIGM_BOOTSTRAP_LOOKBACK_DAYS || '60' }}
       PARADIGM_SEED_ARXIV_IDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seed_arxiv_ids || '' }}
       PARADIGM_RESEARCHER_PROFILE_LIMIT: ${{ vars.PARADIGM_RESEARCHER_PROFILE_LIMIT || '6' }}
@@ -97,6 +99,7 @@ jobs:
       # 3600s 研究 + 1200s 报告，给安装、测试、邮件和 artifact 保留约 10 分钟。
       PARADIGM_RUN_BUDGET_SECONDS: ${{ vars.PARADIGM_RUN_BUDGET_SECONDS || '3600' }}
       PARADIGM_STAGE_RESERVE_SECONDS: ${{ vars.PARADIGM_STAGE_RESERVE_SECONDS || '1200' }}
+      PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS: ${{ vars.PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS || '600' }}
       PARADIGM_REPORT_TIMEOUT_SECONDS: ${{ vars.PARADIGM_REPORT_TIMEOUT_SECONDS || '1200' }}
       PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS: ${{ vars.PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS || '360' }}
       PARADIGM_REPORT_ROUTE_CONCURRENCY: ${{ vars.PARADIGM_REPORT_ROUTE_CONCURRENCY || '2' }}
@@ -121,6 +124,8 @@ jobs:
           # 工作流不执行 git push，无需把临时凭据写进仓库配置；同时避免
           # post-job 清理凭据时产生非致命的 git exit 128 warning。
           persist-credentials: false
+          # 生产流水线通过 HTTP Feed 工作，不依赖两个历史辅助 submodule。
+          submodules: false
 
       - name: 准备 Python
         uses: actions/setup-python@v6
@@ -129,62 +134,88 @@ jobs:
           cache: pip
 
       - name: 安装依赖
-        run: pip install -r requirements.txt
+        id: dependencies
+        run: |
+          mkdir -p logs
+          set -o pipefail
+          pip install -r requirements.txt 2>&1 | tee logs/dependencies.log
 
       - name: 运行离线回归测试
+        id: offline_checks
+        run: python scripts/offline_checks.py
+
+      - name: 配置体检
+        id: doctor
         run: |
-          python -m unittest discover -s tests -v
-          python -m compileall -q agents database notifications paradigms reports skills sources main.py config.py run_audit.py
+          mkdir -p logs
+          set -o pipefail
+          python main.py --doctor 2>&1 | tee logs/doctor.log
 
       - name: 恢复上一次去重状态
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
-        id: restore-state
+        id: restore_state
         env:
           GH_TOKEN: ${{ github.token }}
           RESET_STATE: ${{ github.event_name == 'workflow_dispatch' && inputs.reset_state || 'false' }}
         run: |
+          mkdir -p logs
+          exec > >(tee logs/state_restore.log) 2>&1
           if [ "$RESET_STATE" = "true" ]; then
             echo "用户要求重置状态，本轮不恢复旧数据库"
             echo "restored=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          artifact_url="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=paradigm-radar-state&per_page=100" --jq '.artifacts | map(select(.expired == false)) | sort_by(.created_at) | last | .archive_download_url // empty')"
-          if [ -z "$artifact_url" ]; then
+          # 状态使用不可变快照，避免 overwrite 先删除上一份好状态、随后上传
+          # 失败时失去回滚点。兼容迁移前的同名 paradigm-radar-state artifact。
+          artifact_rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts | map(select(.expired == false and (.name == "paradigm-radar-state" or (.name | startswith("paradigm-radar-state-"))))) | sort_by(.created_at) | reverse | .[] | [.archive_download_url, .name] | @tsv')"
+          if [ -z "$artifact_rows" ]; then
             echo "未找到状态 artifact。为避免意外冷启动，请手动以 reset_state=true 初始化。"
             exit 1
           fi
 
-          mkdir -p /tmp/paradigm-radar-restore
-          gh api "$artifact_url" > /tmp/paradigm-radar-state.zip
-          unzip -oq /tmp/paradigm-radar-state.zip -d /tmp/paradigm-radar-restore
-
-          state_landscape="$(jq -r '.landscape_version // empty' /tmp/paradigm-radar-restore/state-meta.json 2>/dev/null || true)"
           current_landscape="$(jq -r '.version' taxonomy/frontier_landscape.json)"
-          if [ "$state_landscape" != "$current_landscape" ]; then
-            echo "前沿覆盖地图已变化：恢复旧数据库用于证据去重，并由程序补扫近 60 天新覆盖面"
-          fi
-
-          if [ ! -f /tmp/paradigm-radar-restore/paradigm_radar.db ]; then
-            echo "状态 artifact 缺少数据库文件；拒绝静默从空状态启动"
+          restored=false
+          while IFS=$'\t' read -r artifact_url artifact_name; do
+            [ -n "$artifact_url" ] || continue
+            candidate_dir="$(mktemp -d)"
+            candidate_zip="$(mktemp)"
+            echo "校验状态快照：$artifact_name"
+            if ! gh api "$artifact_url" > "$candidate_zip"; then
+              echo "下载失败，尝试上一份快照"
+              continue
+            fi
+            if ! unzip -oq "$candidate_zip" -d "$candidate_dir"; then
+              echo "压缩包损坏，尝试上一份快照"
+              continue
+            fi
+            if [ ! -f "$candidate_dir/paradigm_radar.db" ]; then
+              echo "快照缺少数据库，尝试上一份快照"
+              continue
+            fi
+            state_schema="$(jq -r '.schema_version // empty' "$candidate_dir/state-meta.json" 2>/dev/null || true)"
+            if ! python -m database.state_migration "$candidate_dir/paradigm_radar.db" --from-version "$state_schema"; then
+              echo "数据库无法安全迁移，尝试上一份快照"
+              continue
+            fi
+            state_landscape="$(jq -r '.landscape_version // empty' "$candidate_dir/state-meta.json" 2>/dev/null || true)"
+            if [ "$state_landscape" != "$current_landscape" ]; then
+              echo "前沿覆盖地图已变化：恢复旧数据库用于证据去重，并由程序补扫近 60 天新覆盖面"
+            fi
+            mkdir -p database
+            cp "$candidate_dir/paradigm_radar.db" database/paradigm_radar.db
+            echo "已从 $artifact_name 恢复并迁移跨周路线与去重状态"
+            restored=true
+            break
+          done <<< "$artifact_rows"
+          if [ "$restored" != "true" ]; then
+            echo "所有未过期状态快照均不可用；拒绝静默从空状态启动"
             exit 1
           fi
-
-          state_schema="$(jq -r '.schema_version // empty' /tmp/paradigm-radar-restore/state-meta.json 2>/dev/null || true)"
-          if ! python -m database.state_migration /tmp/paradigm-radar-restore/paradigm_radar.db --from-version "$state_schema"; then
-            echo "状态 artifact 无法安全迁移；拒绝静默从空状态启动"
-            exit 1
-          fi
-
-          mkdir -p database
-          cp /tmp/paradigm-radar-restore/paradigm_radar.db database/paradigm_radar.db
-          echo "已恢复并迁移跨周路线与去重状态"
           echo "restored=true" >> "$GITHUB_OUTPUT"
 
-      - name: 配置体检
-        run: python main.py --doctor
-
       - name: 小成本真实接口冒烟
+        id: smoke
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_only }}
         run: python main.py --smoke-test
 
@@ -194,9 +225,11 @@ jobs:
         run: python main.py
 
       - name: 记录状态对应的代码版本
-        id: prepare-state
+        id: prepare_state
         if: ${{ always() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         run: |
+          mkdir -p logs
+          exec > >(tee logs/state_prepare.log) 2>&1
           if [ ! -f database/paradigm_radar.db ]; then
             echo "本轮没有产生可保存的范式数据库"
             echo "available=false" >> "$GITHUB_OUTPUT"
@@ -209,10 +242,11 @@ jobs:
           echo "available=true" >> "$GITHUB_OUTPUT"
 
       - name: 保存跨周去重状态
-        if: ${{ always() && steps.prepare-state.outputs.available == 'true' }}
+        id: upload_state
+        if: ${{ always() && steps.prepare_state.outputs.available == 'true' }}
         uses: actions/upload-artifact@v7
         with:
-          name: paradigm-radar-state
+          name: paradigm-radar-state-${{ github.run_id }}
           path: |
             database/paradigm_radar.db
             database/state-meta.json
@@ -220,6 +254,7 @@ jobs:
           if-no-files-found: error
 
       - name: 保存本期报告
+        id: upload_report
         if: ${{ always() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) && hashFiles('reports/output/*.md') != '' }}
         uses: actions/upload-artifact@v7
         with:
@@ -229,12 +264,19 @@ jobs:
           if-no-files-found: error
 
       - name: 保存运行日志与筛选审计
+        id: upload_audit
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: paradigm-radar-audit-${{ github.run_id }}
           path: |
             logs/current_run.log
+            logs/dependencies.log
+            logs/offline_checks.log
+            logs/offline_checks.json
+            logs/doctor.log
+            logs/state_restore.log
+            logs/state_prepare.log
             logs/run_audit_latest.md
             logs/run_audit_latest.json
             logs/smoke_test_latest.json
@@ -246,6 +288,15 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEPENDENCIES_STEP_OUTCOME: ${{ steps.dependencies.outcome || 'not-run' }}
+          OFFLINE_CHECKS_STEP_OUTCOME: ${{ steps.offline_checks.outcome || 'not-run' }}
+          RESTORE_STATE_STEP_OUTCOME: ${{ steps.restore_state.outcome || 'not-run' }}
+          DOCTOR_STEP_OUTCOME: ${{ steps.doctor.outcome || 'not-run' }}
+          SMOKE_STEP_OUTCOME: ${{ steps.smoke.outcome || 'not-run' }}
           PIPELINE_STEP_OUTCOME: ${{ steps.pipeline.outcome || 'not-run' }}
+          PREPARE_STATE_STEP_OUTCOME: ${{ steps.prepare_state.outcome || 'not-run' }}
+          UPLOAD_STATE_STEP_OUTCOME: ${{ steps.upload_state.outcome || 'not-run' }}
+          UPLOAD_REPORT_STEP_OUTCOME: ${{ steps.upload_report.outcome || 'not-run' }}
+          UPLOAD_AUDIT_STEP_OUTCOME: ${{ steps.upload_audit.outcome || 'not-run' }}
           AUDIT_ARTIFACT_NAME: paradigm-radar-audit-${{ github.run_id }}
         run: python main.py --notify-failure

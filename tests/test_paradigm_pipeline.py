@@ -1739,12 +1739,12 @@ class ParadigmPipelineTests(unittest.TestCase):
 
     def test_priority_page_discovers_dated_official_model_post(self) -> None:
         html = """
-        <a href="https://www.kimi.com/blog/kimi-k3">2026-07-14 Kimi K3</a>
+        <a href="https://lab.example/blog/project-atlas">2026-07-14 Project Atlas</a>
         <a href="/research">Research</a>
         """
-        links = _discover_index_links(html, "https://www.moonshot.ai/")
+        links = _discover_index_links(html, "https://lab.example/")
         self.assertEqual(len(links), 1)
-        self.assertEqual(links[0].title, "Kimi K3")
+        self.assertEqual(links[0].title, "Project Atlas")
         self.assertEqual(links[0].published_at, "2026-07-14")
 
     def test_priority_page_recovers_card_date_from_hydration_data(self) -> None:
@@ -1882,12 +1882,12 @@ class ParadigmPipelineTests(unittest.TestCase):
         source = ArxivSource(
             max_results=None,
             lookback_days=7,
-            seed_arxiv_ids=["2607.24653"],
+            seed_arxiv_ids=["2601.00002"],
         )
         seeded = RawProject(
             source="arxiv",
             name="Seeded report",
-            url="https://arxiv.org/abs/2607.24653",
+            url="https://arxiv.org/abs/2601.00002",
             created_at="2026-07-29T00:00:00Z",
             extra={"origin_priority": 3},
         )
@@ -2000,10 +2000,13 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertEqual(client.get.await_count, 2)
 
     def test_large_system_report_author_prompt_is_bounded(self) -> None:
-        authors = ["Kimi Team", *[f"Researcher {index}" for index in range(400)]]
+        authors = [
+            "Atlas Research Team",
+            *[f"Researcher {index}" for index in range(400)],
+        ]
         summary = _author_prompt_summary(authors)
         self.assertIn("共 401 位作者", summary)
-        self.assertIn("Kimi Team", summary)
+        self.assertIn("Atlas Research Team", summary)
         self.assertLess(len(summary), 500)
 
     def test_priority_arxiv_html_404_falls_back_to_official_pdf(self) -> None:

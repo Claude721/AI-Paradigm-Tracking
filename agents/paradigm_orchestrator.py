@@ -25,7 +25,7 @@ from paradigms.enrichment import EvidenceEnricher
 from paradigms.models import (
     EvidenceType,
     key_researcher_profiles,
-    safe_public_contact_target,
+    primary_material_url,
     verified_organization_attribution,
 )
 from paradigms.scoring import is_reportable, score_candidate
@@ -187,11 +187,39 @@ class ParadigmOrchestrator:
             value.get("status") in {"query_failed", "not_executed"}
             for value in (batch.coverage.get("domains") or {}).values()
         )
+        source_health = batch.coverage.get("source_health") or {}
+        failed_sources = [
+            name
+            for name, value in source_health.items()
+            if value.get("status") in {"partial", "query_failed", "timed_out"}
+        ]
+        run_audit.event(
+            "discovery_source_health",
+            "warning" if failed_sources else "passed",
+            "；".join(
+                f"{name}={value.get('status')}，{value.get('results', 0)} 条，"
+                f"{value.get('elapsed_seconds', 0)}s"
+                for name, value in source_health.items()
+            )
+            or "没有发现源运行记录",
+        )
         stats["recall_coverage_incomplete"] = bool(
             domain_coverage_incomplete
             or failed_lanes
             or degraded_indexes
             or official_warning
+            or failed_sources
+        )
+        # 覆盖地图基线只受地图/核心学术召回是否闭合影响。官方网页、Feed
+        # 等动态入口的局部失败仍会让本期报告标成 incomplete，但不能因为
+        # 一个长期失效页面让整个仓库永远停在 60 天 bootstrap 模式。
+        baseline_lane_failures = [
+            name for name in failed_lanes if name != "explicit_seeds"
+        ]
+        stats["landscape_coverage_incomplete"] = bool(
+            domain_coverage_incomplete
+            or baseline_lane_failures
+            or degraded_indexes
         )
         origins, incremental = self.store.plan_origins(batch.origins)
         stats.update({f"origin_{key}": value for key, value in incremental.items()})
@@ -217,6 +245,7 @@ class ParadigmOrchestrator:
                 failed_origin_count,
                 budget_deferred_origins,
                 hydration_stats,
+                completed_origins,
             ) = await self._analyze_origins_in_batches(origins, origin_deadline)
             stats.update(hydration_stats)
             if hydration_stats["priority_origin_hydration_failed"]:
@@ -275,11 +304,17 @@ class ParadigmOrchestrator:
             )
             new_candidates = cluster_extractions(extractions)
             new_candidates = self.store.attach_history(new_candidates)
+            _commit_origin_analysis_checkpoint(
+                self.store,
+                new_candidates,
+                completed_origins,
+            )
         else:
             new_candidates = []
             analyzed_origin_count = 0
             failed_origin_count = 0
             budget_deferred_origins = []
+            completed_origins = []
             stats["candidate_extractions"] = 0
             stats.update(_empty_hydration_stats())
 
@@ -549,10 +584,23 @@ class ParadigmOrchestrator:
         )
 
         self.store.save_candidates([*candidates, *deferred_candidates])
-        # 全部发现结果已先持久化为 pending，因此这里登记的是“覆盖地图已完成
-        # 发现基线”，不是声称 backlog 已全部完成研究判断。报告和邮件属于
-        # 独立交付阶段，失败时不得撤销该研究检查点。
-        self.store.mark_landscape_version()
+        # 发现结果与覆盖基线是两个检查点。已抓到的原点即使后续失败也保留
+        # 在 backlog；但只要任一召回车道/索引/官方入口没有闭合，就不能把
+        # 新地图版本标成已完成，否则下一轮会失去 bootstrap 补扫窗口。
+        stats["landscape_checkpoint_advanced"] = (
+            _commit_landscape_checkpoint_if_complete(
+                self.store,
+                landscape_coverage_incomplete=stats[
+                    "landscape_coverage_incomplete"
+                ],
+            )
+        )
+        if not stats["landscape_checkpoint_advanced"]:
+            run_audit.event(
+                "landscape_checkpoint",
+                "deferred",
+                "本轮领域/核心学术召回未闭合；保留旧地图版本，下次继续高信号补扫",
+            )
         self.pending_delivery = reportable
         stats["saved_count"] = len(candidates) + len(deferred_candidates)
         stats["elapsed_seconds"] = (
@@ -571,12 +619,13 @@ class ParadigmOrchestrator:
         self,
         origins: list,
         deadline: float,
-    ) -> tuple[list, int, int, list, dict[str, int]]:
-        """逐批抽取并提交检查点；超时项保留 pending。"""
+    ) -> tuple[list, int, int, list, dict[str, int], list]:
+        """逐批抽取；只有候选快照落盘后，原点才能提交为已分析。"""
         extractions = []
         analyzed_count = 0
         failed_count = 0
         hydration_totals = _empty_hydration_stats()
+        completed_origins = []
         batch_size = config.PARADIGM_ANALYSIS_BATCH_SIZE
         for offset in range(0, len(origins), batch_size):
             remaining = _remaining_seconds(deadline)
@@ -587,6 +636,7 @@ class ParadigmOrchestrator:
                     failed_count,
                     origins[offset:],
                     hydration_totals,
+                    completed_origins,
                 )
             origin_batch = origins[offset : offset + batch_size]
 
@@ -608,6 +658,7 @@ class ParadigmOrchestrator:
                     failed_count,
                     origins[offset:],
                     hydration_totals,
+                    completed_origins,
                 )
 
             for key, value in hydration.items():
@@ -636,13 +687,22 @@ class ParadigmOrchestrator:
                 item.raw["last_analysis_failure_at"] = datetime.now(
                     timezone.utc
                 ).isoformat()
-            self.store.mark_evidence(successful_origins, analyzed=True)
+            # 不能在候选快照持久化之前把原点标成 analyzed。否则深挖前异常
+            # 会让下次运行跳过论文，却没有任何 pending candidate 可以续跑。
+            completed_origins.extend(successful_origins)
             if failed_origins:
                 self.store.mark_evidence(failed_origins, analyzed=False)
             extractions.extend(batch_extractions)
             analyzed_count += len(origin_batch)
             failed_count += len(failed_fingerprints)
-        return extractions, analyzed_count, failed_count, [], hydration_totals
+        return (
+            extractions,
+            analyzed_count,
+            failed_count,
+            [],
+            hydration_totals,
+            completed_origins,
+        )
 
     async def _deep_analyze_in_batches(
         self,
@@ -723,6 +783,19 @@ def _origin_analysis_priority(evidence) -> tuple[int, int, int, int, int, str]:
         -int(evidence.raw.get("analysis_failure_count", 0) or 0),
         evidence.published_at or "",
     )
+
+
+def _commit_landscape_checkpoint_if_complete(
+    store,
+    *,
+    landscape_coverage_incomplete: bool,
+) -> bool:
+    """Advance the coverage baseline only after every discovery lane closes."""
+
+    if landscape_coverage_incomplete:
+        return False
+    store.mark_landscape_version()
+    return True
 
 
 def _origin_execution_order(pending: list, newly_discovered: list) -> list:
@@ -846,6 +919,21 @@ def _empty_hydration_stats() -> dict[str, int]:
     }
 
 
+def _commit_origin_analysis_checkpoint(
+    store,
+    candidates: list,
+    completed_origins: list,
+) -> None:
+    """Commit in loss-safe order: resumable routes first, skip markers second."""
+
+    for candidate in candidates:
+        candidate.status = "pending_deep"
+    # SQLite commits each method atomically. If candidate persistence fails,
+    # analyzed flags remain false and the next run safely retries the origins.
+    store.save_candidates(candidates)
+    store.mark_evidence(completed_origins, analyzed=True)
+
+
 def _record_deferred_candidate(candidate, reason: str) -> None:
     candidate.status = "pending_deep"
     run_audit.record_candidate(
@@ -891,6 +979,6 @@ def _delivery_primary_source_ready(candidate) -> bool:
     return any(
         evidence.evidence_type
         in {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG}
-        and safe_public_contact_target("source", evidence.url)
+        and primary_material_url(evidence)
         for evidence in candidate.evidence
     )

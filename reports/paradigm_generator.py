@@ -9,7 +9,6 @@ import json
 import logging
 import re
 from collections import OrderedDict
-from datetime import datetime
 from pathlib import Path
 
 import config
@@ -20,10 +19,12 @@ from paradigms.models import (
     ResearcherProfile,
     TechnicalEvidence,
     key_researcher_profiles,
+    primary_material_url,
     safe_public_contact_target,
     verified_organization_attribution,
 )
 from run_audit import run_audit
+from runtime_clock import scheduled_date
 from skills.loader import SkillLoader
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ class ParadigmReportGenerator:
         route_fragments: dict[str, str] | None = None,
         save_route_fragment=None,
     ) -> Path:
-        date = report_date or datetime.now().astimezone().strftime("%Y-%m-%d")
+        date = report_date or scheduled_date()
         path = self.output_dir / f"paradigm_radar_{date}.md"
         stats = pipeline_stats or {}
         ordered = sorted(candidates, key=lambda item: item.total_score, reverse=True)
@@ -399,6 +400,11 @@ class ParadigmReportGenerator:
             if value.get("status")
             not in {"completed", "completed_after_retry"}
         ]
+        failed_sources = [
+            f"{name}={value.get('status')}"
+            for name, value in (coverage.get("source_health") or {}).items()
+            if value.get("status") in {"partial", "query_failed", "timed_out"}
+        ]
         official = coverage.get("official_pages") or {}
         official_incomplete = (
             int(official.get("checked_pages", 0) or 0)
@@ -414,6 +420,8 @@ class ParadigmReportGenerator:
             incomplete_parts.append("召回车道：" + "、".join(failed_lanes))
         if academic_incomplete:
             incomplete_parts.append("学术索引：" + "、".join(academic_incomplete))
+        if failed_sources:
+            incomplete_parts.append("发现源：" + "、".join(failed_sources))
         if official_incomplete:
             incomplete_parts.append(
                 "官方入口："
@@ -996,7 +1004,7 @@ def _primary_sources(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
         value
         for value in candidate.evidence
         if value.evidence_type in primary_types
-        and safe_public_contact_target("source", value.url)
+        and primary_material_url(value)
     ]
     current = [value for value in sources if not value.raw.get("historical")]
     historical = [value for value in sources if value.raw.get("historical")]
@@ -1333,6 +1341,13 @@ def _attach_coverage_boundary(content: str, stats: dict) -> str:
     ]
     if degraded_indexes:
         issues.append("学术索引退化：" + "、".join(degraded_indexes))
+    failed_sources = [
+        f"{name}={value.get('status')}"
+        for name, value in (coverage.get("source_health") or {}).items()
+        if value.get("status") in {"partial", "query_failed", "timed_out"}
+    ]
+    if failed_sources:
+        issues.append("发现源异常：" + "、".join(failed_sources))
     official = coverage.get("official_pages") or {}
     if (
         official.get("request_failed")

@@ -202,6 +202,7 @@ class SmokeCheckContractTests(unittest.TestCase):
         self.assertEqual(client.get.await_count, 1)
         params = client.get.await_args.kwargs["params"]
         self.assertEqual(params["per-page"], 2)
+        self.assertEqual(params["search"], '"machine learning"')
         self.assertNotIn("cursor", params)
 
     def test_openreview_smoke_uses_exactly_one_request_and_accepts_zero_hits(
@@ -229,6 +230,7 @@ class SmokeCheckContractTests(unittest.TestCase):
         self.assertIn("响应契约正常", detail)
         self.assertEqual(client.get.await_count, 1)
         params = client.get.await_args.kwargs["params"]
+        self.assertEqual(params["query"], "machine learning")
         self.assertEqual(params["limit"], 1)
         self.assertEqual(params["offset"], 0)
 
@@ -244,8 +246,8 @@ class SmokeCheckContractTests(unittest.TestCase):
                 config,
                 "PRIORITY_RESEARCH_PAGES",
                 [
+                    "https://lab.example/research/",
                     "https://deepmind.google/research/",
-                    "https://www.moonshot.ai/",
                 ],
             ),
             patch("smokecheck.httpx.AsyncClient", return_value=context),
@@ -255,6 +257,10 @@ class SmokeCheckContractTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertIn("单次索引页请求", detail)
         self.assertEqual(client.get.await_count, 1)
+        self.assertEqual(
+            client.get.await_args.args[0],
+            "https://lab.example/research/",
+        )
 
     def test_research_feed_smoke_fetches_only_first_feed(self) -> None:
         response = httpx.Response(
@@ -304,6 +310,10 @@ class SmokeCheckContractTests(unittest.TestCase):
         self.assertIn("单次 Search 请求", detail)
         self.assertIn("search_remaining=29", detail)
         self.assertEqual(client.get.await_count, 1)
+        self.assertEqual(
+            client.get.await_args.kwargs["params"]["q"],
+            "machine-learning stars:>1000",
+        )
 
     def test_optional_source_rate_limit_is_visible_but_not_blocking(self) -> None:
         request = httpx.Request("GET", "https://api2.openreview.net/notes/search")

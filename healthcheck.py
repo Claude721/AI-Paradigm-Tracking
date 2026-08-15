@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -22,6 +23,7 @@ class Check:
 def collect_checks() -> list[Check]:
     sub, main = resolve_all()
     checks = [
+        _raw_environment_syntax_check(),
         _model_check("论文范式抽取模型", sub),
         _model_check("范式综合/人物模型", main),
         _rubric_check(),
@@ -182,6 +184,103 @@ def collect_checks() -> list[Check]:
     return checks
 
 
+_BOOLEAN_ENVIRONMENT_KEYS = (
+    "SEMANTIC_SCHOLAR_ENABLED",
+    "TAVILY_SOCIAL_SEARCH_ENABLED",
+    "REDDIT_API_ACCESS_APPROVED",
+    "FOLLOW_BUILDERS_ENABLED",
+    "PARADIGM_ALLOW_UPDATES",
+    "PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED",
+    "EMAIL_PUSH_ENABLED",
+    "EMAIL_PUSH_REQUIRED",
+    "SMTP_USE_SSL",
+    "SMTP_USE_STARTTLS",
+)
+
+_INTEGER_ENVIRONMENT_RANGES: dict[str, tuple[int, int | None]] = {
+    "LLM_REQUEST_TIMEOUT_SECONDS": (30, None),
+    "SMOKE_CHECK_TIMEOUT_SECONDS": (5, 120),
+    "TAVILY_REQUEST_SAFETY_LIMIT": (0, None),
+    "PRIORITY_RESEARCH_LINK_SAFETY_LIMIT": (0, None),
+    "PRIORITY_RESEARCH_CONCURRENCY": (1, 12),
+    "PARADIGM_DISCOVERY_SAFETY_LIMIT": (0, None),
+    "PARADIGM_ANALYSIS_SAFETY_LIMIT": (0, None),
+    "PARADIGM_DEEP_SAFETY_LIMIT": (0, None),
+    "PARADIGM_REPORT_SAFETY_LIMIT": (0, None),
+    "PARADIGM_REFRESH_SAFETY_LIMIT": (0, None),
+    "PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS": (1, None),
+    "PARADIGM_MIN_SECONDARY_ENGAGEMENT": (1, None),
+    "SOURCING_LOOKBACK_DAYS": (1, None),
+    "PARADIGM_RECALL_OVERLAP_DAYS": (1, None),
+    "PARADIGM_BOOTSTRAP_LOOKBACK_DAYS": (1, None),
+    "PARADIGM_RESEARCHER_PROFILE_LIMIT": (3, 10),
+    "PARADIGM_KEY_RESEARCHER_LIMIT": (1, 6),
+    "PARADIGM_RUN_BUDGET_SECONDS": (0, None),
+    "PARADIGM_STAGE_RESERVE_SECONDS": (60, None),
+    "PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS": (60, None),
+    "PARADIGM_REPORT_TIMEOUT_SECONDS": (60, None),
+    "PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS": (30, None),
+    "PARADIGM_REPORT_ROUTE_CONCURRENCY": (1, 4),
+    "PARADIGM_ANALYSIS_BATCH_SIZE": (1, 24),
+    "PARADIGM_DEEP_BATCH_SIZE": (1, 6),
+    "SCHEDULE_HOUR": (0, 23),
+    "SCHEDULE_MINUTE": (0, 59),
+    "EMAIL_MAX_ATTACHMENT_BYTES": (1_000_000, None),
+    "SMTP_PORT": (1, 65535),
+}
+
+
+def _raw_environment_syntax_check() -> Check:
+    """Reject malformed Variables instead of silently using parser defaults."""
+
+    invalid: list[str] = []
+    allowed_booleans = {
+        "0",
+        "1",
+        "false",
+        "true",
+        "no",
+        "yes",
+        "n",
+        "y",
+        "off",
+        "on",
+    }
+    for name in _BOOLEAN_ENVIRONMENT_KEYS:
+        raw = os.getenv(name)
+        if raw is not None and raw.strip().casefold() not in allowed_booleans:
+            invalid.append(name)
+    for name, allowed in {
+        "PIPELINE_MODE": {"legacy", "paradigm"},
+        "RESEARCH_WATCHLIST_MODE": {"merge", "replace"},
+    }.items():
+        raw = os.getenv(name)
+        if raw is not None and raw.strip().casefold() not in allowed:
+            invalid.append(name)
+    for name, (minimum, maximum) in _INTEGER_ENVIRONMENT_RANGES.items():
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            invalid.append(name)
+            continue
+        if value < minimum or (maximum is not None and value > maximum):
+            invalid.append(name)
+    return Check(
+        "环境变量语法",
+        "配置解析",
+        "missing" if invalid else "ready",
+        (
+            "以下 Variable 值无效，程序不会再静默回退默认值："
+            + "、".join(sorted(set(invalid)))
+            if invalid
+            else "关键布尔、整数与范围配置语法有效"
+        ),
+    )
+
+
 def _rubric_check() -> Check:
     try:
         rubric = load_rubric()
@@ -192,7 +291,9 @@ def _rubric_check() -> Check:
             "可审计研究决策",
             "ready",
             f"版本 {rubric['version']}；{len(rubric['common_criteria'])} 道 common 题；"
-            f"{len(rubric['type_criteria'])} 类创新量表；深挖/报告阈值 {deep}/{report}",
+            f"{len(rubric['type_criteria'])} 类创新量表；深挖/报告阈值 {deep}/{report}；"
+            f"实质讨论/互动边界 {config.PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS}/"
+            f"{config.PARADIGM_MIN_SECONDARY_ENGAGEMENT}",
         )
     except Exception as exc:
         return Check(
@@ -224,18 +325,27 @@ def _landscape_check() -> Check:
         )
 
 
-def print_checks() -> None:
+def blocking_checks(checks: list[Check] | None = None) -> list[Check]:
+    """Return configuration defects that make a production run unsafe."""
+
+    values = collect_checks() if checks is None else checks
+    return [item for item in values if item.status == "missing"]
+
+
+def print_checks() -> list[Check]:
     labels = {"ready": "✓", "degraded": "△", "warning": "△", "missing": "✗"}
+    checks = collect_checks()
     print("\nAI 技术范式雷达 — 静态体检（不会请求任何外部 API）\n")
-    for item in collect_checks():
+    for item in checks:
         print(f"{labels[item.status]} {item.name} [{item.role}]：{item.note}")
     print()
+    return checks
 
 
 def _model_check(name, resolved) -> Check:
     missing = resolved.provider != "ollama" and resolved.api_key == "placeholder"
     model_ok = resolved.model.startswith("qwen3.7")
-    status = "ready" if not missing and model_ok else "missing" if missing else "warning"
+    status = "ready" if not missing and model_ok else "missing"
     note = f"{resolved.provider}/{resolved.model}；" + (
         "Key 未配置" if missing else "配置完整" if model_ok else "不属于 qwen3.7 系列"
     )
@@ -250,7 +360,16 @@ def _email_check() -> Check:
         and config.SMTP_TO
     )
     if not config.EMAIL_PUSH_ENABLED:
-        return Check("SMTP 邮件", "交付", "missing", "未启用；报告仅保存本地")
+        return Check("SMTP 邮件", "交付", "degraded", "未启用；报告仅保存本地")
+    if config.SMTP_USE_SSL and config.SMTP_USE_STARTTLS:
+        return Check(
+            "SMTP 邮件",
+            "交付",
+            "missing",
+            "SMTP_USE_SSL 与 SMTP_USE_STARTTLS 不能同时开启",
+        )
+    if not 1 <= config.SMTP_PORT <= 65535:
+        return Check("SMTP 邮件", "交付", "missing", "SMTP_PORT 超出有效范围")
     return Check(
         "SMTP 邮件",
         "交付",
@@ -262,20 +381,30 @@ def _email_check() -> Check:
 def _execution_budget_check() -> Check:
     budget = config.PARADIGM_RUN_BUDGET_SECONDS
     if budget == 0:
+        in_github_actions = os.getenv("GITHUB_ACTIONS", "").casefold() == "true"
         return Check(
             "可续跑时间预算",
             "云端可靠性",
-            "warning",
-            "软预算已禁用；本地可用，但 90 分钟 GitHub job 可能被硬取消",
+            "missing" if in_github_actions else "warning",
+            (
+                "GitHub Actions 不允许禁用软预算；否则任务可能在保存状态、"
+                "发送失败提醒前被 90 分钟 job 硬取消"
+                if in_github_actions
+                else "软预算已禁用；本地可用，但 90 分钟 GitHub job 可能被硬取消"
+            ),
         )
     report_budget = config.PARADIGM_REPORT_TIMEOUT_SECONDS
     combined = budget + report_budget
     request_budget = config.PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS
-    status = (
-        "ready"
-        if combined <= 4800 and request_budget < report_budget
-        else "warning"
+    discovery_budget = config.PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS
+    stage_reserve = config.PARADIGM_STAGE_RESERVE_SECONDS
+    safe_budget = (
+        combined <= 4800
+        and request_budget < report_budget
+        and discovery_budget < budget
+        and stage_reserve < budget
     )
+    status = "ready" if safe_budget else "missing"
     return Check(
         "可续跑时间预算",
         "云端可靠性",
@@ -283,7 +412,7 @@ def _execution_budget_check() -> Check:
         f"研究 {budget}s + 报告 {report_budget}s = {combined}s；"
         f"报告单请求 {request_budget}s，并发 "
         f"{config.PARADIGM_REPORT_ROUTE_CONCURRENCY}；"
-        f"阶段预留 {config.PARADIGM_STAGE_RESERVE_SECONDS}s；"
+        f"发现单源 {discovery_budget}s；阶段预留 {stage_reserve}s；"
         f"抽取/深挖批次 {config.PARADIGM_ANALYSIS_BATCH_SIZE}/"
         f"{config.PARADIGM_DEEP_BATCH_SIZE}；"
         + (
@@ -292,7 +421,16 @@ def _execution_budget_check() -> Check:
             else "总预算或单请求配置过大，可能来不及发送邮件和保存 artifact"
         ),
     )
+
+
 def _schedule_check() -> Check:
+    valid_days = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+    if config.SCHEDULE_DAY_OF_WEEK.casefold() not in valid_days:
+        return Check("周任务", "调度", "missing", "SCHEDULE_DAY_OF_WEEK 无效")
+    if not 0 <= config.SCHEDULE_HOUR <= 23:
+        return Check("周任务", "调度", "missing", "SCHEDULE_HOUR 超出 0–23")
+    if not 0 <= config.SCHEDULE_MINUTE <= 59:
+        return Check("周任务", "调度", "missing", "SCHEDULE_MINUTE 超出 0–59")
     try:
         ZoneInfo(config.SCHEDULE_TIMEZONE)
         return Check(

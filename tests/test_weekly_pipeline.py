@@ -17,10 +17,22 @@ import main as app_main
 from agents.sourcing_agent import SourcingAgent
 from notifications.email_notifier import _send_sync, send_report_email
 from run_audit import RunAudit
+from runtime_clock import scheduled_date
 from sources.base import RawProject
 
 
 class WeeklyPipelineTests(unittest.TestCase):
+    def test_user_facing_date_uses_schedule_timezone_not_runner_timezone(self) -> None:
+        utc_time = datetime(2026, 8, 14, 16, 30, tzinfo=timezone.utc)
+        self.assertEqual(
+            scheduled_date(utc_time, timezone_name="Asia/Shanghai"),
+            "2026-08-15",
+        )
+
+    def test_user_facing_clock_rejects_ambiguous_naive_time(self) -> None:
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            scheduled_date(datetime(2026, 8, 15, 0, 0))
+
     def test_lookback_filter_drops_old_dated_items(self) -> None:
         now = datetime.now(timezone.utc)
         fresh = RawProject(

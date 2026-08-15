@@ -45,11 +45,18 @@ class OpenAlexSource:
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
         if not config.OPENALEX_API_KEY:
+            self.fetch_status = "not_configured"
+            self.fetch_error = ""
             logger.info("[openalex] 未配置 OPENALEX_API_KEY，跳过增强论文发现")
             return []
         try:
-            return await self.fetch()
-        except Exception:
+            results = await self.fetch()
+            self.fetch_status = "partial" if self.failed_queries else "completed"
+            self.fetch_error = "PartialQueryFailure" if self.failed_queries else ""
+            return results
+        except Exception as exc:
+            self.fetch_status = "query_failed"
+            self.fetch_error = type(exc).__name__
             logger.exception("[openalex] 获取失败")
             return []
 

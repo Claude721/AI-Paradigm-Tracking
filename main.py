@@ -19,13 +19,13 @@ import asyncio
 import logging
 import sys
 from contextlib import contextmanager
-from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import config
+from runtime_clock import scheduled_date
 
 
 def _redacted_log_text(value: str) -> str:
@@ -352,7 +352,7 @@ async def _run_pipeline_once() -> dict:
 
     stats = await orchestrator.run()
     if config.PIPELINE_MODE != "legacy":
-        report_date = datetime.now().astimezone().strftime("%Y-%m-%d")
+        report_date = scheduled_date()
         job = orchestrator.store.enqueue_report(
             orchestrator.pending_delivery,
             stats,
@@ -578,8 +578,11 @@ def main() -> None:
         setup_logging()
         asyncio.run(regenerate_report())
     elif args.doctor:
-        from healthcheck import print_checks
-        print_checks()
+        from healthcheck import blocking_checks, print_checks
+
+        checks = print_checks()
+        if blocking_checks(checks):
+            raise SystemExit(1)
     elif args.smoke_test:
         setup_logging()
         from smokecheck import print_smoke_results, run_smoke_checks, smoke_failed

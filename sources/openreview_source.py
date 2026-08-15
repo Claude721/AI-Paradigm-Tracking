@@ -56,10 +56,18 @@ class OpenReviewSource:
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
         if not self.venues:
+            self.fetch_status = "not_configured"
+            self.fetch_error = ""
             return []
         try:
-            return await self.fetch()
-        except Exception:
+            results = await self.fetch()
+            incomplete = bool(self.failed_queries or self.not_executed_queries)
+            self.fetch_status = "partial" if incomplete else "completed"
+            self.fetch_error = "PartialQueryFailure" if incomplete else ""
+            return results
+        except Exception as exc:
+            self.fetch_status = "query_failed"
+            self.fetch_error = type(exc).__name__
             logger.exception("[openreview] 获取失败")
             return []
 

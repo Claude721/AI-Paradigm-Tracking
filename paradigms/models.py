@@ -65,6 +65,38 @@ def safe_public_contact_target(label: str, target: str) -> str:
     return value if address.is_global else ""
 
 
+def primary_material_url(evidence: "TechnicalEvidence") -> str:
+    """Return a direct, public first-party/academic material URL.
+
+    Bibliographic and paper-discovery pages are useful for recall but are not
+    the original work the user must be able to open from the report.
+    """
+
+    value = safe_public_contact_target("source", evidence.url)
+    if not value:
+        return ""
+    parsed = urlsplit(value)
+    hostname = (parsed.hostname or "").casefold().removeprefix("www.")
+    if hostname in {"openalex.org", "api.openalex.org"}:
+        doi = str(evidence.identifiers.get("doi", "")).strip()
+        arxiv_id = str(evidence.identifiers.get("arxiv", "")).strip()
+        if doi:
+            return f"https://doi.org/{doi.removeprefix('https://doi.org/')}"
+        if arxiv_id:
+            versionless = re.sub(r"v\d+$", "", arxiv_id)
+            return f"https://arxiv.org/abs/{versionless}"
+        return ""
+    if hostname == "huggingface.co" and parsed.path.startswith("/papers/"):
+        arxiv_id = str(evidence.identifiers.get("arxiv", "")).strip()
+        versionless = re.sub(r"v\d+$", "", arxiv_id)
+        return (
+            f"https://arxiv.org/abs/{versionless}"
+            if arxiv_id
+            else ""
+        )
+    return value
+
+
 @dataclass
 class TechnicalEvidence:
     source: str
@@ -384,7 +416,7 @@ def verified_organization_attribution(
         }:
             continue
         organization = evidence.organization.strip()
-        source_url = safe_public_contact_target("source", evidence.url)
+        source_url = primary_material_url(evidence)
         if organization and source_url:
             return {"name": organization, "source_url": source_url}
     return {}

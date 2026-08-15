@@ -21,13 +21,29 @@ class ResearchFeedSource:
 
     def __init__(self, lookback_days: int = 7):
         self.lookback_days = max(lookback_days, 1)
+        self.completed_feeds = 0
+        self.failed_feeds = 0
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
         if not config.RESEARCH_FEED_URLS:
+            self.fetch_status = "not_configured"
+            self.fetch_error = ""
             return []
         try:
-            return await self.fetch()
-        except Exception:
+            results = await self.fetch()
+            if self.failed_feeds and not self.completed_feeds:
+                self.fetch_status = "query_failed"
+                self.fetch_error = "AllFeedsFailed"
+            elif self.failed_feeds:
+                self.fetch_status = "partial"
+                self.fetch_error = "PartialFeedFailure"
+            else:
+                self.fetch_status = "completed"
+                self.fetch_error = ""
+            return results
+        except Exception as exc:
+            self.fetch_status = "query_failed"
+            self.fetch_error = type(exc).__name__
             logger.exception("[research-blog] 获取失败")
             return []
 
@@ -40,12 +56,15 @@ class ResearchFeedSource:
         items: list[TechnicalEvidence] = []
         for feed_url, response in zip(config.RESEARCH_FEED_URLS, responses):
             if isinstance(response, Exception):
+                self.failed_feeds += 1
                 logger.warning("研究 Feed 获取失败 %s: %s", feed_url, response)
                 continue
             try:
                 response.raise_for_status()
                 items.extend(self._parse(response.text, feed_url))
+                self.completed_feeds += 1
             except Exception as exc:
+                self.failed_feeds += 1
                 logger.warning("研究 Feed 解析失败 %s: %s", feed_url, exc)
                 continue
         return list({item.fingerprint: item for item in items}.values())

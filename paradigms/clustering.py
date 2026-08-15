@@ -59,9 +59,30 @@ def is_priority_review(item: ParadigmExtraction) -> bool:
 
 
 def _has_review_priority(item: ParadigmExtraction) -> bool:
+    """Return whether an ``observe`` item deserves one editorial re-review.
+
+    Discovery ordering and editorial eligibility are deliberately separate:
+
+    - ``origin_priority`` controls queue order and document hydration cost;
+    - ``explicit_seed`` only guarantees that a manually supplied record is seen;
+    - this gate is reserved for a verified priority researcher, or an official
+      system-level release from an established publisher.
+
+    Keeping this rule semantic prevents a historical canary/backfill ID from
+    silently becoming an admission override.
+    """
+
+    raw = item.evidence.raw or {}
+    if bool(raw.get("priority_researcher_match")):
+        return True
     return (
-        int(item.evidence.raw.get("origin_priority", 0) or 0) >= 2
-        or bool(item.evidence.raw.get("explicit_seed"))
+        raw.get("publisher_tier") == "established"
+        and raw.get("origin_kind")
+        in {
+            "technical_report",
+            "official_model_release",
+            "official_research",
+        }
     )
 
 

@@ -47,8 +47,12 @@ class BaseSource(ABC):
         """带异常保护的 fetch wrapper，单个信源失败不影响全局"""
         try:
             results = await self.fetch()
+            self.fetch_status = "completed"
+            self.fetch_error = ""
             logger.info(f"[{self.source_name}] 成功获取 {len(results)} 个项目")
             return results
-        except Exception:
+        except Exception as exc:
+            self.fetch_status = "query_failed"
+            self.fetch_error = type(exc).__name__
             logger.exception(f"[{self.source_name}] 获取失败")
             return []

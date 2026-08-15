@@ -68,10 +68,31 @@ class PriorityResearchPageSource:
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
         if not self.pages:
+            self.fetch_status = "not_configured"
+            self.fetch_error = ""
             return []
         try:
-            return await self.fetch()
-        except Exception:
+            results = await self.fetch()
+            coverage = self.coverage()
+            root_failures = int(coverage.get("request_failed", 0) or 0) + int(
+                coverage.get("parse_zero_links", 0) or 0
+            )
+            detail_failures = int(coverage.get("detail_failures", 0) or 0)
+            checked = int(coverage.get("checked_pages", 0) or 0)
+            total = int(coverage.get("total_pages", 0) or 0)
+            if total and root_failures >= total:
+                self.fetch_status = "query_failed"
+                self.fetch_error = "AllIndexPagesFailed"
+            elif checked < total or root_failures or detail_failures:
+                self.fetch_status = "partial"
+                self.fetch_error = "PartialPageFailure"
+            else:
+                self.fetch_status = "completed"
+                self.fetch_error = ""
+            return results
+        except Exception as exc:
+            self.fetch_status = "query_failed"
+            self.fetch_error = type(exc).__name__
             logger.exception("[priority-research-page] 获取失败")
             return []
 

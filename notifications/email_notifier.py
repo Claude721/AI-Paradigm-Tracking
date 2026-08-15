@@ -8,13 +8,26 @@ import logging
 import os
 import re
 import smtplib
-from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 
 import config
+from runtime_clock import scheduled_date
 
 logger = logging.getLogger(__name__)
+
+_WORKFLOW_STEPS = (
+    ("DEPENDENCIES_STEP_OUTCOME", "dependencies", "安装依赖"),
+    ("OFFLINE_CHECKS_STEP_OUTCOME", "offline_checks", "离线回归"),
+    ("DOCTOR_STEP_OUTCOME", "doctor", "配置体检"),
+    ("RESTORE_STATE_STEP_OUTCOME", "restore_state", "恢复跨周状态"),
+    ("SMOKE_STEP_OUTCOME", "smoke", "真实接口冒烟"),
+    ("PIPELINE_STEP_OUTCOME", "pipeline", "研究与邮件主流程"),
+    ("PREPARE_STATE_STEP_OUTCOME", "prepare_state", "准备状态制品"),
+    ("UPLOAD_STATE_STEP_OUTCOME", "upload_state", "上传跨周状态"),
+    ("UPLOAD_REPORT_STEP_OUTCOME", "upload_report", "上传报告制品"),
+    ("UPLOAD_AUDIT_STEP_OUTCOME", "upload_audit", "上传审计制品"),
+)
 
 
 async def send_report_email(
@@ -62,9 +75,11 @@ async def send_failure_email(context: dict | None = None) -> bool:
         "run_url": os.getenv("GITHUB_RUN_URL", ""),
         "run_id": os.getenv("GITHUB_RUN_ID", ""),
         "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT", ""),
+        "commit_sha": os.getenv("GITHUB_SHA", ""),
         "step_outcome": os.getenv("PIPELINE_STEP_OUTCOME", "failure"),
         "audit_artifact": os.getenv("AUDIT_ARTIFACT_NAME", ""),
         **_local_failure_context(),
+        **_workflow_failure_context(),
         **(context or {}),
     }
     await asyncio.to_thread(_send_failure_sync, payload)
@@ -181,27 +196,42 @@ def _send_sync(
 
 def _send_failure_sync(context: dict) -> None:
     sender = config.SMTP_FROM or config.SMTP_USERNAME
-    date = datetime.now().astimezone().strftime("%Y-%m-%d")
+    date = scheduled_date()
     message = EmailMessage()
     message["Subject"] = f"[运行失败] AI 技术范式雷达｜{date}"
     message["From"] = sender
     message["To"] = ", ".join(config.SMTP_TO)
     run_url = str(context.get("run_url", "")).strip()
     audit_artifact = str(context.get("audit_artifact", "")).strip()
+    failure_class = str(context.get("failure_class", "pipeline"))
+    if failure_class == "preflight":
+        opening = (
+            "任务在正式研究前中止；本轮没有调用研究 API，也没有发送正式报告。"
+        )
+    elif failure_class == "post_delivery":
+        opening = (
+            "研究与邮件主流程已经成功，但后置状态或 artifact 保存失败；"
+            "正式报告可能已经收到，请勿直接 reset_state。"
+        )
+    else:
+        opening = "本期 AI 技术范式雷达未完成，因此没有确认发送正式报告。"
     lines = [
-        "本期 AI 技术范式雷达未完成，因此没有发送正式报告。",
+        opening,
         "",
         f"触发方式：{context.get('event', 'unknown')}",
-        f"主流程结果：{context.get('step_outcome', 'failure')}",
+        f"失败步骤：{context.get('failure_stage', 'unknown')}",
+        f"研究与邮件主流程：{context.get('step_outcome', 'not-run')}",
         f"运行 ID：{context.get('run_id', '')}",
         f"重试序号：{context.get('run_attempt', '')}",
     ]
+    if context.get("commit_sha"):
+        lines.append(f"运行代码：{str(context['commit_sha'])[:12]}")
+    if context.get("workflow_step_summary"):
+        lines.append(f"步骤状态：{context['workflow_step_summary']}")
     if run_url:
         lines.extend([f"运行详情：{run_url}"])
     if audit_artifact:
         lines.extend([f"审计 artifact：{audit_artifact}"])
-    if context.get("failure_stage"):
-        lines.extend([f"最后失败阶段：{context['failure_stage']}"])
     if context.get("failure_detail"):
         lines.extend([f"可见失败原因：{context['failure_detail']}"])
     if context.get("outbox_status"):
@@ -212,15 +242,27 @@ def _send_failure_sync(context: dict) -> None:
                 f"已保存路线草稿：{context.get('fragment_count', 0)} 条",
             ]
         )
-    lines.extend(
-        [
-            "",
-            "研究检查点会独立保存；未成功发送的报告仍保留在交付 outbox，"
-            "不会被误标为已交付，也不需要重新消耗整轮研究 tokens。"
-            "若上面显示待交付 outbox，请保持 reset_state=false 重新运行；"
-            "系统会复用候选快照和已保存路线草稿。请同时查看运行日志与审计 artifact。",
-        ]
-    )
+    if context.get("outbox_status"):
+        action = (
+            "研究检查点和待交付报告仍保留在 outbox。保持 reset_state=false "
+            "重新运行，系统会复用候选快照和已保存路线草稿。"
+        )
+    elif failure_class == "preflight":
+        action = (
+            "本轮尚未进入研究阶段，修复离线回归或配置后重新运行即可；"
+            "既有云端状态 artifact 没有被本次失败覆盖。"
+        )
+    elif failure_class == "post_delivery":
+        action = (
+            "先确认邮箱是否已收到报告，再检查状态 artifact；使用 "
+            "reset_state=false 重试，避免丢失跨周去重状态。"
+        )
+    else:
+        action = (
+            "研究检查点会独立保存；保持 reset_state=false 重试。"
+            "请结合失败步骤、运行日志与审计 artifact 判断是否从 outbox 续跑。"
+        )
+    lines.extend(["", action])
     message.set_content("\n".join(lines))
     _deliver_message(message)
 
@@ -281,6 +323,131 @@ def _local_failure_context() -> dict[str, object]:
     except (OSError, ValueError, TypeError) as exc:
         logger.warning("失败提醒读取审计摘要失败: %s", exc)
     return context
+
+
+def _workflow_failure_context() -> dict[str, object]:
+    """Identify the first failed Actions boundary instead of blaming pipeline."""
+
+    outcomes: list[tuple[str, str, str]] = []
+    for env_name, key, label in _WORKFLOW_STEPS:
+        outcome = os.getenv(env_name, "").strip().lower() or "not-run"
+        outcomes.append((key, label, outcome))
+    failed = next(
+        (item for item in outcomes if item[2] in {"failure", "cancelled"}),
+        None,
+    )
+    if failed is None:
+        return {}
+    key, label, _ = failed
+    pipeline_outcome = next(
+        outcome for step_key, _, outcome in outcomes if step_key == "pipeline"
+    )
+    preflight_keys = {
+        "dependencies",
+        "offline_checks",
+        "restore_state",
+        "doctor",
+        "smoke",
+    }
+    failure_class = (
+        "preflight"
+        if key in preflight_keys
+        else "post_delivery"
+        if pipeline_outcome == "success" and key != "pipeline"
+        else "pipeline"
+    )
+    visible = [
+        f"{step_label}={outcome}"
+        for _, step_label, outcome in outcomes
+        if outcome not in {"not-run", "skipped"}
+    ]
+    context: dict[str, object] = {
+        "failure_stage": label,
+        "failure_class": failure_class,
+        "workflow_step_summary": "；".join(visible),
+    }
+    detail = _workflow_log_detail(key)
+    if detail:
+        context["failure_detail"] = detail
+    return context
+
+
+def _workflow_log_detail(stage: str) -> str:
+    if stage == "offline_checks":
+        try:
+            payload = json.loads(
+                Path("logs/offline_checks.json").read_text(encoding="utf-8")
+            )
+            return _safe_public_text(str(payload.get("failure_summary", "")))
+        except (OSError, ValueError, TypeError):
+            return "离线回归未通过；详细失败用例见 offline_checks.log"
+    if stage == "smoke":
+        try:
+            payload = json.loads(
+                Path("logs/smoke_test_latest.json").read_text(encoding="utf-8")
+            )
+            failed = [
+                f"{item.get('name')}={item.get('detail')}"
+                for item in (payload.get("results") or [])
+                if item.get("status") == "failed"
+            ]
+            return _safe_public_text("；".join(failed[:6]))
+        except (OSError, ValueError, TypeError):
+            return "真实接口冒烟未通过；详细结果见 smoke_test_latest.json"
+    log_names = {
+        "dependencies": "dependencies.log",
+        "restore_state": "state_restore.log",
+        "doctor": "doctor.log",
+        "prepare_state": "state_prepare.log",
+    }
+    filename = log_names.get(stage, "")
+    if not filename:
+        return ""
+    try:
+        lines = [
+            line.strip()
+            for line in Path("logs", filename).read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return ""
+    if stage == "doctor":
+        blocking = [line for line in lines if line.startswith("✗")]
+        if blocking:
+            return _safe_public_text("；".join(blocking[:6]))
+    return _safe_public_text(" | ".join(lines[-6:]))
+
+
+def _safe_public_text(value: str) -> str:
+    result = value.replace("\n", " ").strip()
+    result = re.sub(
+        r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@",
+        r"\1***@",
+        result,
+    )
+    result = re.sub(
+        r"(?i)([?&](?:api[_-]?key|token|password|secret)=)[^&\s]+",
+        r"\1***",
+        result,
+    )
+    for name in (
+        "LLM_API_KEY",
+        "SUB_AGENT_API_KEY",
+        "MAIN_AGENT_API_KEY",
+        "OPENALEX_API_KEY",
+        "SEMANTIC_SCHOLAR_API_KEY",
+        "GITHUB_TOKEN",
+        "TWITTER_BEARER_TOKEN",
+        "TAVILY_API_KEY",
+        "REDDIT_CLIENT_SECRET",
+        "SMTP_PASSWORD",
+    ):
+        secret = str(getattr(config, name, "") or "")
+        if len(secret) >= 6:
+            result = result.replace(secret, "***")
+    return result[:800]
 
 
 def _missing_smtp_config() -> list[str]:

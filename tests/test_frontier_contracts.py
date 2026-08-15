@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from database.paradigm_store import ParadigmStore
 from paradigms.clustering import cluster_extractions, is_priority_review
+from paradigms.discovery import _merge_origins, _raw_to_origin
 from paradigms.landscape import (
     arxiv_priority_author_query_plan,
     arxiv_query_plan,
@@ -24,54 +25,57 @@ from paradigms.models import (
     ResearcherProfile,
     TechnicalEvidence,
 )
-from paradigms.rubric import evaluate_rubric, objective_answers
+from paradigms.rubric import evaluate_rubric
 from paradigms.scoring import is_reportable, score_candidate
 from sources.arxiv_document_source import parse_arxiv_html, parse_project_page
 from sources.arxiv_source import ArxivSource, TECHNICAL_REPORT_QUERY
+from sources.base import RawProject
 from sources.researcher_profile_source import _seed_profiles
 from sources.social_web_search_source import _parse_results
 
 
-T_REX_ATOM = """<?xml version="1.0" encoding="utf-8"?>
+OLD_RESEARCH_PAPER_ATOM = """<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry>
-    <id>https://arxiv.org/abs/2606.17055v2</id>
-    <updated>2026-06-18T17:59:59Z</updated>
-    <published>2026-06-15T17:59:59Z</published>
-    <title>T-Rex: Tactile-Reactive Dexterous Manipulation</title>
-    <summary>We introduce a vision-language-action system with asynchronous tactile feedback for dexterous robot manipulation.</summary>
-    <author><name>Dantong Niu</name></author>
-    <author><name>Zhuoyang Liu</name></author>
-    <author><name>Zekai Wang</name></author>
+    <id>https://arxiv.org/abs/2601.00001v2</id>
+    <updated>2026-01-18T17:59:59Z</updated>
+    <published>2026-01-15T17:59:59Z</published>
+    <title>Event-Synchronous Skill Weaving</title>
+    <summary>We present a new computational process for learning reusable behaviors.</summary>
+    <author><name>Alex Chen</name></author>
+    <author><name>Blair Singh</name></author>
+    <author><name>Casey Park</name></author>
     <author><name>Fei-Fei Li</name></author>
     <category term="cs.RO"/>
     <category term="cs.AI"/>
-    <link href="https://arxiv.org/abs/2606.17055v2" type="text/html"/>
+    <link href="https://arxiv.org/abs/2601.00001v2" type="text/html"/>
   </entry>
 </feed>
 """
 
-KIMI_K3_ATOM = """<?xml version="1.0" encoding="utf-8"?>
+SYSTEM_REPORT_ATOM = """<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"
       xmlns:arxiv="http://arxiv.org/schemas/atom">
   <entry>
-    <id>https://arxiv.org/abs/2607.24653v1</id>
-    <updated>2026-07-27T16:49:54Z</updated>
-    <published>2026-07-27T16:49:54Z</published>
-    <title>Kimi K3: Open Frontier Intelligence</title>
-    <summary>We introduce Kimi K3, a 2.8T-parameter native multimodal
-    Mixture-of-Experts language model with Kimi Delta Attention, a one
-    million token context window, post-training reinforcement learning,
+    <id>https://arxiv.org/abs/2601.00002v1</id>
+    <updated>2026-01-27T16:49:54Z</updated>
+    <published>2026-01-27T16:49:54Z</published>
+    <title>Project Atlas: Open Multimodal Intelligence</title>
+    <summary>We introduce Project Atlas, a native multimodal
+    Mixture-of-Experts language model with a new attention mechanism,
+    a long context window, post-training reinforcement learning,
     algorithm-system co-design, deployment innovations, extensive
     evaluations, and released model weights.</summary>
-    <author><name>Kimi Team</name></author>
+    <author><name>Atlas Research Team</name></author>
     <category term="cs.CL"/>
     <category term="cs.LG"/>
-    <arxiv:comment>K3 tech report</arxiv:comment>
-    <link href="https://arxiv.org/abs/2607.24653v1" type="text/html"/>
+    <arxiv:comment>Technical report</arxiv:comment>
+    <link href="https://arxiv.org/abs/2601.00002v1" type="text/html"/>
   </entry>
 </feed>
 """
+
+FIXTURE_REFERENCE_TIME = datetime(2026, 1, 30, tzinfo=timezone.utc)
 
 
 def _max_assessment(types: list[str], stage: str) -> dict:
@@ -87,7 +91,7 @@ def _max_assessment(types: list[str], stage: str) -> dict:
         {
             "criterion_id": criterion["id"],
             "answer": max(criterion["options"], key=criterion["options"].get),
-            "evidence": f"{criterion['id']} 的离线黄金样例证据",
+            "evidence": f"{criterion['id']} 的离线契约证据",
         }
         for criterion in criteria
     ]
@@ -134,7 +138,112 @@ def _route_candidate(
     )
 
 
-class FrontierCoverageTests(unittest.TestCase):
+def _observe_extraction(raw: dict) -> ParadigmExtraction:
+    evidence = TechnicalEvidence(
+        source="arxiv",
+        evidence_type=EvidenceType.PRIMARY_PAPER,
+        title="Event-Synchronous Skill Weaving",
+        url="https://arxiv.org/abs/2601.00001",
+        summary="A new computational process for reusable robot behaviors.",
+        authors=["Alex Chen", "Blair Singh"],
+        identifiers={"arxiv": "2601.00001"},
+        raw={"frontier_domains": ["embodied_robotics"], **raw},
+    )
+    assessment = _max_assessment(["embodiment"], "screening")
+    assessment["decision"] = "observe"
+    return ParadigmExtraction(
+        evidence=evidence,
+        is_candidate=True,
+        canonical_name="异步触觉反应式灵巧控制",
+        route_family="高频触觉闭环",
+        thesis="触觉从附加观测变成可以异步触发动作修正的控制状态。",
+        problem_shift="让接触事件可以即时修正慢速动作块。",
+        mechanism="慢速动作专家与高频触觉专家异步协同。",
+        innovation_types=["embodiment"],
+        rubric_assessment=assessment,
+    )
+
+
+class FrontierContractTests(unittest.TestCase):
+    def test_aggregator_recall_keeps_direct_arxiv_primary_url(self) -> None:
+        item = _raw_to_origin(
+            RawProject(
+                source="huggingface-papers",
+                name="Event-Synchronous Skill Weaving",
+                url="https://huggingface.co/papers/2601.00001",
+                description="Aggregated abstract",
+                extra={"arxiv_id": "2601.00001"},
+            )
+        )
+        self.assertEqual(item.url, "https://arxiv.org/abs/2601.00001")
+        self.assertEqual(
+            item.raw["discovery_url"],
+            "https://huggingface.co/papers/2601.00001",
+        )
+
+    def test_origin_merge_cannot_downgrade_primary_url_or_identity(self) -> None:
+        direct = TechnicalEvidence(
+            source="arxiv",
+            evidence_type=EvidenceType.PRIMARY_PAPER,
+            title="Event-Synchronous Skill Weaving",
+            url="https://arxiv.org/abs/2601.00001",
+            summary="short",
+            identifiers={"arxiv": "2601.00001"},
+            raw={
+                "origin_priority": 3,
+                "origin_kind": "technical_report",
+                "origin_classification_reason": "explicit_document_metadata",
+                "publisher_tier": "established",
+                "publisher_evidence": "verified official source",
+                "priority_researcher_match": True,
+                "frontier_domains": ["embodied_robotics"],
+            },
+        )
+        aggregator = TechnicalEvidence(
+            source="huggingface-papers",
+            evidence_type=EvidenceType.PRIMARY_PAPER,
+            title=direct.title,
+            url="https://huggingface.co/papers/2601.00001",
+            summary="a much longer aggregated description",
+            identifiers={"arxiv": "2601.00001"},
+            raw={
+                "origin_priority": 0,
+                "origin_kind": "research_paper",
+                "publisher_tier": "unknown",
+                "frontier_domains": ["world_spatial_models"],
+            },
+        )
+        merged = _merge_origins([direct, aggregator])[0]
+        self.assertEqual(merged.url, direct.url)
+        self.assertEqual(merged.summary, aggregator.summary)
+        self.assertEqual(merged.raw["origin_priority"], 3)
+        self.assertEqual(merged.raw["origin_kind"], "technical_report")
+        self.assertEqual(merged.raw["publisher_tier"], "established")
+        self.assertEqual(
+            merged.raw["origin_classification_reason"],
+            "explicit_document_metadata",
+        )
+        self.assertTrue(merged.raw["priority_researcher_match"])
+        self.assertEqual(
+            set(merged.raw["frontier_domains"]),
+            {"embodied_robotics", "world_spatial_models"},
+        )
+
+    def test_generic_titles_cannot_merge_unrelated_primary_materials(self) -> None:
+        first = TechnicalEvidence(
+            source="lab-a",
+            evidence_type=EvidenceType.TECHNICAL_BLOG,
+            title="Technical Report",
+            url="https://lab-a.example/report",
+        )
+        second = TechnicalEvidence(
+            source="lab-b",
+            evidence_type=EvidenceType.TECHNICAL_BLOG,
+            title="Technical Report",
+            url="https://lab-b.example/report",
+        )
+        self.assertEqual(len(_merge_origins([first, second])), 2)
+
     def test_landscape_covers_full_ai_technical_stack(self) -> None:
         landscape = load_landscape()
         domain_ids = {item["id"] for item in landscape["domains"]}
@@ -158,58 +267,33 @@ class FrontierCoverageTests(unittest.TestCase):
             self.assertIn(marker, queries)
         self.assertIn('co:"tech report"', TECHNICAL_REPORT_QUERY.casefold())
 
-    def test_trex_is_recalled_in_bootstrap_window_and_prioritized(self) -> None:
-        source = ArxivSource(lookback_days=60, seed_arxiv_ids=[])
-        parsed = source._parse_atom_feed(
-            T_REX_ATOM,
-            query_group="physical_intelligence",
-            domain_ids=["world_spatial_models", "embodied_robotics"],
-        )
-        self.assertEqual(len(parsed), 1)
-        item = parsed[0]
-        self.assertIn("embodied_robotics", item.extra["frontier_domains"])
-        self.assertEqual(item.extra["origin_priority"], 2)
-        self.assertEqual(item.extra["updated_at"], "2026-06-18T17:59:59Z")
-
-    def test_kimi_k3_is_recalled_as_multi_mechanism_system_report(self) -> None:
-        source = ArxivSource(lookback_days=14, seed_arxiv_ids=[])
-        parsed = source._parse_atom_feed(
-            KIMI_K3_ATOM,
-            query_group="core_models",
-            domain_ids=[
-                "foundation_models",
-                "reasoning_agents",
-                "multimodal_generation",
-            ],
-        )
-        self.assertEqual(len(parsed), 1)
-        item = parsed[0]
-        self.assertEqual(item.extra["origin_kind"], "technical_report")
-        self.assertEqual(item.extra["origin_priority"], 3)
-        self.assertEqual(
-            item.extra["origin_classification_reason"],
-            "explicit_document_metadata:tech report",
-        )
-        self.assertEqual(item.extra["arxiv_comment"], "K3 tech report")
-        self.assertEqual(item.extra["organization"], "Moonshot AI")
-        self.assertEqual(item.extra["publisher_tier"], "established")
-        self.assertIn("foundation_models", item.extra["frontier_domains"])
-        self.assertIn("reasoning_agents", item.extra["frontier_domains"])
-        self.assertIn("multimodal_generation", item.extra["frontier_domains"])
-
     def test_system_report_fallback_does_not_require_report_in_title(self) -> None:
-        without_comment = KIMI_K3_ATOM.replace(
-            "<arxiv:comment>K3 tech report</arxiv:comment>",
+        without_comment = SYSTEM_REPORT_ATOM.replace(
+            "<arxiv:comment>Technical report</arxiv:comment>",
             "",
         )
         item = ArxivSource(
             lookback_days=14,
             seed_arxiv_ids=[],
+            reference_time=FIXTURE_REFERENCE_TIME,
         )._parse_atom_feed(without_comment)[0]
         self.assertEqual(item.extra["origin_kind"], "technical_report")
         self.assertEqual(
             item.extra["origin_classification_reason"],
             "inferred_system_scope_report",
+        )
+
+    def test_explicit_report_metadata_sets_document_priority(self) -> None:
+        item = ArxivSource(
+            lookback_days=14,
+            seed_arxiv_ids=[],
+            reference_time=FIXTURE_REFERENCE_TIME,
+        )._parse_atom_feed(SYSTEM_REPORT_ATOM)[0]
+        self.assertEqual(item.extra["origin_kind"], "technical_report")
+        self.assertEqual(item.extra["origin_priority"], 3)
+        self.assertEqual(
+            item.extra["origin_classification_reason"],
+            "explicit_document_metadata:technical report",
         )
 
     def test_priority_researcher_lane_does_not_depend_on_known_technical_terms(self) -> None:
@@ -221,39 +305,35 @@ class FrontierCoverageTests(unittest.TestCase):
         self.assertIn('au:"Fei-Fei Li"', plans[0]["query"])
         self.assertNotIn("world model", plans[0]["query"].casefold())
 
-        novel_atom = T_REX_ATOM.replace(
-            "T-Rex: Tactile-Reactive Dexterous Manipulation",
-            "Project Banyan: Event-Synchronous Skill Weaving",
-        ).replace(
-            "We introduce a vision-language-action system with asynchronous tactile feedback for dexterous robot manipulation.",
-            "We present a new computational process for learning reusable behaviors.",
-        )
         item = ArxivSource(
             lookback_days=60,
             seed_arxiv_ids=[],
+            reference_time=FIXTURE_REFERENCE_TIME,
         )._parse_atom_feed(
-            novel_atom,
+            OLD_RESEARCH_PAPER_ATOM,
             query_group="priority_researchers",
         )[0]
         self.assertEqual(item.extra["frontier_domains"], [])
         self.assertEqual(item.extra["origin_priority"], 2)
+        self.assertTrue(item.extra["priority_researcher_match"])
 
     def test_report_search_hit_does_not_force_an_ordinary_paper_into_report_mode(self) -> None:
-        ordinary = T_REX_ATOM.replace(
-            "T-Rex: Tactile-Reactive Dexterous Manipulation",
+        ordinary = OLD_RESEARCH_PAPER_ATOM.replace(
+            "Event-Synchronous Skill Weaving",
             "Calibration for Small Robot Policies",
         ).replace(
-            "We introduce a vision-language-action system with asynchronous tactile feedback for dexterous robot manipulation.",
+            "We present a new computational process for learning reusable behaviors.",
             "We compare against a technical report and improve calibration on one benchmark.",
         ).replace(
-            "<author><name>Zhuoyang Liu</name></author>\n"
-            "    <author><name>Zekai Wang</name></author>\n"
+            "<author><name>Blair Singh</name></author>\n"
+            "    <author><name>Casey Park</name></author>\n"
             "    <author><name>Fei-Fei Li</name></author>",
             "",
         )
         item = ArxivSource(
             lookback_days=60,
             seed_arxiv_ids=[],
+            reference_time=FIXTURE_REFERENCE_TIME,
         )._parse_atom_feed(
             ordinary,
             force_technical_report=True,
@@ -266,17 +346,18 @@ class FrontierCoverageTests(unittest.TestCase):
         )
 
     def test_report_recall_lane_discards_unverified_query_false_positive(self) -> None:
-        ordinary = T_REX_ATOM.replace(
-            "T-Rex: Tactile-Reactive Dexterous Manipulation",
+        ordinary = OLD_RESEARCH_PAPER_ATOM.replace(
+            "Event-Synchronous Skill Weaving",
             "Calibration for Small Robot Policies",
         ).replace(
-            "We introduce a vision-language-action system with asynchronous tactile feedback for dexterous robot manipulation.",
+            "We present a new computational process for learning reusable behaviors.",
             "We compare against a technical report and improve calibration on one benchmark.",
         )
         source = ArxivSource(
             lookback_days=7,
             high_signal_lookback_days=60,
             seed_arxiv_ids=[],
+            reference_time=FIXTURE_REFERENCE_TIME,
         )
         source._request = AsyncMock(return_value=MagicMock(text=ordinary))
 
@@ -312,134 +393,105 @@ class FrontierCoverageTests(unittest.TestCase):
         self.assertEqual(result.origin_kind, "technical_report")
         self.assertEqual(result.reason, "official_document_with_system_scope")
 
-    def test_kimi_k3_canary_crosses_publisher_and_admission_logic(self) -> None:
-        raw = ArxivSource(
-            lookback_days=14,
+    def test_old_item_falls_outside_normal_week_but_exact_seed_can_backfill(self) -> None:
+        ordinary_author_atom = OLD_RESEARCH_PAPER_ATOM.replace(
+            "<author><name>Fei-Fei Li</name></author>",
+            "<author><name>Drew Morgan</name></author>",
+        )
+        weekly = ArxivSource(
+            lookback_days=7,
             seed_arxiv_ids=[],
-        )._parse_atom_feed(
-            KIMI_K3_ATOM,
-            query_group="core_models",
-            domain_ids=["foundation_models"],
-        )[0]
-        evidence = TechnicalEvidence(
-            source="arxiv",
-            evidence_type=EvidenceType.PRIMARY_PAPER,
-            title=raw.name,
-            url=raw.url,
-            summary=raw.readme_summary,
-            published_at=raw.created_at,
-            authors=raw.extra["all_authors"],
-            organization=raw.extra["organization"],
-            identifiers={"arxiv": "2607.24653"},
-            raw=raw.extra,
+            reference_time=FIXTURE_REFERENCE_TIME,
         )
-        assessment = _max_assessment(["architecture", "systems"], "final")
-        candidate = ParadigmCandidate(
-            key="kda-attnres",
-            name="线性注意力与深层残差路由协同扩展",
-            route_family="超大稀疏模型的稳定高效扩展",
-            thesis="同时重写注意力状态更新和深层残差聚合。",
-            problem_shift="从单独扩大 MoE 转向注意力、残差和系统协同设计。",
-            mechanism="KDA、AttnRes 与 Stable LatentMoE 共同稳定超大规模训练。",
-            innovation_types=["architecture", "systems"],
-            evidence=[evidence],
-            screening_rubric=_max_assessment(
-                ["architecture", "systems"],
-                "screening",
-            ),
-            rubric_assessment=assessment,
-        )
-        score_candidate(candidate)
-        self.assertEqual(candidate.publisher_tier, "established")
-        self.assertTrue(candidate.is_formal_technical_report)
-        self.assertTrue(is_reportable(candidate))
-        self.assertIn("优先解读", candidate.admission_reason)
-
-    def test_trex_falls_outside_normal_week_but_exact_seed_can_backfill(self) -> None:
-        weekly = ArxivSource(lookback_days=7, seed_arxiv_ids=[])
-        self.assertEqual(weekly._parse_atom_feed(T_REX_ATOM), [])
+        self.assertEqual(weekly._parse_atom_feed(ordinary_author_atom), [])
         seeded = weekly._parse_atom_feed(
-            T_REX_ATOM,
+            ordinary_author_atom,
             query_group="explicit_seed",
             ignore_lookback=True,
         )
         self.assertEqual(len(seeded), 1)
         self.assertTrue(seeded[0].extra["explicit_seed"])
+        # 精确补录只改变可发现性，不伪造重点研究者身份或编辑资格。
+        self.assertFalse(seeded[0].extra["priority_researcher_match"])
 
     def test_recent_revision_of_old_paper_is_recalled(self) -> None:
         recent_revision = (
-            datetime.now(timezone.utc) - timedelta(days=1)
+            FIXTURE_REFERENCE_TIME - timedelta(days=1)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
-        xml = T_REX_ATOM.replace(
-            "2026-06-18T17:59:59Z", recent_revision
+        xml = OLD_RESEARCH_PAPER_ATOM.replace(
+            "2026-01-18T17:59:59Z", recent_revision
         )
-        source = ArxivSource(lookback_days=7, seed_arxiv_ids=[])
+        source = ArxivSource(
+            lookback_days=7,
+            seed_arxiv_ids=[],
+            reference_time=FIXTURE_REFERENCE_TIME,
+        )
         self.assertEqual(len(source._parse_atom_feed(xml)), 1)
 
     def test_arxiv_html_hydration_extracts_document_people_and_project(self) -> None:
         html = """
         <html><head>
-          <meta name="citation_author" content="Dantong Niu">
-          <meta name="citation_author" content="Zhuoyang Liu">
-          <meta name="citation_author" content="Zekai Wang">
-          <meta name="citation_author_institution" content="UC Berkeley">
+          <meta name="citation_author" content="Alex Chen">
+          <meta name="citation_author" content="Blair Singh">
+          <meta name="citation_author" content="Casey Park">
+          <meta name="citation_author_institution" content="Example University">
         </head><body>
           <div class="ltx_authors">
-            <span class="ltx_personname"><a href="https://dantong.example">Dantong Niu</a></span>
+            <span class="ltx_personname"><a href="https://alex.example">Alex Chen</a></span>
           </div>
-          <span class="ltx_note">Dantong Niu, Zhuoyang Liu and Zekai Wang contributed equally.</span>
-          <article><p>The fast tactile expert reacts asynchronously to contact while the slow expert predicts action chunks.</p>
-          <a href="https://tactile-reactive-dexterous.github.io/">Project page</a>
-          <a href="https://github.com/ZhuoyangLiu2005/T-Rex">Code</a></article>
+          <span class="ltx_note">Alex Chen, Blair Singh and Casey Park contributed equally.</span>
+          <article><p>The fast controller reacts asynchronously while the slow controller predicts action chunks.</p>
+          <a href="https://project-atlas.example/">Project page</a>
+          <a href="https://github.com/example-lab/project-atlas">Code</a></article>
         </body></html>
         """
-        parsed = parse_arxiv_html(html, base_url="https://arxiv.org/html/2606.17055")
-        self.assertIn("fast tactile expert", parsed["document_excerpt"])
-        self.assertIn("UC Berkeley", parsed["affiliations"])
+        parsed = parse_arxiv_html(html, base_url="https://arxiv.org/html/2601.00001")
+        self.assertIn("fast controller", parsed["document_excerpt"])
+        self.assertIn("Example University", parsed["affiliations"])
         self.assertEqual(
-            parsed["author_profile_urls"]["Dantong Niu"],
-            "https://dantong.example",
+            parsed["author_profile_urls"]["Alex Chen"],
+            "https://alex.example",
         )
         self.assertIn(
-            "https://github.com/ZhuoyangLiu2005/T-Rex",
+            "https://github.com/example-lab/project-atlas",
             parsed["github_repositories"],
         )
-        self.assertEqual(parsed["author_roles"]["Dantong Niu"], "共同第一作者")
+        self.assertEqual(parsed["author_roles"]["Alex Chen"], "共同第一作者")
 
     def test_researcher_selection_keeps_three_leads_last_and_priority_people(self) -> None:
         evidence = TechnicalEvidence(
             source="arxiv",
             evidence_type=EvidenceType.PRIMARY_PAPER,
-            title="T-Rex",
-            url="https://arxiv.org/abs/2606.17055",
+            title="Event-Synchronous Skill Weaving",
+            url="https://arxiv.org/abs/2601.00001",
             authors=[
-                "Dantong Niu",
-                "Zhuoyang Liu",
-                "Zekai Wang",
+                "Alex Chen",
+                "Blair Singh",
+                "Casey Park",
                 "Other Author",
                 "Fei-Fei Li",
                 "Trevor Darrell",
             ],
-            organization="UC Berkeley; NVIDIA; Stanford",
+            organization="Example University; Stanford",
             raw={
                 "author_roles": {
-                    "Dantong Niu": "共同第一作者",
-                    "Zhuoyang Liu": "共同第一作者",
-                    "Zekai Wang": "共同第一作者",
+                    "Alex Chen": "共同第一作者",
+                    "Blair Singh": "共同第一作者",
+                    "Casey Park": "共同第一作者",
                 }
             },
         )
         profiles = _seed_profiles(evidence, [], 6)
         by_name = {profile.name: profile for profile in profiles}
         self.assertTrue(
-            {"Dantong Niu", "Zhuoyang Liu", "Zekai Wang", "Fei-Fei Li", "Trevor Darrell"}
+            {"Alex Chen", "Blair Singh", "Casey Park", "Fei-Fei Li", "Trevor Darrell"}
             <= set(by_name)
         )
-        self.assertEqual(by_name["Zekai Wang"].role, "共同第一作者")
+        self.assertEqual(by_name["Casey Park"].role, "共同第一作者")
         focused = _seed_profiles(evidence, [], 3)
         self.assertEqual(
             [profile.name for profile in focused],
-            ["Dantong Niu", "Fei-Fei Li", "Trevor Darrell"],
+            ["Alex Chen", "Fei-Fei Li", "Trevor Darrell"],
         )
 
     def test_collective_team_author_is_publisher_not_person_profile(self) -> None:
@@ -447,167 +499,95 @@ class FrontierCoverageTests(unittest.TestCase):
             source="arxiv",
             evidence_type=EvidenceType.PRIMARY_PAPER,
             title="Frontier System Report",
-            url="https://arxiv.org/abs/2607.24653",
+            url="https://arxiv.org/abs/2601.00002",
             authors=[
-                "Kimi Team",
-                "Tongtong Bai",
-                "Yifan Bai",
-                "Yiping Bao",
+                "Atlas Research Team",
+                "Alex Chen",
+                "Blair Singh",
+                "Casey Park",
                 "Senior Author",
             ],
-            organization="Moonshot AI",
+            organization="Example Research Lab",
         )
         profiles = _seed_profiles(evidence, [], 5)
         by_name = {profile.name: profile for profile in profiles}
-        self.assertNotIn("Kimi Team", by_name)
+        self.assertNotIn("Atlas Research Team", by_name)
         self.assertNotIn("Senior Author", by_name)
-        self.assertIn("Tongtong Bai", by_name)
+        self.assertIn("Alex Chen", by_name)
         self.assertEqual(
-            by_name["Tongtong Bai"].role,
+            by_name["Alex Chen"].role,
             "第一位具名作者/贡献角色待核验",
         )
 
     def test_project_page_maps_author_profiles_roles_and_public_email(self) -> None:
         parsed = parse_project_page(
             """
-            <a href="https://dantong.example">Dantong Niu*</a>
-            <a href="https://zhuoyang.example">Zhuoyang Liu*</a>
-            <a href="mailto:zekai@university.edu">Zekai Wang*</a>
+            <a href="https://alex.example">Alex Chen*</a>
+            <a href="https://blair.example">Blair Singh*</a>
+            <a href="mailto:casey@university.edu">Casey Park*</a>
             <p>* Equal Contribution</p>
             """,
-            base_url="https://tactile-reactive-dexterous.github.io/",
-            author_names=["Dantong Niu", "Zhuoyang Liu", "Zekai Wang"],
+            base_url="https://project-atlas.example/",
+            author_names=["Alex Chen", "Blair Singh", "Casey Park"],
         )
         self.assertEqual(
-            parsed["author_profile_urls"]["Dantong Niu"],
-            "https://dantong.example",
+            parsed["author_profile_urls"]["Alex Chen"],
+            "https://alex.example",
         )
         self.assertEqual(
-            parsed["author_public_emails"]["Zekai Wang"],
-            "zekai@university.edu",
+            parsed["author_public_emails"]["Casey Park"],
+            "casey@university.edu",
         )
-        self.assertEqual(parsed["author_roles"]["Zhuoyang Liu"], "共同第一作者")
-
-    def test_trex_canary_crosses_full_post_recall_logic(self) -> None:
-        raw = ArxivSource(lookback_days=60, seed_arxiv_ids=[])._parse_atom_feed(
-            T_REX_ATOM,
-            query_group="physical_intelligence",
-            domain_ids=["embodied_robotics"],
-        )[0]
-        evidence = TechnicalEvidence(
-            source="arxiv",
-            evidence_type=EvidenceType.PRIMARY_PAPER,
-            title=raw.name,
-            url=raw.url,
-            summary=raw.readme_summary,
-            published_at=raw.created_at,
-            authors=raw.extra["all_authors"],
-            identifiers={"arxiv": "2606.17055"},
-            raw=raw.extra,
-        )
-        screening = _max_assessment(["embodiment", "data"], "screening")
-        extraction = ParadigmExtraction(
-            evidence=evidence,
-            is_candidate=True,
-            canonical_name="异步触觉反应式灵巧控制",
-            route_family="高频触觉闭环的机器人基础策略",
-            thesis="触觉成为快速控制状态。",
-            problem_shift="从视觉动作块转向接触事件驱动修正。",
-            mechanism="慢速动作专家与高频触觉专家异步协同。",
-            innovation_types=["embodiment", "data"],
-            keywords=["tactile", "asynchronous control", "dexterous manipulation"],
-            rubric_assessment=screening,
-        )
-        candidates = cluster_extractions([extraction])
-        self.assertEqual(len(candidates), 1)
-        item = candidates[0]
-        item.rubric_assessment = _max_assessment(
-            ["embodiment", "data"], "final"
-        )
-        item.researchers = [
-            ResearcherProfile(
-                name="Dantong Niu",
-                role="共同第一作者",
-                current_affiliation="Stanford University",
-                representative_works=[
-                    {"title": "Prior tactile work"},
-                    {"title": "Prior robot learning work"},
-                ],
-                profile_urls={"homepage": "https://dantong.example"},
-                identifiers={"openalex": "https://openalex.org/A1"},
-                trajectory_consistency=8,
-            ),
-            ResearcherProfile(
-                name="Fei-Fei Li",
-                role="共同作者",
-                current_affiliation="Stanford University",
-                profile_urls={"homepage": "https://profiles.stanford.edu/fei-fei-li"},
-                identifiers={"openalex": "https://openalex.org/A2"},
-            ),
-        ]
-        item.evidence.append(
-            TechnicalEvidence(
-                source="github",
-                evidence_type=EvidenceType.IMPLEMENTATION,
-                title="ZhuoyangLiu2005/T-Rex",
-                url="https://github.com/ZhuoyangLiu2005/T-Rex",
-                metrics={"stars": 179, "forks": 20},
-                identifiers={"github": "ZhuoyangLiu2005/T-Rex"},
-                raw={
-                    "relationship": "paper_linked_repository",
-                    "independence": "official",
-                },
-            )
-        )
-        score_candidate(item)
-        self.assertEqual(item.publisher_tier, "verified")
-        self.assertTrue(is_reportable(item))
-        answers = {
-            answer["criterion_id"]: answer["answer"]
-            for answer in objective_answers(item)
-        }
-        self.assertEqual(
-            answers["independent_validation"],
-            "official_implementation_uptake",
-        )
-        self.assertEqual(answers["secondary_discussion"], "none_or_unsearched")
+        self.assertEqual(parsed["author_roles"]["Blair Singh"], "共同第一作者")
 
     def test_high_potential_observe_candidate_gets_review_not_auto_report(self) -> None:
-        raw = ArxivSource(lookback_days=60, seed_arxiv_ids=[])._parse_atom_feed(
-            T_REX_ATOM,
-            query_group="physical_intelligence",
-            domain_ids=["embodied_robotics"],
-        )[0]
-        evidence = TechnicalEvidence(
-            source="arxiv",
-            evidence_type=EvidenceType.PRIMARY_PAPER,
-            title=raw.name,
-            url=raw.url,
-            summary=raw.readme_summary,
-            authors=raw.extra["all_authors"],
-            identifiers={"arxiv": "2606.17055"},
-            raw=raw.extra,
-        )
-        assessment = _max_assessment(["embodiment"], "screening")
-        assessment["decision"] = "observe"
-        extraction = ParadigmExtraction(
-            evidence=evidence,
-            is_candidate=True,
-            canonical_name="异步触觉反应式灵巧控制",
-            route_family="高频触觉闭环",
-            thesis="触觉从附加观测变成可以异步触发动作修正的控制状态。",
-            problem_shift="让接触事件可以即时修正慢速动作块。",
-            mechanism="慢速动作专家与高频触觉专家异步协同。",
-            innovation_types=["embodiment"],
-            rubric_assessment=assessment,
+        extraction = _observe_extraction(
+            {
+                "origin_priority": 2,
+                "priority_researcher_match": True,
+            }
         )
         self.assertTrue(is_priority_review(extraction))
         self.assertEqual(len(cluster_extractions([extraction])), 1)
         # 复核通道只让它进入深挖；最终报告仍必须重新通过 final Rubric。
         candidate = cluster_extractions([extraction])[0]
-        candidate.rubric_assessment = assessment
+        candidate.rubric_assessment = extraction.rubric_assessment
         score_candidate(candidate)
         self.assertFalse(is_reportable(candidate))
+
+    def test_manual_seed_is_recall_only_not_editorial_priority(self) -> None:
+        extraction = _observe_extraction(
+            {
+                "origin_priority": 3,
+                "explicit_seed": True,
+                "origin_kind": "research_paper",
+                "publisher_tier": "unknown",
+            }
+        )
+        self.assertFalse(is_priority_review(extraction))
+        self.assertEqual(cluster_extractions([extraction]), [])
+
+    def test_unknown_technical_report_does_not_inherit_review_priority(self) -> None:
+        extraction = _observe_extraction(
+            {
+                "origin_priority": 3,
+                "origin_kind": "technical_report",
+                "publisher_tier": "unknown",
+            }
+        )
+        self.assertFalse(is_priority_review(extraction))
+        self.assertEqual(cluster_extractions([extraction]), [])
+
+    def test_established_official_report_gets_bounded_re_review(self) -> None:
+        extraction = _observe_extraction(
+            {
+                "origin_priority": 3,
+                "origin_kind": "technical_report",
+                "publisher_tier": "established",
+            }
+        )
+        self.assertTrue(is_priority_review(extraction))
+        self.assertEqual(len(cluster_extractions([extraction])), 1)
 
     def test_unknown_official_repo_cannot_replace_publisher_or_independent_evidence(self) -> None:
         item = _route_candidate(
@@ -762,20 +742,20 @@ class FrontierCoverageTests(unittest.TestCase):
 
     def test_tavily_webwide_result_is_discovery_only(self) -> None:
         item = _route_candidate(
-            key="2606.17055",
+            key="2601.00001",
             route_family="tactile control",
             mechanism="tactile feedback",
             keywords=["tactile", "feedback"],
         )
-        item.evidence[0].title = "T-Rex: Tactile-Reactive Dexterous Manipulation"
+        item.evidence[0].title = "Event-Synchronous Skill Weaving"
         found = _parse_results(
             {
                 "request_id": "req-web",
                 "results": [
                     {
-                        "title": "T-Rex paper notes",
-                        "url": "https://researcher.github.io/posts/t-rex-paper-notes/",
-                        "content": "T-Rex: Tactile-Reactive Dexterous Manipulation analysis",
+                        "title": "Event-Synchronous Skill Weaving paper notes",
+                        "url": "https://researcher.example/posts/event-synchronous-notes/",
+                        "content": "Event-Synchronous Skill Weaving analysis",
                         "score": 0.9,
                     }
                 ],

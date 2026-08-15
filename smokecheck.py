@@ -21,7 +21,7 @@ from agents.llm_utils import build_client, resolve_all
 
 ARXIV_API = "https://export.arxiv.org/api/query"
 HF_PAPERS_API = "https://huggingface.co/api/daily_papers"
-SMOKE_CONTRACT_VERSION = "2026-07-30.1"
+SMOKE_CONTRACT_VERSION = "2026-08-15.1"
 
 
 @dataclass
@@ -440,7 +440,9 @@ async def _openalex_works() -> tuple[int, str]:
             headers={"User-Agent": "AI-Paradigm-Radar/3.2"},
             params={
                 "api_key": config.OPENALEX_API_KEY,
-                "search": '"world model"',
+                # Smoke 只验证 Works 的搜索、日期过滤与响应结构，不拿某条
+                # 前沿路线充当发布门。
+                "search": '"machine learning"',
                 "filter": f"from_publication_date:{cutoff.isoformat()}",
                 "sort": "relevance_score:desc,publication_date:desc",
                 "per-page": 2,
@@ -486,7 +488,7 @@ async def _openreview() -> tuple[int, str]:
         response = await client.get(
             "https://api2.openreview.net/notes/search",
             params={
-                "query": "world model",
+                "query": "machine learning",
                 "venueid": config.OPENREVIEW_VENUES[0],
                 "limit": 1,
                 "offset": 0,
@@ -502,19 +504,9 @@ async def _openreview() -> tuple[int, str]:
 
 
 async def _priority_pages() -> tuple[int, str]:
-    preferred_hosts = {
-        "www.moonshot.ai",
-        "qwenlm.github.io",
-        "deepmind.google",
-    }
-    pages = [
-        page
-        for page in config.PRIORITY_RESEARCH_PAGES
-        if (urlparse(page).hostname or "") in preferred_hosts
-    ][:1]
-    if not pages:
-        pages = config.PRIORITY_RESEARCH_PAGES[:1]
-    page = pages[0]
+    # 配置顺序本身就是用户的探针选择。不要偷偷偏爱曾经作为金丝雀的
+    # 公司或项目，否则 smoke 会重新耦合到历史漏项。
+    page = config.PRIORITY_RESEARCH_PAGES[0]
     async with httpx.AsyncClient(
         timeout=20,
         follow_redirects=True,
@@ -563,7 +555,7 @@ async def _github() -> tuple[int, str]:
         response = await client.get(
             "https://api.github.com/search/repositories",
             headers=headers,
-            params={"q": "qwen in:name,description", "per_page": 2},
+            params={"q": "machine-learning stars:>1000", "per_page": 2},
         )
         response.raise_for_status()
         items = response.json().get("items")
@@ -580,7 +572,11 @@ async def _hackernews() -> tuple[int, str]:
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.get(
             "https://hn.algolia.com/api/v1/search",
-            params={"query": "world model", "tags": "story", "hitsPerPage": 3},
+            params={
+                "query": "artificial intelligence",
+                "tags": "story",
+                "hitsPerPage": 3,
+            },
         )
         response.raise_for_status()
         items = response.json().get("hits", [])
@@ -601,7 +597,7 @@ async def _tavily() -> tuple[int, str]:
                 "Content-Type": "application/json",
             },
             json={
-                "query": '"V-JEPA 2" AI',
+                "query": "artificial intelligence research discussion",
                 "search_depth": "basic",
                 "max_results": 3,
                 "topic": "general",
@@ -656,7 +652,11 @@ async def _reddit() -> tuple[int, str]:
                 "Authorization": f"Bearer {token}",
                 "User-Agent": config.REDDIT_USER_AGENT,
             },
-            params={"q": '"V-JEPA 2"', "limit": 3, "sort": "relevance"},
+            params={
+                "q": "artificial intelligence research",
+                "limit": 3,
+                "sort": "relevance",
+            },
         )
         response.raise_for_status()
         items = ((response.json().get("data") or {}).get("children") or [])
@@ -668,7 +668,10 @@ async def _x_recent_search() -> tuple[int, str]:
         response = await client.get(
             "https://api.x.com/2/tweets/search/recent",
             headers={"Authorization": f"Bearer {config.TWITTER_BEARER_TOKEN}"},
-            params={"query": '"V-JEPA 2" -is:retweet', "max_results": 10},
+            params={
+                "query": '"artificial intelligence" -is:retweet',
+                "max_results": 10,
+            },
         )
         response.raise_for_status()
         items = response.json().get("data", [])

@@ -1,6 +1,34 @@
 # AI 技术范式雷达体检报告
 
-> 2026-08-09 第十八次更新。本轮针对运行 31318228765 在研究完成后死于总编辑超时继续做工程收敛；只运行离线测试与静态编译，没有请求真实 API、执行完整流水线或发送邮件。
+> 2026-08-15 第二十一次更新。本轮从金丝雀驱动造成的语义污染出发，对生产准入、证据合并、增量状态、云端快照、Smoke、信源健康和时区边界做全仓复核；只运行离线测试、静态体检与编译，没有请求真实 API、执行完整流水线或发送邮件。
+
+## 2026-08-15 金丝雀退役后的全仓工程复核
+
+复核确认，历史样本虽然已从端到端测试退役，但留下了一个生产级语义污染：`origin_priority` 同时承担队列排序、正文补水和编辑复核资格，`explicit_seed` 也能让初筛为 `observe` 的材料进入深挖。这样手动补录、未知团队 Technical Report 或曾被当作金丝雀的论文都会获得不应有的研究特权。现在三层语义已拆开：`origin_priority` 只决定先处理谁，seed 只保证材料能被看到；只有已核验重点研究者命中，或 established 机构的正式系统报告/官方发布，才允许 `observe` 进入一次有界复核，最终仍必须通过 final Rubric、发布者与外部承接门槛。
+
+多来源证据合并也修复了两个会破坏报告事实基础的问题。旧逻辑会因 Hugging Face/OpenAlex 摘要更长而把 arXiv/DOI 原文 URL 替换成聚合页，并由后到的未知来源覆盖正式报告类型和 established 发布者；标题为 `Technical Report` 一类泛称的不同材料也可能被错误合并。现在摘要丰富度与链接权威性分别比较，身份字段按单调规则合并，领域标签取并集，只有足够具体的标题才允许无 ID 去重。Hugging Face 论文召回会确定性回到 arXiv；仅有 OpenAlex/Hugging Face 索引而没有直接材料的候选不能通过原文交付闸门。
+
+增量去重原先只签名标题、摘要、作者和机构，摘要未变的 arXiv 新修订或官方页面刚补上的 Full Report PDF 可能永久跳过。内容签名现在纳入直接 URL、发布日期、`updated_at`、arXiv comment 与官方链接文档，同时刻意排除深挖时会变化的正文节选和类型升级字段，既能重新打开真正的新版本，又不会制造每周重复分析循环。覆盖地图版本也不再无条件推进：只有领域查询、非人工 seed 的核心 arXiv 车道和必需学术索引闭合后才提交；动态官方页面/Feed 的局部失败仍披露为 incomplete，但不会让系统因一个长期失效页面永久停在 60 天 bootstrap。
+
+云端状态从同名 overwrite 改为 `paradigm-radar-state-<run_id>` 不可变快照。恢复步骤分页读取全部未过期快照，从新到旧验证下载、ZIP、SQLite 完整性和 schema 迁移，坏快照自动回退上一份；兼容旧同名 artifact，全部不可用时仍 fail closed。报告与审计 artifact 同样使用唯一名称。Workflow 明确 `submodules: false`，离线契约另行检查 `.gitmodules` 的 path/URL 完整性，避免历史辅助仓库再次污染生产 checkout。
+
+Smoke 中对 Moonshot/Qwen/特定世界模型事件的偏好已移除，OpenAlex、OpenReview、GitHub、HN、Tavily、Reddit 与 X 只使用通用协议词；官方研究页严格取配置顺序中的第一个入口。arXiv 仍使用一个长期稳定记录验证 Atom 协议，但不运行生产召回。Follow Builders 新增逐 Feed 健康账本：部分网络/解析失败保留已取得结果并标记 `partial`，全部失败标记 `query_failed`，404/本地缺失则作为成功的空 Feed 契约，不再被基础 wrapper 伪装成成功零命中。报告文件名、主邮件和失败邮件统一使用 `SCHEDULE_TIMEZONE`，避免 UTC Runner 在上海日期边界生成错误日期。
+
+本轮新增/调整的长期契约全部使用合成项目、组织和日期，不恢复历史论文发布门。完整 hermetic 发布门通过 191 项测试、标准库失败通知导入、手工探针导入与 compileall；本地 `--doctor` 全部必需项通过，Workflow YAML 与每个 Bash `run` 块通过语法检查。没有运行真实 Smoke、真实研究或 SMTP 发送。
+
+## 2026-08-15 周任务失败根因与全仓库收敛
+
+最新运行在安装依赖后执行了 161 项离线测试，并在 2 秒内出现 1 个 failure 和 2 个 error；状态恢复、配置体检、生产发现、Qwen、OpenAlex/Tavily/Reddit、报告和 SMTP 都没有开始。因此该次失败属于**代码测试的时间确定性漏洞**，不是项目配置、外部 API 或“本周没有新技术”。Kimi‑K3 固定 Feed 日期为 2026-07-27，测试却用 CI 当前时间和 14 天回看窗口解析；它在 2026-08-10 后必然自动消失。T‑Rex 的同类 60 天样例也将在 8 月中旬自然过期。
+
+第一步修复给生产解析器加入了可注入 UTC 参考时钟，解决了固定日期测试随日历自然失效的问题；但这只修复了确定性表象，仍把历史事件错误地留在每周发布门中。本轮进一步将两篇命名论文及其全链路断言退役，保留合成 Feed 上的日期窗口、精确补录、正式文档识别、人物与传播证据分账等通用契约。CI 发布门继续由独立 `scripts/offline_checks.py` 执行：子进程忽略本地 `.env`，清除线上 Secrets/Variables 对测试语义的污染，并把网络代理指向拒绝连接的本地端口；结果同时写成可供邮件读取的 JSON 与完整日志。
+
+旧失败邮件只拿到 pipeline 的 `skipped`，因此把离线回归失败笼统写成“主流程失败”。工作流现为依赖、离线回归、配置体检、状态恢复、Smoke、研究/邮件、状态准备及三类 artifact 上传设置稳定 step id；告警读取第一处失败、运行 commit 和对应的安全日志摘要。依赖安装本身失败时，`config.py` 允许在没有 `python-dotenv` 的情况下由标准库 SMTP 告警。该阶段曾用同名覆盖处理 rerun；最新实现已由上节所述不可变快照取代。
+
+全仓库审计还确认生产发现原先没有独立墙上边界：发现完成后虽然会按剩余预算分配分析时间，但一个无界分页来源仍可能先吃完整轮研究预算。现在每个并行来源默认最多 600 秒；部分失败、全部失败、超时和真实零命中分别记录为 `partial`、`query_failed`、`timed_out` 与 `completed/0`。失败来源不拖死其他来源，也不能再被解释为该技术面没有进展；审计、空报告与非空报告的覆盖边界都会明确披露。
+
+状态审计同时发现机制抽取与候选深挖之间存在一个不安全提交顺序：旧实现先把论文标成“已分析”，最后才保存聚类候选；若中间阶段异常，云端仍可能上传一个会永久跳过该论文、却没有 pending candidate 的数据库。现在提交顺序改为“先保存 `pending_deep` 候选快照，再标记原点已分析”；候选保存失败时原点保持待处理，最多重算而不会永久漏项。配置体检也不再允许拼错布尔值、非法整数或越界并发值静默回退默认值，GitHub Actions 中禁用软预算会直接阻断。
+
+本次日志运行的是远端 commit `cc24a07c0f1`；排查开始时本地 `main` 已经比 `origin/main` 多一个未推送提交 `6c5bc53`，其中包含上一轮报告路线级 checkpoint 改造。这说明“本地已经修复”与“线上实际生效”之间缺少发布确认。上线时必须把本轮工作树与该本地提交一起推到默认分支，并在 Actions 页核对运行 commit。日志中的 Repository Variable 仍把 `PARADIGM_RUN_BUDGET_SECONDS` 覆盖成 3900；新静态体检会把 `3900 + 1200` 判为阻断配置，避免任务再次以超过安全边界的预算启动。
 
 ## 2026-08-09 多路线报告超时根因与修复
 
@@ -80,9 +108,9 @@
 - 正式准入分开计算技术 Rubric、发布者/研究者势能、官方实现承接和独立二次响应。官方仓库不能伪装成独立验证，未知团队也不能只靠作者自述越过门槛。
 - 跨周路线以问题、机制、路线词和领域做保守对齐；已拒绝与尚未深挖的路线不会劫持未来新候选。讨论互动量只有跨越有意义量级时才触发更新。
 - OpenAlex 仍不使用固定候选数；但在相关性排序后连续两页没有标题/主题层面的查询短语强命中时停止翻页，避免摘要弱命中让 60 天冷启动无界下载。未知术语不由这条高精度车道承担。
-- `tests/test_frontier_canaries.py` 固化从召回到准入的 T‑Rex 黄金链路，并补充 World Model、AI4S、软件/系统、语音、自动驾驶、词边界噪声及跨周路由反例。
+- `tests/test_frontier_contracts.py` 只固化跨行业覆盖、召回窗口、正式报告识别、人物/实现/讨论分账及跨周路由等通用契约；历史论文不再作为端到端发布门。
 
-## Kimi‑K3 金丝雀揭示的系统问题
+## Kimi‑K3 历史漏项揭示的系统问题
 
 Kimi‑K3 的实际标题是 *Kimi K3: Open Frontier Intelligence*，标题本身没有 “Technical Report”；正式类型写在 arXiv `comment=K3 tech report`，官方完整报告同时发布在 Moonshot GitHub。按修复前逻辑，它虽然可能被基础模型领域词召回，却会被当成普通论文，只读摘要、失去多机制拆解资格，也无法从团队署名恢复 Moonshot 的发布者势能。
 
@@ -94,10 +122,10 @@ Kimi‑K3 的实际标题是 *Kimi K3: Open Frontier Intelligence*，标题本�
 - Kimi Research 成为 Moonshot 的正式研究索引；官方页面解析同时支持锚文本、`aria-label` 与公开 hydration 中的 title/href/date，并继续执行域名边界。
 - arXiv HTML 不可用时，高优先级材料回退官方 PDF。真实验证已提取 50,000 字符，覆盖 KDA、AttnRes、Stable LatentMoE、强化学习与部署章节。
 - `Kimi Team` 通过完整别名精确归属 Moonshot AI；集体署名不再生成虚假人物档案。大型作者列表只向模型展示代表性署名和总人数，完整名单仍保留在证据中；没有官方角色标注时，不把数百人报告的末位作者机械解释为资深作者。
-- Kimi‑K3 离线金丝雀继续约束：自然领域召回、comment 专项召回、Technical Report 分类、正式组织准入、多机制上下文、人物种子和 PDF 回退。真实只读复测中，自然查询与专项查询均命中，专项窗口返回 47 条报告，K3 位于其中。
+- 当时曾用 Kimi‑K3 做一次性离线与真实只读复测，确认自然领域召回、comment 专项召回、Technical Report 分类、团队归属和 PDF 回退已经生效；这些结论现已拆为通用契约，Kimi‑K3 本身不再是后续发布门或固定 seed。
 - 首次真实 Qwen 初筛暴露了新的失败点：旧版单次请求同时生成六套机制档案和完整 Rubric，两次都返回长 JSON 语法错误，最终变成空 extraction。现已改为“机制索引 → 逐机制 Rubric”的两阶段协议，并设置 180 秒单请求上限、关闭 SDK 隐式重试。第二次真实验收稳定产出六条完整机制，均达到 100% Rubric 回答覆盖，其中包括 KDA、AttnRes、Stable LatentMoE 和 million-token agentic RL；单机制失败隔离也由离线测试覆盖。
 
-## 双金丝雀横向扩展后的故障树
+## 两次历史漏项横向扩展后的故障树
 
 继续把两条样本横向投射到其他公司与实验室后，确认“维护更长的关键词表”仍然不够：
 
@@ -110,7 +138,7 @@ Kimi‑K3 的实际标题是 *Kimi K3: Open Frontier Intelligence*，标题本�
 7. **静默页面故障**：过去某家公司页面请求失败或解析为零只出现在普通日志里。运行审计现在逐入口记录请求、允许链接、时间窗、详情失败和形成原点数，并单列术语、人物、报告、精确补录车道；覆盖未闭合时，空邮件必须写成“运行不完整”，不能写成“本期没有创新”。
 8. **自动驾驶/Physical AI 官方入口不足**：目录新增 Wayve Science 与 Toyota Research Institute Publications；官方入口总数由 39 增至 41。未公开稳定研究索引的厂商仍保留在 monitored 层，不用新闻页冒充研究页。
 
-这些修复对应的是失效模式，不是 T‑Rex、Kimi‑K3 或某家公司的生产白名单。覆盖地图版本已提升到 `2026-07-28.1`，下一次恢复云端数据库时会自动执行 60 天补扫；常规周更发现窗口改为 30 天，报告交付窗口仍是 7 天，旧证据由数据库去重。
+这些修复对应的是失效模式，不是 T‑Rex、Kimi‑K3 或某家公司的生产白名单，也不要求未来任务继续命中这两篇历史材料。覆盖地图版本已提升到 `2026-07-28.1`，下一次恢复云端数据库时会自动执行 60 天高信号补扫；常规普通发现与报告交付窗口仍是 7 天，正式报告、重点研究者和官方入口使用 30 天重叠回补，旧证据由数据库去重。
 
 ## 当前结论
 
@@ -157,10 +185,10 @@ Kimi‑K3 的实际标题是 *Kimi K3: Open Frontier Intelligence*，标题本�
 ## 验证结果
 
 - Python 静态编译通过。
-- 168 项本地单元测试通过；新增覆盖生产规模多路线有界写作、单路线同样断点化、路线级部分失败隔离、总编超时续跑、恢复 outbox 后停止新研究、组合时间预算、证据上下文账本与小型 JSON 结构修复；并继续覆盖 durable outbox、SMTP 失败续投、Rubric、T‑Rex 与 Kimi‑K3 双金丝雀、跨行业召回、人物/原文/讨论势能硬契约、分批检查点和失败提醒。
+- 191 项本地单元测试在清空生产配置、拒绝网络并忽略 `.env` 的发布门中通过；发布门覆盖合成日期窗口、发现源墙上超时/部分失败、候选先于原点提交的无损检查点、首个工作流失败步骤归因、非法 Variable 与云端禁用软预算、配置向导权限/默认值、日志凭据脱敏、不可变 artifact 回退契约，并继续覆盖生产规模多路线有界写作、路线级 checkpoint、durable outbox、SMTP 失败续投、Rubric、跨行业召回、人物/原文/讨论势能硬契约和分批检查点。历史论文名称、发布日期和 arXiv ID 不再参与发布判定。
 - GitHub Actions YAML 语法通过本地解析。
 - 工作流已升级为 Node 24 Actions：`checkout@v6`、`setup-python@v6`、`upload-artifact@v7`；关闭 checkout 凭据持久化以消除无用的 post-job Git 清理。
-- 真实小成本验证已通过 Qwen `qwen3.7-plus`、arXiv、Hugging Face Daily Papers、OpenAlex Works/Authors、官方研究页、Hacker News、Tavily 和 QQ SMTP 登录（未发信）。本轮又以 Kimi‑K3 验证了 arXiv 自然检索、comment 专项检索、Kimi Research 页面、Moonshot 团队归属和官方 PDF 回退。OpenReview 在修复后通过定向复测。Semantic Scholar、Reddit 与 X 因未配置而按设计跳过。
+- 历史真实小成本验证曾通过 Qwen `qwen3.7-plus`、arXiv、Hugging Face Daily Papers、OpenAlex Works/Authors、官方研究页、Hacker News、Tavily 和 QQ SMTP 登录（未发信），并曾以一次性漏项复测验证 arXiv 自然检索、comment 专项检索、Kimi Research 页面、Moonshot 团队归属和官方 PDF 回退。它们是当时的验证记录，不是每周重复执行清单。OpenReview 在修复后通过定向复测；Semantic Scholar、Reddit 与 X 当时因未配置而按设计跳过。
 - 最新云端日志中的 GitHub Search 已通过并返回剩余额度，说明 Repository secret 中的 `GITHUB_TOKEN` 当前有效；本地 `.env` 中的 Token 是否相同仍以本机下一次 Smoke 为准，不再把旧的本地 401 结论当作云端阻塞。
 
-下一次真实验收重新运行 GitHub `smoke_only=true`。日志标题应显示 `contract 2026-07-30.1`；若 arXiv/OpenAlex/GitHub 等公共服务仍出现 429 或超时，应显示 `degraded` 与 `failure_kind=transient_availability`，而不是调用生产车道后超时失败。401/403、404 或响应契约错误仍应让 Workflow 失败。随后再执行一次带双金丝雀 seed 的完整流水线，重点检查重要 Technical Report 是否优先进入候选、arXiv/OpenAlex/OpenReview 请求审计能否解释覆盖缺口、人物公开入口是否充分，以及正文是否完全摆脱英文摘要直出。
+下一次真实验收重新运行 GitHub `smoke_only=true`。日志标题应显示 `contract 2026-08-15.1`；若 arXiv/OpenAlex/GitHub 等公共服务仍出现 429 或超时，应显示 `degraded` 与 `failure_kind=transient_availability`，而不是调用生产车道后超时失败。401/403、404 或响应契约错误仍应让 Workflow 失败。随后按正常时间窗执行完整流水线，不配置历史论文 seed；重点检查重要 Technical Report 是否优先进入候选、arXiv/OpenAlex/OpenReview 请求审计能否解释覆盖缺口、人物公开入口是否充分，以及正文是否完全摆脱英文摘要直出。

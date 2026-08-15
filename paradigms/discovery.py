@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import config
 from sources.arxiv_source import ArxivSource
@@ -55,6 +57,9 @@ class ParadigmDiscovery:
         )
         # 保持兼容：旧属性表示本轮最长发现窗口。
         self.lookback_days = self.high_signal_lookback_days
+        self.source_timeout_seconds = (
+            config.PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS
+        )
         self.arxiv = ArxivSource(
             max_results=config.PARADIGM_DISCOVERY_SAFETY_LIMIT or None,
             lookback_days=self.broad_lookback_days,
@@ -82,12 +87,20 @@ class ParadigmDiscovery:
         ]
 
     async def run(self) -> DiscoveryBatch:
-        arxiv_raw, hf_raw, follow_raw, *native_batches = await asyncio.gather(
-            self.arxiv.safe_fetch(),
-            self.hf.safe_fetch(),
-            self.follow_builders.safe_fetch(),
-            *(source.safe_fetch() for source in self.evidence_sources),
+        sources = [
+            self.arxiv,
+            self.hf,
+            self.follow_builders,
+            *self.evidence_sources,
+        ]
+        fetched = await asyncio.gather(
+            *(self._bounded_fetch(source) for source in sources),
         )
+        batches = [result for result, _ in fetched]
+        source_health = {
+            str(health["source"]): health for _, health in fetched
+        }
+        arxiv_raw, hf_raw, follow_raw, *native_batches = batches
 
         origins = [_raw_to_origin(item) for item in arxiv_raw]
         supporting = [_hf_to_support(item) for item in hf_raw]
@@ -167,6 +180,7 @@ class ParadigmDiscovery:
             failed_groups=self.arxiv.failed_query_groups,
         )
         coverage["recall_lanes"] = self.arxiv.recall_coverage()
+        coverage["source_health"] = source_health
         coverage["official_pages"] = self.priority_pages.coverage()
         coverage["academic_indexes"] = {
             "arxiv": self.arxiv.coverage(),
@@ -195,10 +209,52 @@ class ParadigmDiscovery:
             coverage=coverage,
         )
 
+    async def _bounded_fetch(self, source) -> tuple[list, dict[str, object]]:
+        """Isolate a stalled discovery source without disguising it as zero hits."""
+
+        name = str(getattr(source, "source_name", type(source).__name__))
+        started = time.monotonic()
+        try:
+            results = await asyncio.wait_for(
+                source.safe_fetch(),
+                timeout=self.source_timeout_seconds,
+            )
+            status = str(getattr(source, "fetch_status", "completed"))
+            error = str(getattr(source, "fetch_error", ""))
+        except TimeoutError:
+            status = "timed_out"
+            error = "TimeoutError"
+            results = []
+            logger.error(
+                "[%s] 发现源超过 %ss 墙上时间，已取消；本轮覆盖不完整",
+                name,
+                self.source_timeout_seconds,
+            )
+        except Exception as exc:
+            status = "query_failed"
+            error = type(exc).__name__
+            results = []
+            logger.exception(
+                "[%s] 发现源越过内部保护抛出异常；本轮覆盖不完整",
+                name,
+            )
+        return results, {
+            "source": name,
+            "status": status,
+            "error_type": error,
+            "results": len(results),
+            "elapsed_seconds": round(max(time.monotonic() - started, 0.0), 3),
+            "timeout_seconds": self.source_timeout_seconds,
+        }
+
 
 def _raw_to_origin(item: RawProject) -> TechnicalEvidence:
     arxiv_id = _normalize_arxiv_id(item.extra.get("arxiv_id", "") or item.url)
     identifiers = {"arxiv": arxiv_id} if arxiv_id else {}
+    canonical_url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else item.url
+    raw = dict(item.extra)
+    if canonical_url.rstrip("/") != item.url.rstrip("/"):
+        raw["discovery_url"] = item.url
     metrics = {
         key: item.extra.get(key, 0)
         for key in ("upvotes", "github_stars", "num_comments")
@@ -208,7 +264,7 @@ def _raw_to_origin(item: RawProject) -> TechnicalEvidence:
         source=item.source,
         evidence_type=EvidenceType.PRIMARY_PAPER,
         title=item.name,
-        url=item.url,
+        url=canonical_url,
         summary=item.readme_summary or item.description,
         published_at=item.created_at,
         authors=item.extra.get("all_authors", []) or ([item.author] if item.author else []),
@@ -216,7 +272,7 @@ def _raw_to_origin(item: RawProject) -> TechnicalEvidence:
         metrics=metrics,
         identifiers=identifiers,
         keywords=item.topics,
-        raw=item.extra,
+        raw=raw,
     )
 
 
@@ -310,7 +366,7 @@ def _merge_origins(items: list[TechnicalEvidence]) -> list[TechnicalEvidence]:
     title_keys: dict[str, str] = {}
     for item in items:
         key = item.identifiers.get("doi") or item.identifiers.get("arxiv") or item.fingerprint
-        title_key = re.sub(r"[^a-z0-9]+", "", item.title.casefold())
+        title_key = _safe_title_dedupe_key(item.title)
         if title_key and title_key in title_keys:
             key = title_keys[title_key]
         if key not in by_key:
@@ -321,10 +377,11 @@ def _merge_origins(items: list[TechnicalEvidence]) -> list[TechnicalEvidence]:
         current = by_key[key]
         if len(item.summary) > len(current.summary):
             current.summary = item.summary
-            current.url = item.url or current.url
+        if _primary_url_rank(item.url) > _primary_url_rank(current.url):
+            current.url = item.url
         current.metrics.update(item.metrics)
         current.identifiers.update(item.identifiers)
-        current.raw.update(item.raw)
+        _merge_origin_raw(current.raw, item.raw)
         if item.organization and not current.organization:
             current.organization = item.organization
         current.authors = list(dict.fromkeys(current.authors + item.authors))
@@ -332,3 +389,111 @@ def _merge_origins(items: list[TechnicalEvidence]) -> list[TechnicalEvidence]:
         if item.source not in current.raw.setdefault("also_seen_on", []):
             current.raw["also_seen_on"].append(item.source)
     return list(by_key.values())
+
+
+def _safe_title_dedupe_key(title: str) -> str:
+    """Use title-only merging only when the title is sufficiently specific."""
+
+    parts = re.findall(r"[a-z0-9]+|[\u3400-\u9fff]+", title.casefold())
+    key = "".join(parts)
+    if len(key) < 20 or len(parts) < 3:
+        return ""
+    if key in {
+        "technicalreport",
+        "researchreport",
+        "systemcard",
+        "modelcard",
+    }:
+        return ""
+    return key
+
+
+def _primary_url_rank(url: str) -> int:
+    """Prefer direct first-party/academic records over discovery aggregators."""
+
+    parsed = urlparse(str(url))
+    host = (parsed.hostname or "").casefold().removeprefix("www.")
+    path = parsed.path.casefold()
+    if host == "arxiv.org" and path.startswith(("/abs/", "/pdf/", "/html/")):
+        return 5
+    if host == "doi.org" or host == "openreview.net":
+        return 5
+    if host in {"huggingface.co", "openalex.org", "api.openalex.org"}:
+        return 1
+    return 4 if parsed.scheme in {"http", "https"} and host else 0
+
+
+def _merge_origin_raw(current: dict, incoming: dict) -> None:
+    """Merge provenance without allowing a weaker index to downgrade identity."""
+
+    priority = max(
+        int(current.get("origin_priority", 0) or 0),
+        int(incoming.get("origin_priority", 0) or 0),
+    )
+    tier_rank = {"unknown": 0, "verified": 1, "established": 2}
+    current_tier = str(current.get("publisher_tier", "unknown"))
+    incoming_tier = str(incoming.get("publisher_tier", "unknown"))
+    best_tier = max(
+        (current_tier, incoming_tier),
+        key=lambda value: tier_rank.get(value, 0),
+    )
+    kind_rank = {
+        "": 0,
+        "research_paper": 1,
+        "official_research": 2,
+        "official_model_release": 3,
+        "technical_report": 4,
+    }
+    current_kind = str(current.get("origin_kind", ""))
+    incoming_kind = str(incoming.get("origin_kind", ""))
+    best_kind_metadata = (
+        current
+        if kind_rank.get(current_kind, 0) >= kind_rank.get(incoming_kind, 0)
+        else incoming
+    )
+    best_kind = max(
+        (current_kind, incoming_kind),
+        key=lambda value: kind_rank.get(value, 0),
+    )
+    publisher_evidence = str(current.get("publisher_evidence", ""))
+    if tier_rank.get(incoming_tier, 0) > tier_rank.get(
+        current_tier, 0
+    ) or (
+        not publisher_evidence
+        and tier_rank.get(incoming_tier, 0) == tier_rank.get(best_tier, 0)
+    ):
+        publisher_evidence = str(incoming.get("publisher_evidence", ""))
+    frontier_domains = list(
+        dict.fromkeys(
+            [
+                *(current.get("frontier_domains") or []),
+                *(incoming.get("frontier_domains") or []),
+            ]
+        )
+    )
+    explicit_seed = bool(current.get("explicit_seed")) or bool(
+        incoming.get("explicit_seed")
+    )
+    priority_researcher = bool(
+        current.get("priority_researcher_match")
+    ) or bool(incoming.get("priority_researcher_match"))
+
+    current.update(incoming)
+    current["origin_priority"] = priority
+    if best_tier:
+        current["publisher_tier"] = best_tier
+    if publisher_evidence:
+        current["publisher_evidence"] = publisher_evidence
+    if best_kind:
+        current["origin_kind"] = best_kind
+        for key in (
+            "origin_classification_reason",
+            "document_format",
+            "system_layer_count",
+        ):
+            value = best_kind_metadata.get(key)
+            if value not in {None, ""}:
+                current[key] = value
+    current["frontier_domains"] = frontier_domains
+    current["explicit_seed"] = explicit_seed
+    current["priority_researcher_match"] = priority_researcher

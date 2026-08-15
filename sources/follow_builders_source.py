@@ -25,7 +25,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from tenacity import retry, wait_exponential, stop_after_attempt
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 import config
 from .base import BaseSource, RawProject
@@ -47,17 +52,55 @@ class FollowBuildersSource(BaseSource):
             if config.FOLLOW_BUILDERS_FEED_URL
             else DEFAULT_FEED_BASE
         )
+        self.completed_feeds = 0
+        self.failed_feeds = 0
+
+    async def safe_fetch(self) -> list[RawProject]:
+        if not config.FOLLOW_BUILDERS_ENABLED:
+            self.fetch_status = "not_configured"
+            self.fetch_error = ""
+            return []
+        try:
+            projects = await self.fetch()
+        except Exception as exc:
+            self.fetch_status = "query_failed"
+            self.fetch_error = type(exc).__name__
+            logger.exception("[follow-builders] 获取失败")
+            return []
+        if self.failed_feeds and not self.completed_feeds:
+            self.fetch_status = "query_failed"
+            self.fetch_error = "AllFeedsFailed"
+        elif self.failed_feeds:
+            self.fetch_status = "partial"
+            self.fetch_error = "PartialFeedFailure"
+        else:
+            self.fetch_status = "completed"
+            self.fetch_error = ""
+        return projects
 
     async def fetch(self) -> list[RawProject]:
         if not config.FOLLOW_BUILDERS_ENABLED:
             logger.debug("[follow-builders] 信源未启用，跳过")
             return []
 
+        self.completed_feeds = 0
+        self.failed_feeds = 0
         projects: list[RawProject] = []
 
-        feed_x = await self._fetch_json("feed-x.json")
-        feed_podcasts = await self._fetch_json("feed-podcasts.json")
-        feed_blogs = await self._fetch_json("feed-blogs.json")
+        feeds: dict[str, dict | None] = {}
+        for filename in ("feed-x.json", "feed-podcasts.json", "feed-blogs.json"):
+            try:
+                feeds[filename] = await self._fetch_json(filename)
+                # 404/本地缺失是一个成功的空 Feed 契约，不伪装网络异常。
+                self.completed_feeds += 1
+            except Exception as exc:
+                self.failed_feeds += 1
+                feeds[filename] = None
+                logger.warning("[follow-builders] 获取 %s 失败: %s", filename, exc)
+
+        feed_x = feeds["feed-x.json"]
+        feed_podcasts = feeds["feed-podcasts.json"]
+        feed_blogs = feeds["feed-blogs.json"]
 
         if feed_x:
             projects.extend(self._parse_x_feed(feed_x))
@@ -77,6 +120,7 @@ class FollowBuildersSource(BaseSource):
     @retry(
         wait=wait_exponential(multiplier=1, min=2, max=10),
         stop=stop_after_attempt(3),
+        retry=retry_if_exception_type(httpx.HTTPError),
     )
     async def _fetch_json(self, filename: str) -> dict | None:
         base = self.feed_base_url
@@ -84,17 +128,13 @@ class FollowBuildersSource(BaseSource):
             return self._read_local_json(base[7:], filename)
 
         url = f"{base}/{filename}"
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(url)
-                if resp.status_code == 404:
-                    logger.debug(f"[follow-builders] {filename} 不存在 (404)")
-                    return None
-                resp.raise_for_status()
-                return resp.json()
-        except Exception as e:
-            logger.warning(f"[follow-builders] 获取 {filename} 失败: {e}")
-            return None
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url)
+            if resp.status_code == 404:
+                logger.debug(f"[follow-builders] {filename} 不存在 (404)")
+                return None
+            resp.raise_for_status()
+            return resp.json()
 
     @staticmethod
     def _read_local_json(directory: str, filename: str) -> dict | None:
@@ -102,11 +142,7 @@ class FollowBuildersSource(BaseSource):
         if not path.exists():
             logger.debug(f"[follow-builders] 本地文件不存在: {path}")
             return None
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception as e:
-            logger.warning(f"[follow-builders] 读取本地文件失败 {path}: {e}")
-            return None
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def _parse_x_feed(self, feed: dict) -> list[RawProject]:
         projects: list[RawProject] = []

@@ -857,12 +857,28 @@ def _safe_error_text(error: Exception | str) -> str:
 
 def _content_signature(item: TechnicalEvidence) -> str:
     # 不纳入引用/点赞等浮动数字，避免同一内容每周反复进入 LLM。
+    linked_documents = sorted(
+        (
+            str(value.get("title", "")).strip(),
+            str(value.get("url", "")).strip().rstrip("/"),
+        )
+        for value in (item.raw.get("linked_research_documents") or [])
+        if isinstance(value, dict) and value.get("url")
+    )
     payload = {
         "title": item.title.strip(),
         "summary": item.summary.strip(),
         "authors": item.authors,
         "organization": item.organization,
         "identifiers": item.identifiers,
+        "url": item.url.strip().rstrip("/"),
+        "published_at": item.published_at,
+        # 这些字段在发现阶段稳定可得，能捕捉论文新版本与随后补上的
+        # 完整报告；不纳入 document_excerpt/origin_kind 等深挖时会改变的
+        # 字段，避免形成每周重复分析循环。
+        "updated_at": str(item.raw.get("updated_at", "")),
+        "arxiv_comment": str(item.raw.get("arxiv_comment", "")),
+        "linked_research_documents": linked_documents,
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

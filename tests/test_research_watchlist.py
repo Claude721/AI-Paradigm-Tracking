@@ -114,8 +114,10 @@ class ResearchWatchlistTest(unittest.TestCase):
         self.assertTrue(source_link_allowed(custom, "https://custom.example/report"))
         self.assertFalse(source_link_allowed(custom, "https://arxiv.org/abs/2607.00001"))
         kimi = "https://www.kimi.com/blog/"
-        self.assertTrue(source_link_allowed(kimi, "https://github.com/MoonshotAI/Kimi-K3"))
-        self.assertTrue(source_link_allowed(kimi, "https://arxiv.org/abs/2607.24653"))
+        self.assertTrue(
+            source_link_allowed(kimi, "https://github.com/MoonshotAI/example-report")
+        )
+        self.assertTrue(source_link_allowed(kimi, "https://arxiv.org/abs/2601.00002"))
 
     def test_chinese_research_links_and_report_kind(self) -> None:
         self.assertTrue(

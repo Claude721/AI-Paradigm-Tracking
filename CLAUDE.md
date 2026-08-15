@@ -20,6 +20,10 @@
 - 非空报告中的每条入选路线必须能回到至少一个已核验的一手材料 URL；原文索引由证据对象确定性生成并通过逐路线质量闸门，不得依赖模型记忆、改写或猜测链接。
 - 人物资料只收集公开职业信息；不得猜测邮箱或把同名研究者强行合并。非空报告中的每位关键人物都必须有最低可核验背景，并完成公开联系方式检索；没有找到时保留检索记录。
 - 研究检查点与报告/邮件交付必须解耦：报告或 SMTP 失败不得回滚已经完成的研究；只有交付确认后才能更新 `last_reported_signature`。
+- 跨阶段状态必须按无损顺序提交：先保存下游可续跑快照，再把上游对象标记为完成；异常时允许重算，不能形成“上游已完成、下游对象不存在”的永久漏项。
+- 召回/队列优先级不等于编辑资格：`origin_priority` 只决定执行顺序，手动 seed 只保证材料可见，二者均不得绕过 Rubric、发布者和外部承接门槛。
+- 多来源合并不得降级事实来源：聚合页可以补摘要与指标，但不能覆盖 arXiv/DOI/OpenReview/官方原文 URL、正式报告类型、已核验发布者或重点研究者标记。
+- 覆盖地图版本只有在核心领域/学术召回闭合后才能推进；历史漏项可用于一次性复盘，不得成为每周固定 seed、真实日期测试或发布阻断条件。
 - 开启 `EMAIL_PUSH_REQUIRED` 后，邮件发送失败必须让本轮失败，不能提前标记已投递。
 - 未经用户明确授权，不运行真实 API 全流程、不发送真实邮件。
 - 不提交 `.env`、数据库、日志或 `reports/output/` 中的生成报告。
@@ -34,11 +38,11 @@
 ## 本地验证
 
 ```bash
-python -m unittest discover -s tests -v
-python -m compileall -q agents database paradigms reports skills sources main.py config.py
+python scripts/offline_checks.py
+python -m compileall -q agents database notifications paradigms reports scripts skills sources main.py config.py run_audit.py healthcheck.py smokecheck.py
 ```
 
-测试不得依赖真实网络、真实密钥或真实邮箱。报告测试使用无网络的模拟编辑客户端。
+`offline_checks.py` 是发布门：它忽略本地 `.env`，清除生产 Secrets/Variables，并把网络代理指向拒绝连接的本地端口。测试不得依赖真实网络、真实密钥或真实邮箱；报告测试使用无网络的模拟编辑客户端。固定日期样例必须注入参考时钟，不能使用墙上当前时间，否则测试会随日历自动过期。
 
 ## 文档入口
 

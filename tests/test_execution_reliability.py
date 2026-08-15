@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import configparser
 import sqlite3
 import tempfile
 import unittest
@@ -10,18 +11,32 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import config
 import main as app_main
+import setup_env
 from agents.paradigm_orchestrator import (
     ParadigmOrchestrator,
     _delivery_primary_source_ready,
     _delivery_profile_ready,
+    _commit_origin_analysis_checkpoint,
+    _commit_landscape_checkpoint_if_complete,
     _execution_deadlines,
     _origin_analysis_priority,
     _origin_execution_order,
 )
 from database.paradigm_store import ParadigmStore
 from database.state_migration import migrate_state
-from healthcheck import _execution_budget_check
-from notifications.email_notifier import send_failure_email
+from healthcheck import (
+    _email_check,
+    _execution_budget_check,
+    _model_check,
+    _raw_environment_syntax_check,
+    _schedule_check,
+    blocking_checks,
+)
+from notifications.email_notifier import (
+    _safe_public_text,
+    _workflow_failure_context,
+    send_failure_email,
+)
 from paradigms.models import (
     EvidenceType,
     ParadigmCandidate,
@@ -29,8 +44,11 @@ from paradigms.models import (
     ResearcherProfile,
     TechnicalEvidence,
 )
+from paradigms.discovery import ParadigmDiscovery
 from reports.paradigm_generator import ParadigmReportGenerator
 from run_audit import run_audit
+from sources.research_feed_source import ResearchFeedSource
+from sources.follow_builders_source import FollowBuildersSource
 
 
 def _origin(title: str, *, priority: int = 1) -> TechnicalEvidence:
@@ -58,6 +76,42 @@ def _rejected_extraction(evidence: TechnicalEvidence) -> ParadigmExtraction:
 
 
 class ExecutionReliabilityTests(unittest.TestCase):
+    def test_incomplete_recall_cannot_advance_landscape_baseline(self) -> None:
+        store = Mock()
+        advanced = _commit_landscape_checkpoint_if_complete(
+            store,
+            landscape_coverage_incomplete=True,
+        )
+        self.assertFalse(advanced)
+        store.mark_landscape_version.assert_not_called()
+
+        advanced = _commit_landscape_checkpoint_if_complete(
+            store,
+            landscape_coverage_incomplete=False,
+        )
+        self.assertTrue(advanced)
+        store.mark_landscape_version.assert_called_once_with()
+
+    def test_setup_writes_private_env_file_with_current_time_defaults(self) -> None:
+        defaults = {
+            key: default
+            for _, items in setup_env.SECTIONS
+            for key, _, _, default, _ in items
+        }
+        self.assertEqual(defaults["PARADIGM_RECALL_OVERLAP_DAYS"], "30")
+        self.assertEqual(defaults["SCHEDULE_MINUTE"], "15")
+        self.assertEqual(
+            defaults["PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS"], "600"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            with patch.object(setup_env, "ENV_PATH", env_path):
+                setup_env._write_env({})
+            content = env_path.read_text(encoding="utf-8")
+            self.assertIn("PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=", content)
+            self.assertIn("SCHEDULE_MINUTE=", content)
+            self.assertEqual(env_path.stat().st_mode & 0o777, 0o600)
+
     def test_legacy_state_is_migrated_instead_of_discarded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "radar.db"
@@ -167,13 +221,47 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 )
             )
 
-        extractions, attempted, failed, deferred, _ = result
+        extractions, attempted, failed, deferred, _, completed = result
         self.assertEqual(len(extractions), 1)
         self.assertEqual(attempted, 1)
         self.assertEqual(failed, 0)
         self.assertEqual(deferred, [second])
-        orchestrator.store.mark_evidence.assert_called_once_with(
-            [first], analyzed=True
+        self.assertEqual(completed, [first])
+        orchestrator.store.mark_evidence.assert_not_called()
+
+    def test_origin_is_not_marked_analyzed_before_candidate_checkpoint(self) -> None:
+        store = SimpleNamespace(
+            save_candidates=Mock(side_effect=RuntimeError("disk full")),
+            mark_evidence=Mock(),
+        )
+        candidate = ParadigmCandidate(
+            key="checkpoint-route",
+            name="Checkpoint route",
+            thesis="能力边界变化",
+            problem_shift="问题发生变化",
+            mechanism="新的机制",
+            evidence=[_origin("2608.00010")],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "disk full"):
+            _commit_origin_analysis_checkpoint(
+                store,
+                [candidate],
+                candidate.evidence,
+            )
+
+        self.assertEqual(candidate.status, "pending_deep")
+        store.mark_evidence.assert_not_called()
+
+        store.save_candidates.side_effect = None
+        _commit_origin_analysis_checkpoint(
+            store,
+            [candidate],
+            candidate.evidence,
+        )
+        store.mark_evidence.assert_called_once_with(
+            candidate.evidence,
+            analyzed=True,
         )
 
     def test_repeated_failure_metadata_survives_rediscovery(self) -> None:
@@ -202,6 +290,32 @@ class ExecutionReliabilityTests(unittest.TestCase):
             backlog = store.load_pending_origins()
 
         self.assertEqual([item.summary for item in backlog], [changed.summary])
+
+    def test_new_revision_or_linked_report_reopens_unchanged_abstract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            original = _origin("2608.00009")
+            original.summary = "unchanged abstract"
+            original.raw["updated_at"] = "2026-08-01T00:00:00Z"
+            store.mark_evidence([original], analyzed=True)
+
+            revised = _origin("2608.00009")
+            revised.summary = original.summary
+            revised.raw.update(
+                {
+                    "updated_at": "2026-08-14T00:00:00Z",
+                    "linked_research_documents": [
+                        {
+                            "title": "Full technical report",
+                            "url": "https://lab.example/report.pdf",
+                        }
+                    ],
+                }
+            )
+            planned, stats = store.plan_origins([revised])
+
+        self.assertEqual(planned, [revised])
+        self.assertEqual(stats["changed"], 1)
 
     def test_report_outbox_preserves_research_and_commits_delivery_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -561,6 +675,8 @@ class ExecutionReliabilityTests(unittest.TestCase):
             ],
         )
         self.assertFalse(_delivery_primary_source_ready(item))
+        item.evidence[0].url = "https://api.openalex.org/works/W123"
+        self.assertFalse(_delivery_primary_source_ready(item))
         item.evidence[0].url = "https://arxiv.org/abs/2608.00007"
         self.assertTrue(_delivery_primary_source_ready(item))
 
@@ -633,7 +749,62 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 config, "PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS", 360
             ),
         ):
+            unsafe = _execution_budget_check()
+            self.assertEqual(unsafe.status, "missing")
+            self.assertEqual(blocking_checks([unsafe]), [unsafe])
+
+    def test_doctor_rejects_disabled_soft_budget_in_github_actions(self) -> None:
+        with (
+            patch.object(config, "PARADIGM_RUN_BUDGET_SECONDS", 0),
+            patch.dict("os.environ", {"GITHUB_ACTIONS": "true"}, clear=False),
+        ):
+            check = _execution_budget_check()
+        self.assertEqual(check.status, "missing")
+        self.assertIn("不允许禁用软预算", check.note)
+
+        with (
+            patch.object(config, "PARADIGM_RUN_BUDGET_SECONDS", 0),
+            patch.dict("os.environ", {"GITHUB_ACTIONS": ""}, clear=False),
+        ):
             self.assertEqual(_execution_budget_check().status, "warning")
+
+    def test_doctor_blocks_model_outside_qwen37_series(self) -> None:
+        resolved = SimpleNamespace(
+            provider="dashscope",
+            model="qwen3-max",
+            api_key="configured",
+        )
+        check = _model_check("fixture", resolved)
+        self.assertEqual(check.status, "missing")
+        self.assertEqual(blocking_checks([check]), [check])
+
+    def test_doctor_blocks_invalid_schedule_and_smtp_modes(self) -> None:
+        with patch.object(config, "SCHEDULE_HOUR", 27):
+            self.assertEqual(_schedule_check().status, "missing")
+        with (
+            patch.object(config, "EMAIL_PUSH_ENABLED", True),
+            patch.object(config, "SMTP_USE_SSL", True),
+            patch.object(config, "SMTP_USE_STARTTLS", True),
+        ):
+            self.assertEqual(_email_check().status, "missing")
+
+    def test_doctor_rejects_malformed_variables_instead_of_defaulting(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "PARADIGM_RUN_BUDGET_SECONDS": "three-thousand",
+                "SMTP_USE_SSL": "flase",
+                "PARADIGM_REPORT_ROUTE_CONCURRENCY": "99",
+                "RESEARCH_WATCHLIST_MODE": "overwrite",
+            },
+            clear=False,
+        ):
+            check = _raw_environment_syntax_check()
+        self.assertEqual(check.status, "missing")
+        self.assertIn("PARADIGM_RUN_BUDGET_SECONDS", check.note)
+        self.assertIn("SMTP_USE_SSL", check.note)
+        self.assertIn("PARADIGM_REPORT_ROUTE_CONCURRENCY", check.note)
+        self.assertIn("RESEARCH_WATCHLIST_MODE", check.note)
 
     def test_slow_discovery_cannot_consume_the_entire_origin_stage(self) -> None:
         with (
@@ -645,6 +816,100 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(reserve, 750)
         self.assertGreater(origin, 2500.0)
         self.assertLess(origin, deep)
+
+    def test_stalled_discovery_source_is_visible_instead_of_zero_hits(self) -> None:
+        class StalledSource:
+            source_name = "stalled-fixture"
+
+            async def safe_fetch(self):
+                await asyncio.sleep(1)
+                return [object()]
+
+        discovery = ParadigmDiscovery(lookback_days=7)
+        discovery.source_timeout_seconds = 0.01
+        results, health = asyncio.run(
+            discovery._bounded_fetch(StalledSource())
+        )
+
+        self.assertEqual(results, [])
+        self.assertEqual(health["status"], "timed_out")
+        self.assertEqual(health["error_type"], "TimeoutError")
+
+    def test_unprotected_discovery_exception_is_isolated(self) -> None:
+        class BrokenSource:
+            source_name = "broken-fixture"
+
+            async def safe_fetch(self):
+                raise RuntimeError("fixture failure")
+
+        discovery = ParadigmDiscovery(lookback_days=7)
+        results, health = asyncio.run(discovery._bounded_fetch(BrokenSource()))
+
+        self.assertEqual(results, [])
+        self.assertEqual(health["status"], "query_failed")
+        self.assertEqual(health["error_type"], "RuntimeError")
+
+    def test_feed_internal_failures_cannot_masquerade_as_completed(self) -> None:
+        source = ResearchFeedSource(lookback_days=7)
+        source.completed_feeds = 1
+        source.failed_feeds = 1
+        with (
+            patch.object(config, "RESEARCH_FEED_URLS", ["a", "b"]),
+            patch.object(source, "fetch", AsyncMock(return_value=[])),
+        ):
+            self.assertEqual(asyncio.run(source.safe_fetch()), [])
+        self.assertEqual(source.fetch_status, "partial")
+        self.assertEqual(source.fetch_error, "PartialFeedFailure")
+
+        source.completed_feeds = 0
+        source.failed_feeds = 2
+        with (
+            patch.object(config, "RESEARCH_FEED_URLS", ["a", "b"]),
+            patch.object(source, "fetch", AsyncMock(return_value=[])),
+        ):
+            self.assertEqual(asyncio.run(source.safe_fetch()), [])
+        self.assertEqual(source.fetch_status, "query_failed")
+        self.assertEqual(source.fetch_error, "AllFeedsFailed")
+
+    def test_follow_builders_partial_failure_keeps_results_and_health(self) -> None:
+        source = FollowBuildersSource()
+        feed = {
+            "x": [
+                {
+                    "name": "Builder",
+                    "handle": "builder",
+                    "tweets": [{"text": "new training method"}],
+                }
+            ]
+        }
+        with (
+            patch.object(config, "FOLLOW_BUILDERS_ENABLED", True),
+            patch.object(
+                source,
+                "_fetch_json",
+                AsyncMock(side_effect=[feed, OSError("temporary"), None]),
+            ),
+        ):
+            results = asyncio.run(source.safe_fetch())
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(source.fetch_status, "partial")
+        self.assertEqual(source.fetch_error, "PartialFeedFailure")
+
+    def test_follow_builders_all_failures_are_not_zero_hits(self) -> None:
+        source = FollowBuildersSource()
+        with (
+            patch.object(config, "FOLLOW_BUILDERS_ENABLED", True),
+            patch.object(
+                source,
+                "_fetch_json",
+                AsyncMock(side_effect=OSError("unavailable")),
+            ),
+        ):
+            self.assertEqual(asyncio.run(source.safe_fetch()), [])
+
+        self.assertEqual(source.fetch_status, "query_failed")
+        self.assertEqual(source.fetch_error, "AllFeedsFailed")
 
     def test_empty_report_discloses_runtime_backlog(self) -> None:
         content = ParadigmReportGenerator._empty_report(
@@ -662,6 +927,44 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("尚未完成研究判断的执行积压", content)
         self.assertIn("不能解释为近期没有新范式", content)
         self.assertNotIn("100 篇论文、Technical Report 与官方技术博客，但没有材料", content)
+
+    def test_empty_report_discloses_timed_out_discovery_source(self) -> None:
+        content = ParadigmReportGenerator._empty_report(
+            "2026-08-15",
+            {
+                "origin_count": 0,
+                "recall_coverage_incomplete": True,
+                "frontier_coverage": {
+                    "source_health": {
+                        "huggingface-papers": {
+                            "status": "timed_out",
+                            "results": 0,
+                        }
+                    }
+                },
+            },
+        )
+        self.assertIn("发现源：huggingface-papers=timed_out", content)
+        self.assertIn("召回覆盖未闭合", content)
+
+    def test_empty_report_discloses_partially_failed_discovery_source(self) -> None:
+        content = ParadigmReportGenerator._empty_report(
+            "2026-08-15",
+            {
+                "origin_count": 0,
+                "recall_coverage_incomplete": True,
+                "frontier_coverage": {
+                    "source_health": {
+                        "research-blog": {
+                            "status": "partial",
+                            "results": 3,
+                        }
+                    }
+                },
+            },
+        )
+        self.assertIn("发现源：research-blog=partial", content)
+        self.assertIn("召回覆盖未闭合", content)
 
     def test_failure_notification_does_not_require_a_report(self) -> None:
         with (
@@ -691,6 +994,43 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("82990689675", message.get_content())
         self.assertFalse(message.is_multipart())
 
+    def test_workflow_failure_context_identifies_preflight_test_failure(self) -> None:
+        outcomes = {
+            "DEPENDENCIES_STEP_OUTCOME": "success",
+            "OFFLINE_CHECKS_STEP_OUTCOME": "failure",
+            "RESTORE_STATE_STEP_OUTCOME": "skipped",
+            "DOCTOR_STEP_OUTCOME": "skipped",
+            "SMOKE_STEP_OUTCOME": "skipped",
+            "PIPELINE_STEP_OUTCOME": "skipped",
+            "PREPARE_STATE_STEP_OUTCOME": "success",
+            "UPLOAD_STATE_STEP_OUTCOME": "skipped",
+            "UPLOAD_REPORT_STEP_OUTCOME": "skipped",
+            "UPLOAD_AUDIT_STEP_OUTCOME": "success",
+        }
+        with (
+            patch.dict("os.environ", outcomes, clear=False),
+            patch(
+                "notifications.email_notifier._workflow_log_detail",
+                return_value="offline contract failed",
+            ),
+        ):
+            context = _workflow_failure_context()
+
+        self.assertEqual(context["failure_stage"], "离线回归")
+        self.assertEqual(context["failure_class"], "preflight")
+        self.assertEqual(context["failure_detail"], "offline contract failed")
+        self.assertIn("离线回归=failure", context["workflow_step_summary"])
+        self.assertNotIn("研究与邮件主流程", context["workflow_step_summary"])
+
+    def test_failure_log_summary_redacts_generic_url_credentials(self) -> None:
+        sanitized = _safe_public_text(
+            "https://build-user:private-pass@packages.example/simple"
+            "?token=secret-value"
+        )
+        self.assertNotIn("private-pass", sanitized)
+        self.assertNotIn("secret-value", sanitized)
+        self.assertIn("https://***@packages.example", sanitized)
+
     def test_workflow_has_migration_soft_budget_and_failure_alert(self) -> None:
         workflow = Path(".github/workflows/weekly-radar.yml").read_text(
             encoding="utf-8"
@@ -701,11 +1041,41 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS", workflow)
         self.assertIn("PARADIGM_REPORT_ROUTE_CONCURRENCY", workflow)
         self.assertIn("运行离线回归测试", workflow)
+        self.assertIn("python scripts/offline_checks.py", workflow)
+        self.assertIn("logs/offline_checks.json", workflow)
         self.assertIn("--notify-failure", workflow)
         self.assertIn("always() && failure()", workflow)
         self.assertIn("拒绝静默从空状态启动", workflow)
-        self.assertIn("steps.prepare-state.outputs.available == 'true'", workflow)
+        self.assertIn("steps.prepare_state.outputs.available == 'true'", workflow)
+        self.assertIn("OFFLINE_CHECKS_STEP_OUTCOME", workflow)
+        self.assertIn("vars.RESEARCH_WATCHLIST_MODE || 'merge'", workflow)
+        self.assertIn("vars.REDDIT_API_ACCESS_APPROVED || 'false'", workflow)
+        self.assertIn("vars.PRIORITY_RESEARCH_CONCURRENCY || '6'", workflow)
+        self.assertNotIn("overwrite: true", workflow)
+        self.assertIn(
+            "name: paradigm-radar-state-${{ github.run_id }}",
+            workflow,
+        )
+        self.assertIn('startswith("paradigm-radar-state-")', workflow)
+        self.assertIn("gh api --paginate", workflow)
+        self.assertIn("submodules: false", workflow)
+        self.assertIn("尝试上一份快照", workflow)
+        self.assertIn("所有未过期状态快照均不可用", workflow)
         self.assertNotIn('if [ "$state_schema" !=', workflow)
+
+    def test_gitmodules_have_complete_unique_records(self) -> None:
+        parser = configparser.ConfigParser()
+        loaded = parser.read(".gitmodules", encoding="utf-8")
+        self.assertEqual(loaded, [".gitmodules"])
+        paths = []
+        for section in parser.sections():
+            self.assertTrue(section.startswith("submodule "))
+            path = parser.get(section, "path", fallback="").strip()
+            url = parser.get(section, "url", fallback="").strip()
+            self.assertTrue(path, f"{section} 缺少 path")
+            self.assertRegex(url, r"^https://github\.com/[^/]+/[^/]+(?:\.git)?$")
+            paths.append(path)
+        self.assertEqual(len(paths), len(set(paths)))
 
 
 if __name__ == "__main__":
