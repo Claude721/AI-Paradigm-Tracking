@@ -82,7 +82,7 @@ python main.py --doctor    # 零网络检查配置是否齐全
 python main.py --smoke-test # 小成本真实检查接口；SMTP 只登录、不发邮件
 ```
 
-第一次完整运行前先执行 `python main.py --smoke-test`。它不会运行流水线、不会创建报告或修改范式数据库，结果保存在 `logs/smoke_test_latest.json`，且不记录密钥和响应正文。Smoke 使用与生产召回器隔离的单请求探针：例如 arXiv 只查一个稳定 ID、GitHub 只发一次 Search，不会运行领域/人物/报告车道或详情页抓取。鉴权失败、404 与响应结构变化会返回非零；公共服务的 429、5xx、网络错误或超时会标为带 `failure_kind` 的 `degraded`，保留风险但不把一次第三方抖动误判成代码不可部署。OpenReview、RSS、HN 等辅助源失败也会显式降级。
+第一次完整运行前先执行 `python main.py --smoke-test`。它不会运行流水线、不会创建报告或修改范式数据库，结果保存在 `logs/smoke_test_latest.json`，且不记录密钥和响应正文。Smoke 使用与生产召回器隔离的最小能力探针：arXiv、OpenAlex、GitHub 等单端点接口只发一个请求；官方页面、OpenReview venue、RSS 和 Follow Builders 这类多入口能力按配置顺序最多尝试 5 个，首个响应契约成功即停止，避免单站边缘防护被放大成系统故障。它不会运行领域/人物/报告车道、详情页抓取或分页。鉴权失败和响应结构变化会返回非零；公共服务的 429、5xx、网络错误或超时会标为带 `failure_kind` 的 `degraded`，保留风险但不把一次第三方抖动误判成代码不可部署。辅助源失败也会显式降级。
 
 完整运行还会生成 `logs/run_audit_latest.md`、`logs/run_audit_latest.json` 和 `logs/current_run.log`。其中包含信源返回量、漏斗、每条材料/路线的结构化去留理由，以及各阶段模型 token 用量；不会保存 prompt、模型回答正文或模型私有推理。信源部分失败、全部失败、超时和真实零命中会分别记账；机制抽取后先保存可续跑候选，再把原文标为已分析，避免中途异常造成永久漏项。启用邮件后，Markdown 审计和本轮日志会随报告一起发送。若软预算、召回覆盖或交付契约尚未闭合，邮件标题会明确标为“研究未完成”，附件是状态/阶段性 memo，不能把 0 条交付解释为本周没有重要技术。
 

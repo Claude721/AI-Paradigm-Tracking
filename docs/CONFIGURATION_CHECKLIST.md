@@ -33,7 +33,7 @@ MAIN_AGENT_MODEL=qwen3.7-plus
 
 `LLM_REQUEST_TIMEOUT_SECONDS` 是单次请求的硬上限。推荐保持 `180`；程序关闭 SDK 隐式重试，由各 Agent 自己执行一次有审计记录的重试，避免长报告在 GitHub Actions 中无边界等待。
 
-`SMOKE_CHECK_TIMEOUT_SECONDS` 是每个真实接口冒烟的总时限，推荐 `30`。冒烟只验证一次最小请求和响应结构，不复用生产分页器；它不会因为一个“每页 3 条”的参数反而把数千条搜索结果全部翻完。
+`SMOKE_CHECK_TIMEOUT_SECONDS` 是每个真实能力冒烟的总时限，推荐 `30`。单端点接口只验证一次最小请求和响应结构；官方页面、OpenReview venue、RSS 和 Follow Builders 等多入口能力最多按配置顺序 failover 5 个入口，首个成功即停止。冒烟不复用生产分页器，不会因为一个“每页 3 条”的参数反而把数千条结果全部翻完。
 
 OpenAlex：
 
@@ -246,7 +246,7 @@ PARADIGM_DEEP_BATCH_SIZE=1
 
 `PARADIGM_RESEARCHER_PROFILE_LIMIT` 是兼容性的档案安全上限，`PARADIGM_KEY_RESEARCHER_LIMIT` 才控制每条路线实际核验与写入报告的关键人物数。默认优先一作、官方标注的通讯/负责人、末位资深作者与重点研究者；普通共同作者仍留在论文作者名单中，但不会因缺少联系方式阻断路线交付。
 
-第一次运行前必须先做专用 smoke test。它每个接口只发有总时限的最小请求、模型只要求回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。探针不导入或调用生产召回器：arXiv 只查一个稳定 ID，官方研究页只取一个索引页，RSS/Follow Builders 只取一个 Feed，GitHub 只发一次 Search，OpenAlex/OpenReview 也各只请求一页。它不会执行领域、人物、报告、详情页、cursor 或 offset 分页。
+第一次运行前必须先做专用 smoke test。模型必须按契约回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。探针不导入或调用生产召回器：arXiv 只查一个稳定 ID，GitHub 只发一次 Search，OpenAlex Works/Authors 各请求一页；官方研究页、RSS、Follow Builders 与 OpenReview venue 使用最多 5 个入口的顺序 failover，首个合法响应即停止。它不会执行领域、人物、报告、详情页、cursor 或 offset 分页。一个公共站点的 403 会进入该能力的入口失败账本；只有有界样本全部不可用才判定整个能力失败。
 
 ## E. 时间窗口与自动任务
 

@@ -61,6 +61,12 @@ class OpenAlexSource:
             return []
 
     async def fetch(self) -> list[TechnicalEvidence]:
+        self.request_count = 0
+        self.rate_limited_requests = 0
+        self.transient_retries = 0
+        self.failed_queries = 0
+        self.completed_queries = 0
+        self.result_count = 0
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
         date_filter = f"from_publication_date:{cutoff.date().isoformat()}"
         headers = {"User-Agent": "AI-Paradigm-Radar/3.2"}

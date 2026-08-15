@@ -54,6 +54,7 @@ class FollowBuildersSource(BaseSource):
         )
         self.completed_feeds = 0
         self.failed_feeds = 0
+        self.missing_feeds = 0
 
     async def safe_fetch(self) -> list[RawProject]:
         if not config.FOLLOW_BUILDERS_ENABLED:
@@ -67,12 +68,23 @@ class FollowBuildersSource(BaseSource):
             self.fetch_error = type(exc).__name__
             logger.exception("[follow-builders] 获取失败")
             return []
-        if self.failed_feeds and not self.completed_feeds:
+        unavailable = self.failed_feeds + self.missing_feeds
+        if unavailable and not self.completed_feeds:
             self.fetch_status = "query_failed"
-            self.fetch_error = "AllFeedsFailed"
-        elif self.failed_feeds:
+            self.fetch_error = (
+                "AllFeedsFailed"
+                if self.failed_feeds and not self.missing_feeds
+                else "AllFeedsMissing"
+                if self.missing_feeds and not self.failed_feeds
+                else "AllFeedsUnavailable"
+            )
+        elif unavailable:
             self.fetch_status = "partial"
-            self.fetch_error = "PartialFeedFailure"
+            self.fetch_error = (
+                "PartialFeedFailure"
+                if self.failed_feeds
+                else "PartialFeedMissing"
+            )
         else:
             self.fetch_status = "completed"
             self.fetch_error = ""
@@ -85,14 +97,20 @@ class FollowBuildersSource(BaseSource):
 
         self.completed_feeds = 0
         self.failed_feeds = 0
+        self.missing_feeds = 0
         projects: list[RawProject] = []
 
         feeds: dict[str, dict | None] = {}
         for filename in ("feed-x.json", "feed-podcasts.json", "feed-blogs.json"):
             try:
-                feeds[filename] = await self._fetch_json(filename)
-                # 404/本地缺失是一个成功的空 Feed 契约，不伪装网络异常。
-                self.completed_feeds += 1
+                payload = await self._fetch_json(filename)
+                feeds[filename] = payload
+                if payload is None:
+                    # 单个可选内容类型可以暂时不存在，但全部 404 通常表示
+                    # base URL 配错，不能伪装成一次成功的零命中。
+                    self.missing_feeds += 1
+                else:
+                    self.completed_feeds += 1
             except Exception as exc:
                 self.failed_feeds += 1
                 feeds[filename] = None

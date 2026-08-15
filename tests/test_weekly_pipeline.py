@@ -193,6 +193,11 @@ class WeeklyPipelineTests(unittest.TestCase):
                 {
                     "origin_count": 1,
                     "analysis_count": 1,
+                    "candidate_execution_deferred_count": 2,
+                    "refresh_deferred_count": 3,
+                    "refresh_safety_deferred_count": 0,
+                    "refresh_budget_deferred_count": 1,
+                    "refresh_execution_deferred_count": 2,
                     "frontier_coverage": {
                         "academic_indexes": {
                             "openalex": {
@@ -231,6 +236,8 @@ class WeeklyPipelineTests(unittest.TestCase):
         self.assertIn("心智模型脚手架已形成 3 个有效部件", markdown)
         self.assertIn("学术索引请求健康度", markdown)
         self.assertIn("HTTP 请求 7；429 2", markdown)
+        self.assertIn("执行异常延后深挖：2", markdown)
+        self.assertIn("执行异常延后刷新：2", markdown)
 
     def test_run_audit_redacts_secrets_inside_nested_payloads(self) -> None:
         secret = "super-secret-token"

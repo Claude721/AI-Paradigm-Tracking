@@ -97,6 +97,7 @@ class PriorityResearchPageSource:
             return []
 
     async def fetch(self) -> list[TechnicalEvidence]:
+        self.page_coverage = {}
         headers = {"User-Agent": "AI-Paradigm-Radar/3.1"}
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
         semaphore = asyncio.Semaphore(self.concurrency)

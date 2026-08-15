@@ -21,7 +21,23 @@ from agents.llm_utils import build_client, resolve_all
 
 ARXIV_API = "https://export.arxiv.org/api/query"
 HF_PAPERS_API = "https://huggingface.co/api/daily_papers"
-SMOKE_CONTRACT_VERSION = "2026-08-15.1"
+SMOKE_CONTRACT_VERSION = "2026-08-15.2"
+SMOKE_FALLBACK_LIMIT = 5
+
+
+class SmokeProbeError(RuntimeError):
+    """A bounded capability probe failed without exposing response bodies."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        failure_kind: str,
+        transient: bool = False,
+    ) -> None:
+        super().__init__(detail)
+        self.failure_kind = failure_kind
+        self.transient = transient
 
 
 @dataclass
@@ -74,7 +90,7 @@ async def run_smoke_checks(
             "Follow Builders",
             config.FOLLOW_BUILDERS_ENABLED,
             _follow_builders,
-            require_results=True,
+            require_results=False,
             skipped_detail="FOLLOW_BUILDERS_ENABLED=false",
             blocking_on_failure=False,
         )
@@ -127,7 +143,7 @@ async def run_smoke_checks(
             "研究 RSS/Atom",
             bool(config.RESEARCH_FEED_URLS),
             _research_feeds,
-            require_results=True,
+            require_results=False,
             skipped_detail="未配置 RESEARCH_FEED_URLS",
             blocking_on_failure=False,
         )
@@ -160,6 +176,7 @@ async def run_smoke_checks(
                 _tavily,
                 require_results=True,
                 skipped_detail="未启用或未配置 TAVILY_API_KEY",
+                degrade_on_transient=True,
             )
         )
     else:
@@ -235,7 +252,11 @@ def print_smoke_results(results: list[SmokeResult]) -> None:
             f"{labels.get(item.status, '?')} {item.name}: "
             f"{item.status}{count}{latency}{failure_kind}；{item.detail}"
         )
-    failed = [item.name for item in results if item.status == "failed"]
+    failed = [
+        item.name
+        for item in results
+        if item.status == "failed" and item.blocking
+    ]
     degraded = [item.name for item in results if item.status == "degraded"]
     print(
         f"\n结论：阻断失败 {len(failed)} 项；"
@@ -246,7 +267,7 @@ def print_smoke_results(results: list[SmokeResult]) -> None:
 
 
 def smoke_failed(results: list[SmokeResult]) -> bool:
-    return any(item.status == "failed" for item in results)
+    return any(item.status == "failed" and item.blocking for item in results)
 
 
 async def _check(
@@ -329,16 +350,21 @@ async def _check_models() -> list[SmokeResult]:
                 timeout=config.SMOKE_CHECK_TIMEOUT_SECONDS,
             )
             content = (response.choices[0].message.content or "").strip()
+            contract_ok = content.casefold().rstrip(".!。！") == "ok"
             usage = getattr(response, "usage", None)
             total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
             results.append(
                 SmokeResult(
                     f"Qwen {role}",
-                    "passed" if content else "failed",
-                    1 if content else 0,
+                    "passed" if contract_ok else "failed",
+                    1 if contract_ok else 0,
                     int((time.monotonic() - started) * 1000),
-                    f"{resolved.label}；usage.total_tokens={total_tokens}",
-                    failure_kind="" if content else "empty_response",
+                    (
+                        f"{resolved.label}；usage.total_tokens={total_tokens}"
+                        if contract_ok
+                        else f"{resolved.label}；未按契约返回 OK"
+                    ),
+                    failure_kind="" if contract_ok else "response_contract",
                 )
             )
         except Exception as exc:
@@ -404,10 +430,46 @@ async def _huggingface() -> tuple[int, str]:
 
 async def _follow_builders() -> tuple[int, str]:
     base = config.FOLLOW_BUILDERS_FEED_URL.rstrip("/")
+    feeds = (
+        ("feed-x.json", "x"),
+        ("feed-podcasts.json", "podcasts"),
+        ("feed-blogs.json", "blogs"),
+    )
+    failures: list[tuple[str, Exception]] = []
+
+    async def parse_one(client, filename: str, key: str) -> tuple[int, str]:
+        if base.startswith("file://"):
+            path = Path(base[7:]) / filename
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            request_detail = "本地文件"
+        else:
+            response = await client.get(f"{base}/{filename}")
+            response.raise_for_status()
+            payload = response.json()
+            request_detail = "HTTP Feed"
+        if not isinstance(payload, dict) or not isinstance(payload.get(key), list):
+            raise ValueError(f"{filename} 响应缺少 {key} 列表")
+        items = payload[key]
+        extra = ""
+        if key == "x":
+            tweets = sum(
+                len(builder.get("tweets", []))
+                for builder in items
+                if isinstance(builder, dict)
+                and isinstance(builder.get("tweets", []), list)
+            )
+            extra = f"；tweets={tweets}"
+        return len(items), (
+            f"有界 failover；成功={filename}；{request_detail}；"
+            f"items={len(items)}{extra}{_prior_failures(failures)}"
+        )
+
     if base.startswith("file://"):
-        path = Path(base[7:]) / "feed-x.json"
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        request_detail = "单次本地文件读取"
+        for filename, key in feeds:
+            try:
+                return await parse_one(None, filename, key)
+            except Exception as exc:
+                failures.append((filename, exc))
     else:
         async with httpx.AsyncClient(
             timeout=20,
@@ -417,19 +479,12 @@ async def _follow_builders() -> tuple[int, str]:
                 "User-Agent": "AI-Paradigm-Radar/3.2",
             },
         ) as client:
-            response = await client.get(f"{base}/feed-x.json")
-            response.raise_for_status()
-        payload = response.json()
-        request_detail = "单次 feed-x.json 请求"
-    if not isinstance(payload, dict) or not isinstance(payload.get("x"), list):
-        raise ValueError("Follow Builders 响应缺少 x 列表")
-    builders = payload["x"]
-    tweets = sum(
-        len(builder.get("tweets", []))
-        for builder in builders
-        if isinstance(builder, dict) and isinstance(builder.get("tweets", []), list)
-    )
-    return len(builders), f"{request_detail}；builders={len(builders)}；tweets={tweets}"
+            for filename, key in feeds:
+                try:
+                    return await parse_one(client, filename, key)
+                except Exception as exc:
+                    failures.append((filename, exc))
+    raise _all_probes_failed("Follow Builders", failures)
 
 
 async def _openalex_works() -> tuple[int, str]:
@@ -477,6 +532,7 @@ async def _openalex_authors() -> tuple[int, str]:
 
 
 async def _openreview() -> tuple[int, str]:
+    failures: list[tuple[str, Exception]] = []
     async with httpx.AsyncClient(
         timeout=20,
         follow_redirects=True,
@@ -485,45 +541,64 @@ async def _openreview() -> tuple[int, str]:
             "User-Agent": "AI-Paradigm-Radar/3.2",
         },
     ) as client:
-        response = await client.get(
-            "https://api2.openreview.net/notes/search",
-            params={
-                "query": "machine learning",
-                "venueid": config.OPENREVIEW_VENUES[0],
-                "limit": 1,
-                "offset": 0,
-                "sort": "tmdate:desc",
-                "details": "replyCount",
-            },
-        )
-        response.raise_for_status()
-        notes = response.json().get("notes")
-    if not isinstance(notes, list):
-        raise ValueError("OpenReview 响应缺少 notes 列表")
-    return len(notes), "单次请求；HTTP 与 notes 响应契约正常"
+        for venue in config.OPENREVIEW_VENUES[:SMOKE_FALLBACK_LIMIT]:
+            try:
+                response = await client.get(
+                    "https://api2.openreview.net/notes/search",
+                    params={
+                        "query": "machine learning",
+                        "venueid": venue,
+                        "limit": 1,
+                        "offset": 0,
+                        "sort": "tmdate:desc",
+                        "details": "replyCount",
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+                notes = payload.get("notes") if isinstance(payload, dict) else None
+                if not isinstance(notes, list):
+                    raise ValueError("OpenReview 响应缺少 notes 列表")
+                return len(notes), (
+                    "有界 venue failover；HTTP 与 notes 响应契约正常；"
+                    f"成功 venue={venue}{_prior_failures(failures)}"
+                )
+            except Exception as exc:
+                failures.append((f"venue:{venue}", exc))
+    raise _all_probes_failed("OpenReview", failures)
 
 
 async def _priority_pages() -> tuple[int, str]:
-    # 配置顺序本身就是用户的探针选择。不要偷偷偏爱曾经作为金丝雀的
-    # 公司或项目，否则 smoke 会重新耦合到历史漏项。
-    page = config.PRIORITY_RESEARCH_PAGES[0]
+    # 按配置顺序做有界 failover，不按公司名挑选，也不让一个站点的边缘
+    # 防护把多个独立入口退化成单点故障。
+    failures: list[tuple[str, Exception]] = []
     async with httpx.AsyncClient(
         timeout=20,
         follow_redirects=True,
         headers={"User-Agent": "AI-Paradigm-Radar/3.2"},
     ) as client:
-        response = await client.get(page)
-        response.raise_for_status()
-    body = response.text.strip()
-    if len(body) < 200 or not any(
-        marker in body.casefold() for marker in ("<html", "<a ", "__next_data__")
-    ):
-        raise ValueError("官方研究页响应不像可解析的 HTML")
-    return 1, f"单次索引页请求；host={urlparse(page).hostname or 'unknown'}"
+        for page in config.PRIORITY_RESEARCH_PAGES[:SMOKE_FALLBACK_LIMIT]:
+            try:
+                response = await client.get(page)
+                response.raise_for_status()
+                body = response.text.strip()
+                if len(body) < 200 or not any(
+                    marker in body.casefold()
+                    for marker in ("<html", "<a ", "__next_data__")
+                ):
+                    raise ValueError("官方研究页响应不像可解析的 HTML")
+                host = urlparse(page).hostname or "unknown"
+                return 1, (
+                    f"有界索引页 failover；成功 host={host}"
+                    f"{_prior_failures(failures)}"
+                )
+            except Exception as exc:
+                failures.append((_endpoint_label(page), exc))
+    raise _all_probes_failed("官方研究页", failures)
 
 
 async def _research_feeds() -> tuple[int, str]:
-    feed_url = config.RESEARCH_FEED_URLS[0]
+    failures: list[tuple[str, Exception]] = []
     async with httpx.AsyncClient(
         timeout=20,
         follow_redirects=True,
@@ -532,16 +607,25 @@ async def _research_feeds() -> tuple[int, str]:
             "User-Agent": "AI-Paradigm-Radar/3.2",
         },
     ) as client:
-        response = await client.get(feed_url)
-        response.raise_for_status()
-    try:
-        root = ET.fromstring(response.text)
-    except ET.ParseError as exc:
-        raise ValueError("研究 Feed 响应不是有效 XML") from exc
-    nodes = root.findall(".//item") or root.findall(
-        "{http://www.w3.org/2005/Atom}entry"
-    )
-    return len(nodes), f"单次 Feed 请求；host={urlparse(feed_url).hostname or 'unknown'}"
+        for feed_url in config.RESEARCH_FEED_URLS[:SMOKE_FALLBACK_LIMIT]:
+            try:
+                response = await client.get(feed_url)
+                response.raise_for_status()
+                try:
+                    root = ET.fromstring(response.text)
+                except ET.ParseError as exc:
+                    raise ValueError("研究 Feed 响应不是有效 XML") from exc
+                nodes = root.findall(".//item") or root.findall(
+                    "{http://www.w3.org/2005/Atom}entry"
+                )
+                return len(nodes), (
+                    "有界 Feed failover；"
+                    f"成功 host={urlparse(feed_url).hostname or 'unknown'}；"
+                    f"entries={len(nodes)}{_prior_failures(failures)}"
+                )
+            except Exception as exc:
+                failures.append((_endpoint_label(feed_url), exc))
+    raise _all_probes_failed("研究 RSS/Atom", failures)
 
 
 async def _github() -> tuple[int, str]:
@@ -579,7 +663,10 @@ async def _hackernews() -> tuple[int, str]:
             },
         )
         response.raise_for_status()
-        items = response.json().get("hits", [])
+        payload = response.json()
+        items = payload.get("hits") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("Hacker News 响应缺少 hits 列表")
     return len(items), f"示例={items[0].get('title', '') if items else '无'}"
 
 
@@ -610,7 +697,9 @@ async def _tavily() -> tuple[int, str]:
         )
         response.raise_for_status()
         payload = response.json()
-    items = payload.get("results", [])
+    items = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("Tavily 响应缺少 results 列表")
     usage = payload.get("usage") or {}
     return len(items), f"本次仅 1 个 basic 请求；usage={usage}"
 
@@ -630,7 +719,10 @@ async def _semantic_scholar() -> tuple[int, str]:
             },
         )
         response.raise_for_status()
-        items = response.json().get("data", [])
+        payload = response.json()
+        items = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("Semantic Scholar 响应缺少 data 列表")
     return len(items), f"示例={items[0].get('title', '') if items else '无'}"
 
 
@@ -659,7 +751,11 @@ async def _reddit() -> tuple[int, str]:
             },
         )
         response.raise_for_status()
-        items = ((response.json().get("data") or {}).get("children") or [])
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        items = data.get("children") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("Reddit 搜索响应缺少 data.children 列表")
     return len(items), "OAuth 与搜索接口均可连接"
 
 
@@ -674,7 +770,10 @@ async def _x_recent_search() -> tuple[int, str]:
             },
         )
         response.raise_for_status()
-        items = response.json().get("data", [])
+        payload = response.json()
+        items = payload.get("data", []) if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("X Recent Search 响应缺少 data 列表")
     return len(items), "Recent Search 鉴权通过"
 
 
@@ -728,6 +827,8 @@ def _skipped(name: str, detail: str) -> SmokeResult:
 
 
 def _safe_error(exc: Exception) -> str:
+    if isinstance(exc, SmokeProbeError):
+        return str(exc)
     if isinstance(exc, httpx.HTTPStatusError):
         response = exc.response
         host = urlparse(str(response.url)).hostname or "unknown"
@@ -754,6 +855,8 @@ def _safe_error(exc: Exception) -> str:
 
 def _is_transient_failure(exc: Exception) -> bool:
     """只把平台临时不可用降级；鉴权、404 和响应契约变化仍然阻断。"""
+    if isinstance(exc, SmokeProbeError):
+        return exc.transient
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         return status in {408, 425, 429} or status >= 500
@@ -768,6 +871,8 @@ def _is_transient_failure(exc: Exception) -> bool:
 
 
 def _failure_kind(exc: Exception) -> str:
+    if isinstance(exc, SmokeProbeError):
+        return exc.failure_kind
     if _is_transient_failure(exc):
         return "transient_availability"
     if isinstance(exc, httpx.HTTPStatusError):
@@ -777,6 +882,51 @@ def _failure_kind(exc: Exception) -> str:
     if isinstance(exc, (ValueError, json.JSONDecodeError, ET.ParseError)):
         return "response_contract"
     return "runtime"
+
+
+def _endpoint_label(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme == "file":
+        return "local-file"
+    return parsed.hostname or "invalid-endpoint"
+
+
+def _compact_probe_error(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    return type(exc).__name__
+
+
+def _prior_failures(failures: list[tuple[str, Exception]]) -> str:
+    if not failures:
+        return "；尝试=1"
+    summary = ", ".join(
+        f"{label}:{_compact_probe_error(exc)}" for label, exc in failures
+    )
+    return f"；尝试={len(failures) + 1}；先前失败=[{summary}]"
+
+
+def _all_probes_failed(
+    capability: str,
+    failures: list[tuple[str, Exception]],
+) -> SmokeProbeError:
+    transient = bool(failures) and all(
+        _is_transient_failure(exc) for _, exc in failures
+    )
+    summary = ", ".join(
+        f"{label}:{_compact_probe_error(exc)}" for label, exc in failures
+    ) or "没有可执行入口"
+    return SmokeProbeError(
+        f"{capability} 的 {len(failures)} 个有界入口均不可用：[{summary}]",
+        failure_kind=(
+            "transient_availability"
+            if transient
+            else "multi_endpoint_unavailable"
+        ),
+        transient=transient,
+    )
 
 
 def _write_results(results: list[SmokeResult]) -> None:

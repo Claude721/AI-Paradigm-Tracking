@@ -72,6 +72,15 @@ class OpenReviewSource:
             return []
 
     async def fetch(self) -> list[TechnicalEvidence]:
+        self.request_count = 0
+        self.rate_limited_requests = 0
+        self.failed_queries = 0
+        self.not_executed_queries = 0
+        self.completed_queries = 0
+        self.result_count = 0
+        self.relevance_filtered_count = 0
+        self.undated_filtered_count = 0
+        self._circuit_open = False
         semaphore = asyncio.Semaphore(self.concurrency)
         cutoff_ms = int(
             (datetime.now(timezone.utc) - timedelta(days=self.lookback_days)).timestamp()

@@ -30,6 +30,7 @@ from healthcheck import (
     _model_check,
     _raw_environment_syntax_check,
     _schedule_check,
+    _source_endpoint_syntax_check,
     blocking_checks,
 )
 from notifications.email_notifier import (
@@ -229,6 +230,167 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(completed, [first])
         orchestrator.store.mark_evidence.assert_not_called()
 
+    def test_unexpected_origin_batch_failure_isolated_and_kept_pending(
+        self,
+    ) -> None:
+        first, second = _origin("2608.00011"), _origin("2608.00012")
+        orchestrator = object.__new__(ParadigmOrchestrator)
+        orchestrator.enricher = SimpleNamespace(
+            hydrate_priority_origins=AsyncMock(
+                return_value={
+                    "priority_origin_targets": 0,
+                    "priority_origin_hydrated": 0,
+                    "priority_origin_hydration_failed": 0,
+                }
+            )
+        )
+        orchestrator.analyzer = SimpleNamespace(
+            run=AsyncMock(
+                side_effect=[
+                    RuntimeError("one malformed upstream response"),
+                    [_rejected_extraction(second)],
+                ]
+            )
+        )
+        orchestrator.store = SimpleNamespace(mark_evidence=Mock())
+
+        with (
+            patch.object(config, "PARADIGM_ANALYSIS_BATCH_SIZE", 1),
+            patch(
+                "agents.paradigm_orchestrator._remaining_seconds",
+                side_effect=[5.0, 5.0],
+            ),
+        ):
+            result = asyncio.run(
+                orchestrator._analyze_origins_in_batches(
+                    [first, second], deadline=123.0
+                )
+            )
+
+        extractions, attempted, failed, deferred, _, completed = result
+        self.assertEqual([item.evidence for item in extractions], [second])
+        self.assertEqual(attempted, 2)
+        self.assertEqual(failed, 1)
+        self.assertEqual(deferred, [])
+        self.assertEqual(completed, [second])
+        self.assertEqual(first.raw["analysis_failure_count"], 1)
+        orchestrator.store.mark_evidence.assert_called_once_with(
+            [first], analyzed=False
+        )
+
+    def test_unexpected_deep_failure_does_not_abort_peer_candidate(self) -> None:
+        first = ParadigmCandidate(
+            key="broken-route",
+            name="Broken route",
+            thesis="test",
+            problem_shift="test",
+            mechanism="test",
+            evidence=[_origin("2608.00013")],
+        )
+        second = ParadigmCandidate(
+            key="working-route",
+            name="Working route",
+            thesis="test",
+            problem_shift="test",
+            mechanism="test",
+            evidence=[_origin("2608.00014")],
+        )
+        second.execution_failure_count = 2
+        second.last_execution_failure_at = "2026-08-14T00:00:00Z"
+        orchestrator = object.__new__(ParadigmOrchestrator)
+
+        async def enrich(values, _supporting):
+            if values[0].key == first.key:
+                raise RuntimeError("profile endpoint broke")
+            return values
+
+        orchestrator.enricher = SimpleNamespace(run=enrich)
+        orchestrator.synthesizer = SimpleNamespace(
+            run=AsyncMock(side_effect=lambda values: values)
+        )
+        orchestrator.trajectory = SimpleNamespace(
+            run=AsyncMock(side_effect=lambda values: values)
+        )
+
+        with (
+            patch.object(config, "PARADIGM_DEEP_BATCH_SIZE", 1),
+            patch(
+                "agents.paradigm_orchestrator._remaining_seconds",
+                side_effect=[5.0, 5.0],
+            ),
+        ):
+            completed, budget_deferred, execution_deferred = asyncio.run(
+                orchestrator._deep_analyze_in_batches(
+                    [first, second], [], deadline=123.0
+                )
+            )
+
+        self.assertEqual([item.key for item in completed], [second.key])
+        self.assertEqual(budget_deferred, [])
+        self.assertEqual(execution_deferred, [first])
+        self.assertEqual(first.status, "pending_deep")
+        self.assertEqual(first.execution_failure_count, 1)
+        self.assertTrue(first.last_execution_failure_at)
+        self.assertEqual(completed[0].execution_failure_count, 0)
+        self.assertEqual(completed[0].last_execution_failure_at, "")
+
+    def test_refresh_failure_keeps_original_snapshot_and_continues(self) -> None:
+        first = ParadigmCandidate(
+            key="broken-refresh",
+            name="Broken refresh",
+            thesis="original",
+            problem_shift="test",
+            mechanism="test",
+            evidence=[_origin("2608.00015")],
+        )
+        second = ParadigmCandidate(
+            key="working-refresh",
+            name="Working refresh",
+            thesis="original",
+            problem_shift="test",
+            mechanism="test",
+            evidence=[_origin("2608.00016")],
+        )
+        second.execution_failure_count = 2
+        second.last_execution_failure_at = "2026-08-14T00:00:00Z"
+        orchestrator = object.__new__(ParadigmOrchestrator)
+
+        async def refresh(values, _supporting):
+            values[0].thesis = "mutated-copy"
+            if values[0].key == first.key:
+                raise RuntimeError("community endpoint broke")
+            return values
+
+        orchestrator.enricher = SimpleNamespace(refresh=refresh)
+        orchestrator.synthesizer = SimpleNamespace(
+            run=AsyncMock(side_effect=lambda values: values)
+        )
+
+        with (
+            patch.object(config, "PARADIGM_DEEP_BATCH_SIZE", 1),
+            patch(
+                "agents.paradigm_orchestrator._remaining_seconds",
+                side_effect=[5.0, 5.0],
+            ),
+        ):
+            refreshed, budget_deferred, execution_deferred, attempted = (
+                asyncio.run(
+                    orchestrator._refresh_in_batches(
+                        [first, second], [], deadline=123.0
+                    )
+                )
+            )
+
+        self.assertEqual(first.thesis, "original")
+        self.assertEqual(refreshed[0].key, second.key)
+        self.assertEqual(refreshed[0].thesis, "mutated-copy")
+        self.assertEqual(budget_deferred, [])
+        self.assertEqual(execution_deferred, [first])
+        self.assertEqual(attempted, 2)
+        self.assertEqual(first.execution_failure_count, 1)
+        self.assertEqual(refreshed[0].execution_failure_count, 0)
+        self.assertEqual(refreshed[0].last_execution_failure_at, "")
+
     def test_origin_is_not_marked_analyzed_before_candidate_checkpoint(self) -> None:
         store = SimpleNamespace(
             save_candidates=Mock(side_effect=RuntimeError("disk full")),
@@ -275,6 +437,31 @@ class ExecutionReliabilityTests(unittest.TestCase):
             planned, _ = store.plan_origins([rediscovered])
 
         self.assertEqual(planned[0].raw["analysis_failure_count"], 2)
+
+    def test_refresh_failure_metadata_survives_candidate_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            candidate = ParadigmCandidate(
+                key="refresh-retry-route",
+                name="Refresh retry route",
+                thesis="原始判断",
+                problem_shift="问题边界",
+                mechanism="机制",
+                evidence=[_origin("2608.00017")],
+                status="watch",
+                execution_failure_count=2,
+                last_execution_failure_at="2026-08-15T00:00:00Z",
+            )
+
+            store.save_candidates([candidate])
+            restored = store.load_refresh_candidates(limit=0)
+
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(restored[0].execution_failure_count, 2)
+        self.assertEqual(
+            restored[0].last_execution_failure_at,
+            "2026-08-15T00:00:00Z",
+        )
 
     def test_changed_content_deferred_by_budget_remains_pending(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -806,6 +993,59 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("PARADIGM_REPORT_ROUTE_CONCURRENCY", check.note)
         self.assertIn("RESEARCH_WATCHLIST_MODE", check.note)
 
+    def test_doctor_rejects_malformed_source_endpoints(self) -> None:
+        with (
+            patch.object(config, "PRIORITY_RESEARCH_PAGES", ["not-a-url"]),
+            patch.object(
+                config,
+                "RESEARCH_FEED_URLS",
+                ["https://valid.example/feed"],
+            ),
+            patch.object(config, "FOLLOW_BUILDERS_ENABLED", True),
+            patch.object(
+                config,
+                "FOLLOW_BUILDERS_FEED_URL",
+                "https://feeds.example/base",
+            ),
+            patch.object(
+                config,
+                "OPENREVIEW_VENUES",
+                ["ICLR.cc/2026/Conference"],
+            ),
+        ):
+            check = _source_endpoint_syntax_check()
+
+        self.assertEqual(check.status, "missing")
+        self.assertIn("PRIORITY_RESEARCH_PAGES", check.note)
+
+    def test_doctor_accepts_local_follow_builders_and_http_sources(self) -> None:
+        with (
+            patch.object(
+                config,
+                "PRIORITY_RESEARCH_PAGES",
+                ["https://lab.example/research"],
+            ),
+            patch.object(
+                config,
+                "RESEARCH_FEED_URLS",
+                ["https://lab.example/feed.xml"],
+            ),
+            patch.object(config, "FOLLOW_BUILDERS_ENABLED", True),
+            patch.object(
+                config,
+                "FOLLOW_BUILDERS_FEED_URL",
+                "file:///tmp/feeds",
+            ),
+            patch.object(
+                config,
+                "OPENREVIEW_VENUES",
+                ["ICLR.cc/2026/Conference"],
+            ),
+        ):
+            check = _source_endpoint_syntax_check()
+
+        self.assertEqual(check.status, "ready")
+
     def test_slow_discovery_cannot_consume_the_entire_origin_stage(self) -> None:
         with (
             patch.object(config, "PARADIGM_RUN_BUDGET_SECONDS", 3900),
@@ -910,6 +1150,24 @@ class ExecutionReliabilityTests(unittest.TestCase):
 
         self.assertEqual(source.fetch_status, "query_failed")
         self.assertEqual(source.fetch_error, "AllFeedsFailed")
+
+    def test_follow_builders_all_missing_feeds_are_not_successful_zero_hits(
+        self,
+    ) -> None:
+        source = FollowBuildersSource()
+        with (
+            patch.object(config, "FOLLOW_BUILDERS_ENABLED", True),
+            patch.object(
+                source,
+                "_fetch_json",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            self.assertEqual(asyncio.run(source.safe_fetch()), [])
+
+        self.assertEqual(source.fetch_status, "query_failed")
+        self.assertEqual(source.fetch_error, "AllFeedsMissing")
+        self.assertEqual(source.missing_feeds, 3)
 
     def test_empty_report_discloses_runtime_backlog(self) -> None:
         content = ParadigmReportGenerator._empty_report(

@@ -1,6 +1,16 @@
 # AI 技术范式雷达体检报告
 
-> 2026-08-15 第二十一次更新。本轮从金丝雀驱动造成的语义污染出发，对生产准入、证据合并、增量状态、云端快照、Smoke、信源健康和时区边界做全仓复核；只运行离线测试、静态体检与编译，没有请求真实 API、执行完整流水线或发送邮件。
+> 2026-08-15 第二十二次更新。最新云端 Smoke 暴露了“多入口生产能力在验收层被压成首项单点”的低级错误；本轮按失败传播模型重审 Smoke、来源健康、批次隔离与跨轮公平性。只运行离线测试、静态体检与编译，没有执行真实研究流水线或发送邮件。
+
+## 2026-08-15 官方页面 403 暴露的验收语义收缩
+
+运行 `86444192876` 的离线回归、配置体检、Qwen、arXiv、Hugging Face、Follow Builders、OpenAlex、OpenReview、RSS、GitHub、HN、Tavily 与 SMTP 全部通过；唯一退出点是 OpenAI 研究索引从 GitHub Runner 返回 403。OpenAI 入口只是 41 个官方页面中的第一项，生产抓取本来会把单页失败记为 `partial` 并继续其他页面，但上一轮 Smoke 为移除具名金丝雀偏好，机械改成 `PRIORITY_RESEARCH_PAGES[0]`，再把任意 403 归为必需鉴权失败。测试只断言了第一项返回 200 和请求次数为一，等于把“配置顺序正确”误当成“能力语义正确”，因此离线全绿反而固化了单点故障。
+
+本轮把这一类问题作为故障族处理，而不是替换 OpenAI URL。官方页面、OpenReview venue、RSS 和 Follow Builders 现在按配置顺序最多 failover 5 个入口，首个合法响应即停止；失败详情只记录 host/venue/文件名和异常类型，不保存正文或敏感 URL。单个公共页面 403 只进入入口失败账本，所有有界入口均失败才产生 `multi_endpoint_unavailable`；若全部只是 429、5xx、网络错误或超时，则仍按 `transient_availability` 非阻断降级。Tavily 的临时上游故障也与无效 Key 分开，模型探针则必须真正按协议返回 `OK`，不能用任意非空文本冒充成功。`smoke_failed` 现在同时检查状态和 `blocking`，避免未来的非阻断失败对象被错误升级。
+
+横向检查还发现生产 Follow Builders 把三个 Feed 全部 404 当成成功零命中，错误 base URL 因而可能静默通过；现在单文件缺失是 `partial`，全部缺失是 `query_failed`。所有有状态的来源在重新执行 `fetch()` 时会先重置请求、失败、熔断和覆盖计数，防止同一实例重试时把两轮统计叠加。
+
+批次链路存在同类“单项→全局”放大：候选正文补水、人物核验或社区客户端若抛出未预期异常，旧编排器只捕获 Timeout，会让一条路线中断整轮任务；历史刷新还可能把半修改对象留在内存。现在机制抽取、深挖和历史刷新都隔离未预期批次异常：原点保持未分析，候选保持 `pending_deep`，刷新使用深拷贝保留原快照，同轮其他批次继续。执行异常与预算延期分别计数；候选跨轮持久化执行失败次数，同优先级下让未失败路线先运行，成功后清零偶发故障记录，但不改变任何 Rubric 或报告准入结论。
 
 ## 2026-08-15 金丝雀退役后的全仓工程复核
 
@@ -12,9 +22,9 @@
 
 云端状态从同名 overwrite 改为 `paradigm-radar-state-<run_id>` 不可变快照。恢复步骤分页读取全部未过期快照，从新到旧验证下载、ZIP、SQLite 完整性和 schema 迁移，坏快照自动回退上一份；兼容旧同名 artifact，全部不可用时仍 fail closed。报告与审计 artifact 同样使用唯一名称。Workflow 明确 `submodules: false`，离线契约另行检查 `.gitmodules` 的 path/URL 完整性，避免历史辅助仓库再次污染生产 checkout。
 
-Smoke 中对 Moonshot/Qwen/特定世界模型事件的偏好已移除，OpenAlex、OpenReview、GitHub、HN、Tavily、Reddit 与 X 只使用通用协议词；官方研究页严格取配置顺序中的第一个入口。arXiv 仍使用一个长期稳定记录验证 Atom 协议，但不运行生产召回。Follow Builders 新增逐 Feed 健康账本：部分网络/解析失败保留已取得结果并标记 `partial`，全部失败标记 `query_failed`，404/本地缺失则作为成功的空 Feed 契约，不再被基础 wrapper 伪装成成功零命中。报告文件名、主邮件和失败邮件统一使用 `SCHEDULE_TIMEZONE`，避免 UTC Runner 在上海日期边界生成错误日期。
+上一轮 Smoke 已移除 Moonshot/Qwen/特定世界模型事件偏好，OpenAlex、OpenReview、GitHub、HN、Tavily、Reddit 与 X 只使用通用协议词；但当时把官方页面压成配置首项、并把 Follow Builders 缺失文件视作成功空 Feed，正是本报告上一节修复的遗留错误。arXiv 继续只用一个长期稳定记录验证 Atom 协议，不运行生产召回。报告文件名、主邮件和失败邮件统一使用 `SCHEDULE_TIMEZONE`，避免 UTC Runner 在上海日期边界生成错误日期。
 
-本轮新增/调整的长期契约全部使用合成项目、组织和日期，不恢复历史论文发布门。完整 hermetic 发布门通过 191 项测试、标准库失败通知导入、手工探针导入与 compileall；本地 `--doctor` 全部必需项通过，Workflow YAML 与每个 Bash `run` 块通过语法检查。没有运行真实 Smoke、真实研究或 SMTP 发送。
+本轮新增/调整的长期契约全部使用合成项目、组织和日期，不恢复历史论文发布门。完整 hermetic 发布门通过 206 项测试、标准库失败通知导入、手工探针导入与 compileall；本地 `--doctor` 全部必需项通过，Workflow YAML 与每个 Bash `run` 块通过语法检查。没有运行真实 Smoke、真实研究或 SMTP 发送。
 
 ## 2026-08-15 周任务失败根因与全仓库收敛
 
@@ -185,10 +195,10 @@ Kimi‑K3 的实际标题是 *Kimi K3: Open Frontier Intelligence*，标题本�
 ## 验证结果
 
 - Python 静态编译通过。
-- 191 项本地单元测试在清空生产配置、拒绝网络并忽略 `.env` 的发布门中通过；发布门覆盖合成日期窗口、发现源墙上超时/部分失败、候选先于原点提交的无损检查点、首个工作流失败步骤归因、非法 Variable 与云端禁用软预算、配置向导权限/默认值、日志凭据脱敏、不可变 artifact 回退契约，并继续覆盖生产规模多路线有界写作、路线级 checkpoint、durable outbox、SMTP 失败续投、Rubric、跨行业召回、人物/原文/讨论势能硬契约和分批检查点。历史论文名称、发布日期和 arXiv ID 不再参与发布判定。
+- 206 项本地单元测试在清空生产配置、拒绝网络并忽略 `.env` 的发布门中通过；发布门覆盖合成日期窗口、发现源墙上超时/部分失败、候选先于原点提交的无损检查点、首个工作流失败步骤归因、非法 Variable 与云端禁用软预算、配置向导权限/默认值、日志凭据脱敏、不可变 artifact 回退契约，并继续覆盖生产规模多路线有界写作、路线级 checkpoint、durable outbox、SMTP 失败续投、Rubric、跨行业召回、人物/原文/讨论势能硬契约和分批检查点。历史论文名称、发布日期和 arXiv ID 不再参与发布判定。
 - GitHub Actions YAML 语法通过本地解析。
 - 工作流已升级为 Node 24 Actions：`checkout@v6`、`setup-python@v6`、`upload-artifact@v7`；关闭 checkout 凭据持久化以消除无用的 post-job Git 清理。
 - 历史真实小成本验证曾通过 Qwen `qwen3.7-plus`、arXiv、Hugging Face Daily Papers、OpenAlex Works/Authors、官方研究页、Hacker News、Tavily 和 QQ SMTP 登录（未发信），并曾以一次性漏项复测验证 arXiv 自然检索、comment 专项检索、Kimi Research 页面、Moonshot 团队归属和官方 PDF 回退。它们是当时的验证记录，不是每周重复执行清单。OpenReview 在修复后通过定向复测；Semantic Scholar、Reddit 与 X 当时因未配置而按设计跳过。
 - 最新云端日志中的 GitHub Search 已通过并返回剩余额度，说明 Repository secret 中的 `GITHUB_TOKEN` 当前有效；本地 `.env` 中的 Token 是否相同仍以本机下一次 Smoke 为准，不再把旧的本地 401 结论当作云端阻塞。
 
-下一次真实验收重新运行 GitHub `smoke_only=true`。日志标题应显示 `contract 2026-08-15.1`；若 arXiv/OpenAlex/GitHub 等公共服务仍出现 429 或超时，应显示 `degraded` 与 `failure_kind=transient_availability`，而不是调用生产车道后超时失败。401/403、404 或响应契约错误仍应让 Workflow 失败。随后按正常时间窗执行完整流水线，不配置历史论文 seed；重点检查重要 Technical Report 是否优先进入候选、arXiv/OpenAlex/OpenReview 请求审计能否解释覆盖缺口、人物公开入口是否充分，以及正文是否完全摆脱英文摘要直出。
+下一次真实验收重新运行 GitHub `smoke_only=true`。日志标题应显示 `contract 2026-08-15.2`；若 OpenAI 等单个官方页面返回 403，应继续尝试后续入口并在成功项详情中保留先前失败 host，而不是把整个部署判为鉴权失败。若有界入口全部只是 429/5xx/超时，应显示 `degraded` 与 `failure_kind=transient_availability`；全部出现非瞬时故障才显示 `multi_endpoint_unavailable`。随后按正常时间窗执行完整流水线，不配置历史论文 seed；重点检查重要 Technical Report 是否优先进入候选、arXiv/OpenAlex/OpenReview 请求审计能否解释覆盖缺口、人物公开入口是否充分，以及正文是否完全摆脱英文摘要直出。

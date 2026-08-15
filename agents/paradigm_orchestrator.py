@@ -359,7 +359,11 @@ class ParadigmOrchestrator:
         )
         stats["planned_deep_candidate_count"] = len(deep_pool)
         if deep_candidates:
-            deep_candidates, budget_deferred_candidates = (
+            (
+                deep_candidates,
+                budget_deferred_candidates,
+                execution_deferred_candidates,
+            ) = (
                 await self._deep_analyze_in_batches(
                     deep_candidates,
                     batch.supporting,
@@ -368,9 +372,11 @@ class ParadigmOrchestrator:
             )
         else:
             budget_deferred_candidates = []
+            execution_deferred_candidates = []
         deferred_candidates = [
             *safety_deferred_candidates,
             *budget_deferred_candidates,
+            *execution_deferred_candidates,
         ]
         for candidate in safety_deferred_candidates:
             _record_deferred_candidate(
@@ -389,6 +395,9 @@ class ParadigmOrchestrator:
         )
         stats["candidate_budget_deferred_count"] = len(
             budget_deferred_candidates
+        )
+        stats["candidate_execution_deferred_count"] = len(
+            execution_deferred_candidates
         )
         stats["candidate_deferred_count"] = len(deferred_candidates)
         run_audit.checkpoint(stats)
@@ -414,7 +423,12 @@ class ParadigmOrchestrator:
         historical, refresh_safety_deferred = _apply_safety_limit(
             historical, config.PARADIGM_REFRESH_SAFETY_LIMIT
         )
-        refreshed, refresh_budget_deferred, refresh_attempted = (
+        (
+            refreshed,
+            refresh_budget_deferred,
+            refresh_execution_deferred,
+            refresh_attempted,
+        ) = (
             await self._refresh_in_batches(
                 historical,
                 batch.supporting,
@@ -424,8 +438,13 @@ class ParadigmOrchestrator:
         stats["refresh_analysis_count"] = refresh_attempted
         stats["refresh_safety_deferred_count"] = len(refresh_safety_deferred)
         stats["refresh_budget_deferred_count"] = len(refresh_budget_deferred)
+        stats["refresh_execution_deferred_count"] = len(
+            refresh_execution_deferred
+        )
         stats["refresh_deferred_count"] = (
-            len(refresh_safety_deferred) + len(refresh_budget_deferred)
+            len(refresh_safety_deferred)
+            + len(refresh_budget_deferred)
+            + len(refresh_execution_deferred)
         )
         stats["refreshed_paradigms"] = len(refreshed)
         run_audit.checkpoint(stats)
@@ -583,7 +602,16 @@ class ParadigmOrchestrator:
             else "complete_no_signal"
         )
 
-        self.store.save_candidates([*candidates, *deferred_candidates])
+        # 刷新失败的历史路线不参与本轮写作，但新的失败计数必须随原快照
+        # 持久化；否则下轮排序看不到失败历史，同一个外部异常会反复占用
+        # 相同执行位置。成功处理后会清零，避免一次偶发故障永久降权。
+        self.store.save_candidates(
+            [
+                *candidates,
+                *deferred_candidates,
+                *refresh_execution_deferred,
+            ]
+        )
         # 发现结果与覆盖基线是两个检查点。已抓到的原点即使后续失败也保留
         # 在 backlog；但只要任一召回车道/索引/官方入口没有闭合，就不能把
         # 新地图版本标成已完成，否则下一轮会失去 bootstrap 补扫窗口。
@@ -660,6 +688,28 @@ class ParadigmOrchestrator:
                     hydration_totals,
                     completed_origins,
                 )
+            except Exception as exc:
+                logger.exception(
+                    "机制抽取批次异常；%s 条原点保留 pending 后继续",
+                    len(origin_batch),
+                )
+                run_audit.event(
+                    "origin_analysis_batch",
+                    "deferred",
+                    f"{len(origin_batch)} 条原点发生 {type(exc).__name__}；"
+                    "未写成技术淘汰，保留 pending",
+                )
+                for item in origin_batch:
+                    item.raw["analysis_failure_count"] = (
+                        int(item.raw.get("analysis_failure_count", 0) or 0) + 1
+                    )
+                    item.raw["last_analysis_failure_at"] = datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                self.store.mark_evidence(origin_batch, analyzed=False)
+                analyzed_count += len(origin_batch)
+                failed_count += len(origin_batch)
+                continue
 
             for key, value in hydration.items():
                 hydration_totals[key] += int(value or 0)
@@ -709,13 +759,14 @@ class ParadigmOrchestrator:
         candidates: list,
         supporting: list,
         deadline: float,
-    ) -> tuple[list, list]:
+    ) -> tuple[list, list, list]:
         completed = []
+        execution_deferred = []
         batch_size = config.PARADIGM_DEEP_BATCH_SIZE
         for offset in range(0, len(candidates), batch_size):
             remaining = _remaining_seconds(deadline)
             if remaining <= 0:
-                return completed, candidates[offset:]
+                return completed, candidates[offset:], execution_deferred
             # External enrichment mutates candidates.  Work on a copy so an
             # interrupted batch never persists half-scrubbed community text.
             candidate_batch = copy.deepcopy(
@@ -732,24 +783,54 @@ class ParadigmOrchestrator:
                     process_batch(), timeout=remaining
                 )
             except TimeoutError:
-                return completed, candidates[offset:]
+                return completed, candidates[offset:], execution_deferred
+            except Exception as exc:
+                failed_batch = candidates[offset : offset + batch_size]
+                logger.exception(
+                    "候选深挖批次异常；%s 条路线保留 pending 后继续",
+                    len(failed_batch),
+                )
+                run_audit.event(
+                    "deep_analysis_batch",
+                    "deferred",
+                    f"{len(failed_batch)} 条路线发生 {type(exc).__name__}；"
+                    "未写成技术淘汰，保留 pending",
+                )
+                for candidate in failed_batch:
+                    candidate.execution_failure_count += 1
+                    candidate.last_execution_failure_at = datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                    _record_deferred_candidate(
+                        candidate,
+                        "深挖执行异常；保留 pending，下轮重试。"
+                        f"错误类型：{type(exc).__name__}",
+                    )
+                execution_deferred.extend(failed_batch)
+                continue
+            for candidate in values:
+                candidate.execution_failure_count = 0
+                candidate.last_execution_failure_at = ""
             completed.extend(values)
-        return completed, []
+        return completed, [], execution_deferred
 
     async def _refresh_in_batches(
         self,
         candidates: list,
         supporting: list,
         deadline: float,
-    ) -> tuple[list, list, int]:
+    ) -> tuple[list, list, list, int]:
         refreshed = []
+        execution_deferred = []
         attempted = 0
         batch_size = config.PARADIGM_DEEP_BATCH_SIZE
         for offset in range(0, len(candidates), batch_size):
             remaining = _remaining_seconds(deadline)
             if remaining <= 0:
-                return refreshed, candidates[offset:], attempted
-            candidate_batch = candidates[offset : offset + batch_size]
+                return refreshed, candidates[offset:], execution_deferred, attempted
+            candidate_batch = copy.deepcopy(
+                candidates[offset : offset + batch_size]
+            )
 
             async def process_batch():
                 values = await self.enricher.refresh(candidate_batch, supporting)
@@ -762,10 +843,33 @@ class ParadigmOrchestrator:
                     process_batch(), timeout=remaining
                 )
             except TimeoutError:
-                return refreshed, candidates[offset:], attempted
+                return refreshed, candidates[offset:], execution_deferred, attempted
+            except Exception as exc:
+                failed_batch = candidates[offset : offset + batch_size]
+                attempted += len(failed_batch)
+                for candidate in failed_batch:
+                    candidate.execution_failure_count += 1
+                    candidate.last_execution_failure_at = datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                execution_deferred.extend(failed_batch)
+                logger.exception(
+                    "历史路线刷新批次异常；%s 条路线保留原快照后继续",
+                    len(failed_batch),
+                )
+                run_audit.event(
+                    "refresh_analysis_batch",
+                    "deferred",
+                    f"{len(failed_batch)} 条历史路线发生 {type(exc).__name__}；"
+                    "保留原快照，下轮重试",
+                )
+                continue
+            for candidate in values:
+                candidate.execution_failure_count = 0
+                candidate.last_execution_failure_at = ""
             refreshed.extend(values)
             attempted += len(candidate_batch)
-        return refreshed, [], attempted
+        return refreshed, [], execution_deferred, attempted
 
 
 def _origin_analysis_priority(evidence) -> tuple[int, int, int, int, int, str]:
@@ -851,7 +955,7 @@ def _is_high_priority_origin(evidence) -> bool:
     )
 
 
-def _deep_analysis_priority(candidate) -> tuple[float, float, float, int]:
+def _deep_analysis_priority(candidate) -> tuple[float, int, float, float, int]:
     """顺序只影响执行先后；Rubric 决定是否深挖，数量不由排序截断。"""
     origin_priority = max(
         (int(item.raw.get("origin_priority", 0) or 0) for item in candidate.evidence),
@@ -859,6 +963,7 @@ def _deep_analysis_priority(candidate) -> tuple[float, float, float, int]:
     )
     return (
         float(origin_priority),
+        -int(candidate.execution_failure_count or 0),
         float(candidate.screening_rubric.get("score", 0.0)),
         float(candidate.screening_rubric.get("answer_coverage", 0.0)),
         len(candidate.evidence),

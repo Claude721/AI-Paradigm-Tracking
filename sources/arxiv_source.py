@@ -99,6 +99,19 @@ class ArxivSource(BaseSource):
         return self.reference_time or datetime.now(timezone.utc)
 
     async def fetch(self) -> list[RawProject]:
+        self.executed_query_groups = set()
+        self.failed_query_groups = set()
+        self.executed_recall_lanes = set()
+        self.failed_recall_lanes = set()
+        self.recall_lane_hits = {}
+        self.recall_lane_windows = {}
+        self.not_executed_recall_lanes = {}
+        self.planned_recall_lanes = set()
+        self.request_count = 0
+        self.rate_limited_requests = 0
+        self.technical_query_false_positives = 0
+        self._circuit_open = False
+        self.circuit_reason = ""
         landscape_plan = arxiv_query_plan()
         author_plan = (
             arxiv_priority_author_query_plan(config.PRIORITY_RESEARCHERS)

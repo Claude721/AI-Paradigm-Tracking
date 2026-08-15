@@ -48,6 +48,8 @@ class ResearchFeedSource:
             return []
 
     async def fetch(self) -> list[TechnicalEvidence]:
+        self.completed_feeds = 0
+        self.failed_feeds = 0
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             responses = await asyncio.gather(
                 *(client.get(url) for url in config.RESEARCH_FEED_URLS),

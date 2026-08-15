@@ -342,6 +342,10 @@ class ParadigmCandidate:
     status: str = "watch"
     report_kind: str = "new"
     rejection_reason: str = ""
+    # 运行异常不是研究结论。跨轮保留计数只用于执行公平性和审计，避免
+    # 一个反复触发外部异常的候选长期占据同优先级队首。
+    execution_failure_count: int = 0
+    last_execution_failure_at: str = ""
 
     @property
     def evidence_sources(self) -> set[str]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import config
@@ -24,6 +25,7 @@ def collect_checks() -> list[Check]:
     sub, main = resolve_all()
     checks = [
         _raw_environment_syntax_check(),
+        _source_endpoint_syntax_check(),
         _model_check("论文范式抽取模型", sub),
         _model_check("范式综合/人物模型", main),
         _rubric_check(),
@@ -175,7 +177,8 @@ def collect_checks() -> list[Check]:
             "云端部署验收",
             "ready",
             f"逐项总时限 {config.SMOKE_CHECK_TIMEOUT_SECONDS}s；"
-            "各外部能力使用独立单请求探针；临时可用性与契约失败分账",
+            "单端点使用最小请求，多入口最多 failover 5 次；"
+            "临时可用性与契约失败分账",
         ),
         _execution_budget_check(),
         _email_check(),
@@ -277,6 +280,46 @@ def _raw_environment_syntax_check() -> Check:
             + "、".join(sorted(set(invalid)))
             if invalid
             else "关键布尔、整数与范围配置语法有效"
+        ),
+    )
+
+
+def _source_endpoint_syntax_check() -> Check:
+    """Reject malformed endpoint Variables before a real HTTP client sees them."""
+
+    invalid: list[str] = []
+
+    def valid_http(value: str) -> bool:
+        parsed = urlparse(value.strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+
+    if any(not valid_http(value) for value in config.PRIORITY_RESEARCH_PAGES):
+        invalid.append("PRIORITY_RESEARCH_PAGES")
+    if any(not valid_http(value) for value in config.RESEARCH_FEED_URLS):
+        invalid.append("RESEARCH_FEED_URLS")
+    follow_base = config.FOLLOW_BUILDERS_FEED_URL.strip()
+    if config.FOLLOW_BUILDERS_ENABLED:
+        parsed_follow = urlparse(follow_base)
+        follow_valid = valid_http(follow_base) or (
+            parsed_follow.scheme == "file" and bool(parsed_follow.path)
+        )
+        if not follow_valid:
+            invalid.append("FOLLOW_BUILDERS_FEED_URL")
+    if any(
+        "/" not in value
+        or value.startswith(("http://", "https://"))
+        or any(character.isspace() for character in value)
+        for value in config.OPENREVIEW_VENUES
+    ):
+        invalid.append("OPENREVIEW_VENUES")
+    return Check(
+        "信源入口语法",
+        "配置解析",
+        "missing" if invalid else "ready",
+        (
+            "以下入口配置格式无效：" + "、".join(sorted(set(invalid)))
+            if invalid
+            else "官方页面、Feed、Follow Builders 与 OpenReview venue 格式有效"
         ),
     )
 

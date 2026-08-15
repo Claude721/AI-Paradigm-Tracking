@@ -140,7 +140,7 @@ class SmokeCheckContractTests(unittest.TestCase):
         self.assertIn("单次请求", detail)
         self.assertEqual(client.get.await_count, 1)
 
-    def test_follow_builders_smoke_reads_only_one_feed(self) -> None:
+    def test_follow_builders_smoke_stops_after_first_valid_feed(self) -> None:
         response = httpx.Response(
             200,
             json={"x": [{"name": "Builder", "tweets": [{"text": "hello"}]}]},
@@ -160,6 +160,7 @@ class SmokeCheckContractTests(unittest.TestCase):
             count, detail = asyncio.run(_follow_builders())
 
         self.assertEqual(count, 1)
+        self.assertIn("成功=feed-x.json", detail)
         self.assertIn("tweets=1", detail)
         self.assertEqual(client.get.await_count, 1)
         self.assertEqual(
@@ -182,7 +183,39 @@ class SmokeCheckContractTests(unittest.TestCase):
                 count, detail = asyncio.run(_follow_builders())
 
         self.assertEqual(count, 1)
-        self.assertIn("单次本地文件读取", detail)
+        self.assertIn("本地文件", detail)
+
+    def test_follow_builders_smoke_falls_back_when_x_feed_is_missing(self) -> None:
+        base = "https://feeds.example"
+        client = MagicMock()
+        client.get = AsyncMock(
+            side_effect=[
+                httpx.Response(
+                    404,
+                    request=httpx.Request("GET", f"{base}/feed-x.json"),
+                ),
+                httpx.Response(
+                    200,
+                    json={"podcasts": [{"title": "Research conversation"}]},
+                    request=httpx.Request(
+                        "GET", f"{base}/feed-podcasts.json"
+                    ),
+                ),
+            ]
+        )
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=client)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch.object(config, "FOLLOW_BUILDERS_FEED_URL", base),
+            patch("smokecheck.httpx.AsyncClient", return_value=context),
+        ):
+            count, detail = asyncio.run(_follow_builders())
+
+        self.assertEqual(count, 1)
+        self.assertEqual(client.get.await_count, 2)
+        self.assertIn("成功=feed-podcasts.json", detail)
+        self.assertIn("feed-x.json:HTTP 404", detail)
 
     def test_openalex_smoke_uses_exactly_one_request_without_cursor(self) -> None:
         response = httpx.Response(
@@ -205,7 +238,7 @@ class SmokeCheckContractTests(unittest.TestCase):
         self.assertEqual(params["search"], '"machine learning"')
         self.assertNotIn("cursor", params)
 
-    def test_openreview_smoke_uses_exactly_one_request_and_accepts_zero_hits(
+    def test_openreview_smoke_stops_after_valid_venue_and_accepts_zero_hits(
         self,
     ) -> None:
         response = httpx.Response(
@@ -234,7 +267,34 @@ class SmokeCheckContractTests(unittest.TestCase):
         self.assertEqual(params["limit"], 1)
         self.assertEqual(params["offset"], 0)
 
-    def test_priority_page_smoke_fetches_only_one_index_page(self) -> None:
+    def test_openreview_smoke_falls_back_across_configured_venues(self) -> None:
+        endpoint = "https://api2.openreview.net/notes/search"
+        client = MagicMock()
+        client.get = AsyncMock(
+            side_effect=[
+                httpx.Response(404, request=httpx.Request("GET", endpoint)),
+                httpx.Response(
+                    200,
+                    json={"notes": []},
+                    request=httpx.Request("GET", endpoint),
+                ),
+            ]
+        )
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=client)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch.object(config, "OPENREVIEW_VENUES", ["old", "current"]),
+            patch("smokecheck.httpx.AsyncClient", return_value=context),
+        ):
+            count, detail = asyncio.run(_openreview())
+
+        self.assertEqual(count, 0)
+        self.assertEqual(client.get.await_count, 2)
+        self.assertIn("成功 venue=current", detail)
+        self.assertIn("venue:old:HTTP 404", detail)
+
+    def test_priority_page_smoke_stops_after_first_valid_index_page(self) -> None:
         response = httpx.Response(
             200,
             text="<html><body>" + '<a href="/paper">Paper</a>' * 20 + "</body></html>",
@@ -255,14 +315,110 @@ class SmokeCheckContractTests(unittest.TestCase):
             count, detail = asyncio.run(_priority_pages())
 
         self.assertEqual(count, 1)
-        self.assertIn("单次索引页请求", detail)
+        self.assertIn("有界索引页 failover", detail)
         self.assertEqual(client.get.await_count, 1)
         self.assertEqual(
             client.get.await_args.args[0],
             "https://lab.example/research/",
         )
 
-    def test_research_feed_smoke_fetches_only_first_feed(self) -> None:
+    def test_priority_page_403_falls_through_to_another_configured_page(
+        self,
+    ) -> None:
+        first_request = httpx.Request("GET", "https://blocked.example/research")
+        second_request = httpx.Request("GET", "https://working.example/research")
+        client = MagicMock()
+        client.get = AsyncMock(
+            side_effect=[
+                httpx.Response(403, request=first_request),
+                httpx.Response(
+                    200,
+                    text="<html><body>" + '<a href="/paper">Paper</a>' * 20 + "</body></html>",
+                    request=second_request,
+                ),
+            ]
+        )
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=client)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch.object(
+                config,
+                "PRIORITY_RESEARCH_PAGES",
+                [str(first_request.url), str(second_request.url)],
+            ),
+            patch("smokecheck.httpx.AsyncClient", return_value=context),
+        ):
+            count, detail = asyncio.run(_priority_pages())
+
+        self.assertEqual(count, 1)
+        self.assertEqual(client.get.await_count, 2)
+        self.assertIn("成功 host=working.example", detail)
+        self.assertIn("blocked.example:HTTP 403", detail)
+
+    def test_all_priority_page_access_failures_are_one_capability_failure(
+        self,
+    ) -> None:
+        pages = [f"https://blocked-{index}.example/research" for index in range(2)]
+        responses = [
+            httpx.Response(403, request=httpx.Request("GET", page))
+            for page in pages
+        ]
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=responses)
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=client)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch.object(config, "PRIORITY_RESEARCH_PAGES", pages),
+            patch("smokecheck.httpx.AsyncClient", return_value=context),
+        ):
+            result = asyncio.run(
+                _check(
+                    "官方研究页解析",
+                    True,
+                    _priority_pages,
+                    require_results=True,
+                    required_config=True,
+                    degrade_on_transient=True,
+                )
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failure_kind, "multi_endpoint_unavailable")
+        self.assertIn("2 个有界入口均不可用", result.detail)
+
+    def test_all_priority_page_transient_failures_are_degraded(self) -> None:
+        pages = [f"https://busy-{index}.example/research" for index in range(2)]
+        responses = [
+            httpx.Response(503, request=httpx.Request("GET", page))
+            for page in pages
+        ]
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=responses)
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=client)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch.object(config, "PRIORITY_RESEARCH_PAGES", pages),
+            patch("smokecheck.httpx.AsyncClient", return_value=context),
+        ):
+            result = asyncio.run(
+                _check(
+                    "官方研究页解析",
+                    True,
+                    _priority_pages,
+                    require_results=True,
+                    required_config=True,
+                    degrade_on_transient=True,
+                )
+            )
+
+        self.assertEqual(result.status, "degraded")
+        self.assertEqual(result.failure_kind, "transient_availability")
+        self.assertFalse(smoke_failed([result]))
+
+    def test_research_feed_smoke_stops_after_first_valid_feed(self) -> None:
         response = httpx.Response(
             200,
             text="<rss><channel><item><title>Paper</title></item></channel></rss>",
@@ -283,12 +439,40 @@ class SmokeCheckContractTests(unittest.TestCase):
             count, detail = asyncio.run(_research_feeds())
 
         self.assertEqual(count, 1)
-        self.assertIn("单次 Feed 请求", detail)
+        self.assertIn("有界 Feed failover", detail)
         self.assertEqual(client.get.await_count, 1)
         self.assertEqual(
             client.get.await_args.args[0],
             "https://example.com/feed.xml",
         )
+
+    def test_research_feed_uses_bounded_fallback_after_first_failure(self) -> None:
+        first = "https://broken.example/feed.xml"
+        second = "https://working.example/feed.xml"
+        client = MagicMock()
+        client.get = AsyncMock(
+            side_effect=[
+                httpx.Response(500, request=httpx.Request("GET", first)),
+                httpx.Response(
+                    200,
+                    text="<rss><channel></channel></rss>",
+                    request=httpx.Request("GET", second),
+                ),
+            ]
+        )
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=client)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch.object(config, "RESEARCH_FEED_URLS", [first, second]),
+            patch("smokecheck.httpx.AsyncClient", return_value=context),
+        ):
+            count, detail = asyncio.run(_research_feeds())
+
+        self.assertEqual(count, 0)
+        self.assertEqual(client.get.await_count, 2)
+        self.assertIn("成功 host=working.example", detail)
+        self.assertIn("broken.example:HTTP 500", detail)
 
     def test_github_smoke_does_not_make_separate_rate_limit_request(self) -> None:
         response = httpx.Response(
@@ -398,9 +582,38 @@ class SmokeCheckContractTests(unittest.TestCase):
         self.assertIn("Timeout", results[0].detail)
         self.assertEqual(results[1].status, "skipped")
 
+    def test_llm_probe_rejects_non_ok_content(self) -> None:
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(
+                        return_value=SimpleNamespace(
+                            choices=[
+                                SimpleNamespace(
+                                    message=SimpleNamespace(content="permission denied")
+                                )
+                            ],
+                            usage=SimpleNamespace(total_tokens=4),
+                        )
+                    )
+                )
+            )
+        )
+        resolved = SimpleNamespace(label="dashscope/qwen3.7-plus")
+        with (
+            patch("smokecheck.resolve_all", return_value=[resolved, resolved]),
+            patch("smokecheck.build_client", return_value=(client, "qwen3.7-plus")),
+        ):
+            results = asyncio.run(_check_models())
+
+        self.assertEqual(results[0].status, "failed")
+        self.assertEqual(results[0].failure_kind, "response_contract")
+        self.assertEqual(results[1].status, "skipped")
+
     def test_only_blocking_failures_make_smoke_fail(self) -> None:
         results = [
             SmokeResult("optional", "degraded", blocking=False),
+            SmokeResult("legacy-optional", "failed", blocking=False),
             SmokeResult("ok", "passed"),
             SmokeResult("skip", "skipped", blocking=False),
         ]

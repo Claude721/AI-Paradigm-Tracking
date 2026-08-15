@@ -5,7 +5,7 @@
 - 每周五 09:15（Asia/Shanghai）由 GitHub 云端运行，本机无需开机。
 - GitHub Actions 页面提供“Run workflow”按钮，可以随时手动执行，并选择 7/30/60/90 天窗口或填写精确 arXiv ID。
 - 手动运行还可以勾选 `reset_state`，强制忽略旧数据库。
-- `smoke_only=true` 时只做小成本真实接口验证：Qwen 只回复一次 `OK`；arXiv、Hugging Face、Follow Builders、OpenAlex、OpenReview、官方研究页、RSS、GitHub 等各使用独立的单请求探针；Tavily 只消耗一个 basic request，SMTP 只登录不发信。每项默认 30 秒总时限，不会调用生产召回器、生成报告或改动去重数据库。
+- `smoke_only=true` 时只做小成本真实能力验证：Qwen 必须按契约回复 `OK`；arXiv、Hugging Face、OpenAlex、GitHub 等单端点能力只发一个最小请求，Follow Builders、OpenReview、官方研究页和 RSS 最多按配置顺序 failover 5 个入口并在首个成功后停止；Tavily 只消耗一个 basic request，SMTP 只登录不发信。每项默认 30 秒总时限，不会调用生产召回器、生成报告或改动去重数据库。
 - 自动与手动触发都执行 `python main.py`，报告生成后都会发送邮件。
 - 研究检查点、报告渲染和邮件投递已经解耦。研究完成后先写入持久化 outbox；报告或 SMTP 失败会让任务失败，但不会撤销已完成研究，也不会把该报告登记成已成功交付。下一次完整运行先续投旧 outbox，再开始新研究。
 - 报告若包含英文长段、评分表、字段拼装、缺少关键人物/公开检索记录或缺少任一路线的一手链接，会先自动重写一次；仍不合格则任务失败且不发送邮件。人物与原文索引由结构化证据确定性生成，不依赖模型抄写。
@@ -80,7 +80,7 @@
 
 不配置变量时，RSS 信源为空；研究入口、组织与重点研究者使用仓库中的版本化默认目录，不影响工作流语法。若仓库已有旧版 `PRIORITY_RESEARCH_PAGES` 或 `ESTABLISHED_RESEARCH_ORGANIZATIONS` 长名单，`merge` 会保留它们并同时加载新默认目录，不会冻结后续更新。
 
-静态体检会直接拒绝拼错的布尔值、非整数和越界并发/超时值，而不是沿用默认值继续运行。例如 `flase`、`three-thousand` 或 `PARADIGM_REPORT_ROUTE_CONCURRENCY=99` 都会在访问状态 artifact 和真实 API 之前失败，并在告警邮件中列出变量名。
+静态体检会直接拒绝拼错的布尔值、非整数、越界并发/超时值，以及格式错误的官方页面、Feed、Follow Builders 和 OpenReview venue，而不是沿用默认值继续运行。例如 `flase`、`three-thousand`、`PARADIGM_REPORT_ROUTE_CONCURRENCY=99` 或缺少 `https://` 的页面地址都会在访问状态 artifact 和真实 API 之前失败，并在告警邮件中列出变量名而不回显可能含凭据的完整 URL。
 
 GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留空时同时发现社区和普通技术网页，结果仍只算索引线索。Rubric 与前沿覆盖地图都随代码提交，无需创建 Secret 或 Variable。旧版 `PARADIGM_MAX_ANALYSIS_ITEMS`、`PARADIGM_MAX_DEEP_CANDIDATES` 等 Variable 可以删除；即使保留，新代码也不会读取。Reddit 的 Client ID/Secret 必须和“已批准”开关一起配置；只填密钥但不开启批准开关时，代码不会请求 Reddit API。Semantic Scholar 同理：Secret 留空、Variable 为 `false` 时，代码不会匿名请求。
 
@@ -91,7 +91,7 @@ GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留�
 1. 打开仓库的 `Actions`。
 2. 选择 `AI 技术范式雷达`。
 3. 点击 `Run workflow`，第一次选择 `7` 天，保持 `smoke_only=true`。精确 arXiv ID 留空，此时 `reset_state` 不影响结果。
-4. 确认“配置体检”和“小成本真实接口冒烟”完成，并下载 `paradigm-radar-audit-*` 查看 `smoke_test_latest.json`。文件中的 `contract_version` 可确认线上使用的是哪版探针；`failure_kind=transient_availability` 表示第三方临时限流/超时，显示为 `degraded` 且 Workflow 可通过，但风险不会被隐藏；配置、鉴权或响应契约失败才显示为 `failed`。
+4. 确认“配置体检”和“小成本真实接口冒烟”完成，并下载 `paradigm-radar-audit-*` 查看 `smoke_test_latest.json`。文件中的 `contract_version` 可确认线上使用的是哪版探针；`failure_kind=transient_availability` 表示第三方临时限流/超时，显示为 `degraded` 且 Workflow 可通过，但风险不会被隐藏；`multi_endpoint_unavailable` 表示某个多入口能力的有界样本全部失败；配置、真实鉴权或响应契约失败才显示为 `failed`。
 5. 再次点击 `Run workflow`，把 `smoke_only` 改成 `false`，把 `reset_state` 改成 `true`，执行新版本第一次完整运行。
 6. 确认“运行离线回归测试”“抓取、分析并发送邮件”“保存跨周去重状态”全部为绿色。
 7. 确认收件箱收到邮件及运行审计附件，并在该次运行的 Artifacts 中看到报告、`paradigm-radar-state-<run_id>` 与 `paradigm-radar-audit-*`。状态按运行保存为不可变快照；下一次任务恢复最近一份未过期快照，同时兼容旧的 `paradigm-radar-state` 名称。

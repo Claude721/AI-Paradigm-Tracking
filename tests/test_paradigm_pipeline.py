@@ -1368,6 +1368,21 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertEqual(len(dossier["momentum_evidence"]), 1)
         self.assertEqual(dossier["momentum_evidence"][0]["metrics"]["score"], 42)
 
+    def test_execution_failure_metadata_is_not_exposed_to_report_writer(
+        self,
+    ) -> None:
+        item = candidate()
+        item.execution_failure_count = 3
+        item.last_execution_failure_at = "2026-08-15T00:00:00Z"
+
+        full_dossier = _candidate_dossier(item)
+        compact_dossier = _compact_route_dossier(item)
+
+        self.assertNotIn("execution_failure_count", full_dossier)
+        self.assertNotIn("last_execution_failure_at", full_dossier)
+        self.assertNotIn("execution_failure_count", compact_dossier)
+        self.assertNotIn("last_execution_failure_at", compact_dossier)
+
     def test_editorial_gate_rejects_scores_and_tables(self) -> None:
         item = candidate()
         item.researchers = [verified_researcher()]
