@@ -13,7 +13,12 @@ from typing import Any, Iterable
 
 import config
 
-from .models import EvidenceType, ParadigmCandidate
+from .models import (
+    ORIGIN_EVIDENCE_TYPES,
+    EvidenceType,
+    ParadigmCandidate,
+    nonnegative_number,
+)
 
 
 MODEL_SOURCE = "model"
@@ -232,8 +237,7 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
     origins = [
         item
         for item in candidate.evidence
-        if item.evidence_type
-        in {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG}
+        if item.evidence_type in ORIGIN_EVIDENCE_TYPES
     ]
     origin_organizations = {
         item.organization.casefold().strip()
@@ -252,18 +256,24 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
         publisher = "unknown"
 
     independent_implementation = any(
-        item.evidence_type == EvidenceType.IMPLEMENTATION
+        item.evidence_type
+        in {EvidenceType.IMPLEMENTATION, EvidenceType.ORIGINAL_IMPLEMENTATION}
         and item.raw.get("independence") == "independent"
         for item in candidate.evidence
     )
     official_implementation_uptake = any(
         item.evidence_type == EvidenceType.IMPLEMENTATION
-        and item.raw.get("independence") in {"official", None}
+        and item.raw.get("independence") in {"official", "publisher", None}
         and item.raw.get("relationship")
-        in {"paper_linked_repository", "name_and_mechanism_match"}
+        in {
+            "paper_linked_repository",
+            "name_and_mechanism_match",
+            "official_release_repository",
+            "publisher_original_implementation",
+        }
         and (
-            float(item.metrics.get("forks", 0) or 0) >= 3
-            or float(item.metrics.get("stars", 0) or 0) >= 50
+            nonnegative_number(item.metrics.get("forks", 0)) >= 3
+            or nonnegative_number(item.metrics.get("stars", 0)) >= 50
         )
         for item in candidate.evidence
     )
@@ -275,7 +285,7 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
         validation = "official_implementation_uptake"
     elif len(origins) >= 2 and len(origin_organizations) >= 2:
         validation = "multiple_primary_works"
-    elif EvidenceType.IMPLEMENTATION in types:
+    elif types & {EvidenceType.IMPLEMENTATION, EvidenceType.ORIGINAL_IMPLEMENTATION}:
         validation = "linked_implementation"
     elif origins:
         validation = "primary_claim_only"
@@ -384,12 +394,14 @@ def substantive_secondary(
             qualifies = True
             if (
                 item.source == "x-title-search"
-                and float(item.metrics.get("author_followers", 0) or 0) >= 10_000
+                and nonnegative_number(
+                    item.metrics.get("author_followers", 0)
+                ) >= 10_000
             ):
                 independent = True
         elif (
             item.evidence_type == EvidenceType.CITATION
-            and float(item.metrics.get("citations", 0) or 0) >= 3
+            and nonnegative_number(item.metrics.get("citations", 0)) >= 3
         ):
             qualifies = True
         elif (
@@ -413,10 +425,7 @@ def substantive_secondary(
             "forks",
             "citations",
         ):
-            try:
-                engagement += max(float(item.metrics.get(key, 0) or 0), 0.0)
-            except (TypeError, ValueError):
-                continue
+            engagement += nonnegative_number(item.metrics.get(key, 0))
     return len(signals), engagement, sources, independent
 
 

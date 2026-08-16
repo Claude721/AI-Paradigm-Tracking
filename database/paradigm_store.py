@@ -73,6 +73,7 @@ class ParadigmStore:
                     payload_json TEXT NOT NULL,
                     first_seen_at TEXT NOT NULL,
                     last_seen_at TEXT NOT NULL,
+                    last_refresh_attempt_at TEXT,
                     last_reported_signature TEXT,
                     last_reported_at TEXT
                 );
@@ -141,6 +142,14 @@ class ParadigmStore:
                     "ALTER TABLE report_deliveries "
                     "ADD COLUMN delivery_key TEXT NOT NULL DEFAULT ''"
                 )
+            paradigm_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(paradigms)")
+            }
+            if "last_refresh_attempt_at" not in paradigm_columns:
+                conn.execute(
+                    "ALTER TABLE paradigms ADD COLUMN last_refresh_attempt_at TEXT"
+                )
 
     def is_bootstrap_required(self) -> bool:
         """空状态或覆盖地图升级时使用较长发现窗口。"""
@@ -149,7 +158,10 @@ class ParadigmStore:
             evidence = conn.execute(
                 """
                 SELECT 1 FROM evidence_state
-                WHERE evidence_type IN ('primary_paper', 'technical_blog')
+                WHERE evidence_type IN (
+                    'primary_paper', 'technical_blog',
+                    'concept_essay', 'original_implementation'
+                )
                 LIMIT 1
                 """
             ).fetchone()
@@ -277,7 +289,10 @@ class ParadigmStore:
                 f"""
                 SELECT payload_json FROM evidence_state
                 WHERE last_analyzed_at IS NULL
-                  AND evidence_type IN ('primary_paper', 'technical_blog')
+                  AND evidence_type IN (
+                      'primary_paper', 'technical_blog',
+                      'concept_essay', 'original_implementation'
+                  )
                 ORDER BY first_seen_at ASC
                 {limit_sql}
                 """,
@@ -312,7 +327,12 @@ class ParadigmStore:
                         continue
                     candidate.report_kind = "update"
                 else:
-                    candidate.report_kind = "new"
+                    candidate.report_kind = (
+                        "update"
+                        if candidate.freshness_assessment.get("classification")
+                        == "historical_reactivated"
+                        else "new"
+                    )
                 selected.append(candidate)
         return selected
 
@@ -437,6 +457,20 @@ class ParadigmStore:
                 WHERE delivery_key=? AND status != 'delivered'
                 """,
                 (content, now, delivery_key),
+            )
+
+    def invalidate_rendered_report(self, delivery_key: str, reason: str) -> None:
+        """Return a stale rendered artifact to the renderer after contract changes."""
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE report_outbox
+                SET report_content='', status='pending_render', last_error=?, updated_at=?
+                WHERE delivery_key=? AND status != 'delivered'
+                """,
+                (_safe_error_text(reason), now, delivery_key),
             )
 
     def load_report_fragments(self, delivery_key: str) -> dict[str, str]:
@@ -630,7 +664,8 @@ class ParadigmStore:
                 f"""
                 SELECT payload_json FROM paradigms
                 WHERE status NOT IN ('rejected', 'pending_deep')
-                ORDER BY last_seen_at DESC
+                ORDER BY COALESCE(last_refresh_attempt_at, first_seen_at) ASC,
+                         first_seen_at ASC
                 {limit_sql}
                 """,
                 params,
@@ -646,6 +681,22 @@ class ParadigmStore:
             if target_limit is not None and len(candidates) >= target_limit:
                 break
         return candidates
+
+    def mark_refresh_attempted(self, candidates: list[ParadigmCandidate]) -> None:
+        """Rotate bounded refresh work fairly without changing research facts."""
+
+        keys = list(dict.fromkeys(candidate.key for candidate in candidates))
+        if not keys:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                UPDATE paradigms SET last_refresh_attempt_at=?
+                WHERE paradigm_key=?
+                """,
+                ((now, key) for key in keys),
+            )
 
     def load_pending_deep_candidates(
         self,

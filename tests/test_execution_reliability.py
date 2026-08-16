@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import configparser
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -44,6 +45,7 @@ from paradigms.models import (
     ParadigmExtraction,
     ResearcherProfile,
     TechnicalEvidence,
+    candidate_from_dict,
 )
 from paradigms.discovery import ParadigmDiscovery
 from reports.paradigm_generator import ParadigmReportGenerator
@@ -192,6 +194,72 @@ class ExecutionReliabilityTests(unittest.TestCase):
                     source_version=config.PARADIGM_STATE_SCHEMA_VERSION + 1,
                 )
 
+    def test_state_restore_rejects_corrupt_domain_json_before_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "radar.db"
+            store = ParadigmStore(database)
+            item = ParadigmCandidate(
+                key="corrupt-state-route",
+                name="Corrupt state route",
+                thesis="test",
+                problem_shift="test",
+                mechanism="test",
+                evidence=[_origin("2608.00020")],
+            )
+            store.save_candidates([item])
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "UPDATE paradigms SET payload_json=? WHERE paradigm_key=?",
+                    ("{not-json", item.key),
+                )
+
+            with self.assertRaisesRegex(ValueError, "领域 JSON"):
+                migrate_state(
+                    database,
+                    source_version=config.PARADIGM_STATE_SCHEMA_VERSION,
+                )
+
+    def test_state_reader_ignores_retired_fields_but_keeps_known_data(self) -> None:
+        item = ParadigmCandidate(
+            key="forward-compatible-route",
+            name="Forward compatible route",
+            thesis="test",
+            problem_shift="test",
+            mechanism="test",
+            evidence=[_origin("2608.00019")],
+            researchers=[ResearcherProfile(name="A. Researcher")],
+        )
+        payload = item.to_dict()
+        payload["retired_candidate_field"] = "old-version-value"
+        payload["evidence"][0]["retired_evidence_field"] = True
+        payload["researchers"][0]["retired_profile_field"] = 1
+
+        restored = candidate_from_dict(payload)
+
+        self.assertEqual(restored.key, item.key)
+        self.assertEqual(restored.evidence[0].title, item.evidence[0].title)
+        self.assertEqual(restored.researchers[0].name, "A. Researcher")
+
+    def test_state_restore_rejects_wrong_domain_scalar_types(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "radar.db"
+            store = ParadigmStore(database)
+            evidence = _origin("2608.00026")
+            store.mark_evidence([evidence], analyzed=False)
+            payload = evidence.to_dict()
+            payload["source"] = 123
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "UPDATE evidence_state SET payload_json=? WHERE fingerprint=?",
+                    (json.dumps(payload), evidence.fingerprint),
+                )
+
+            with self.assertRaisesRegex(ValueError, "source"):
+                migrate_state(
+                    database,
+                    source_version=config.PARADIGM_STATE_SCHEMA_VERSION,
+                )
+
     def test_origin_batches_checkpoint_and_leave_remainder_pending(self) -> None:
         first, second = _origin("2608.00001"), _origin("2608.00002")
         orchestrator = object.__new__(ParadigmOrchestrator)
@@ -213,7 +281,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             patch.object(config, "PARADIGM_ANALYSIS_BATCH_SIZE", 1),
             patch(
                 "agents.paradigm_orchestrator._remaining_seconds",
-                side_effect=[5.0, 0.0],
+                side_effect=[5.0, 5.0, 0.0],
             ),
         ):
             result = asyncio.run(
@@ -258,7 +326,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             patch.object(config, "PARADIGM_ANALYSIS_BATCH_SIZE", 1),
             patch(
                 "agents.paradigm_orchestrator._remaining_seconds",
-                side_effect=[5.0, 5.0],
+                side_effect=[5.0, 5.0, 5.0, 5.0],
             ),
         ):
             result = asyncio.run(
@@ -276,6 +344,46 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(first.raw["analysis_failure_count"], 1)
         orchestrator.store.mark_evidence.assert_called_once_with(
             [first], analyzed=False
+        )
+
+    def test_origin_output_omission_keeps_only_missing_peer_pending(self) -> None:
+        first, second = _origin("2608.00021"), _origin("2608.00022")
+        orchestrator = object.__new__(ParadigmOrchestrator)
+        orchestrator.enricher = SimpleNamespace(
+            hydrate_priority_origins=AsyncMock(
+                return_value={
+                    "priority_origin_targets": 0,
+                    "priority_origin_hydrated": 0,
+                    "priority_origin_hydration_failed": 0,
+                }
+            )
+        )
+        orchestrator.analyzer = SimpleNamespace(
+            run=AsyncMock(return_value=[_rejected_extraction(first)])
+        )
+        orchestrator.store = SimpleNamespace(mark_evidence=Mock())
+
+        with (
+            patch.object(config, "PARADIGM_ANALYSIS_BATCH_SIZE", 2),
+            patch(
+                "agents.paradigm_orchestrator._remaining_seconds",
+                side_effect=[5.0, 5.0],
+            ),
+        ):
+            result = asyncio.run(
+                orchestrator._analyze_origins_in_batches(
+                    [first, second], deadline=123.0
+                )
+            )
+
+        extractions, attempted, failed, deferred, _, completed = result
+        self.assertEqual([item.evidence for item in extractions], [first])
+        self.assertEqual((attempted, failed), (2, 1))
+        self.assertEqual(deferred, [])
+        self.assertEqual(completed, [first])
+        self.assertEqual(second.raw["analysis_failure_count"], 1)
+        orchestrator.store.mark_evidence.assert_called_once_with(
+            [second], analyzed=False
         )
 
     def test_unexpected_deep_failure_does_not_abort_peer_candidate(self) -> None:
@@ -334,6 +442,55 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(completed[0].execution_failure_count, 0)
         self.assertEqual(completed[0].last_execution_failure_at, "")
 
+    def test_deep_stage_cardinality_loss_is_bisected_without_losing_peer(self) -> None:
+        missing = ParadigmCandidate(
+            key="omitted-route",
+            name="Omitted route",
+            thesis="test",
+            problem_shift="test",
+            mechanism="test",
+            evidence=[_origin("2608.00023")],
+        )
+        healthy = ParadigmCandidate(
+            key="healthy-route",
+            name="Healthy route",
+            thesis="test",
+            problem_shift="test",
+            mechanism="test",
+            evidence=[_origin("2608.00024")],
+        )
+        orchestrator = object.__new__(ParadigmOrchestrator)
+
+        async def omit_one(values, _supporting):
+            return [value for value in values if value.key != missing.key]
+
+        orchestrator.enricher = SimpleNamespace(run=omit_one)
+        orchestrator.synthesizer = SimpleNamespace(
+            run=AsyncMock(side_effect=lambda values: values)
+        )
+        orchestrator.trajectory = SimpleNamespace(
+            run=AsyncMock(side_effect=lambda values: values)
+        )
+
+        with (
+            patch.object(config, "PARADIGM_DEEP_BATCH_SIZE", 2),
+            patch(
+                "agents.paradigm_orchestrator._remaining_seconds",
+                side_effect=[5.0, 5.0, 5.0],
+            ),
+        ):
+            completed, budget_deferred, execution_deferred = asyncio.run(
+                orchestrator._deep_analyze_in_batches(
+                    [missing, healthy], [], deadline=123.0
+                )
+            )
+
+        self.assertEqual([item.key for item in completed], [healthy.key])
+        self.assertEqual(budget_deferred, [])
+        self.assertEqual(execution_deferred, [missing])
+        self.assertEqual(missing.status, "pending_deep")
+        self.assertEqual(missing.execution_failure_count, 1)
+
     def test_refresh_failure_keeps_original_snapshot_and_continues(self) -> None:
         first = ParadigmCandidate(
             key="broken-refresh",
@@ -373,7 +530,13 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 side_effect=[5.0, 5.0],
             ),
         ):
-            refreshed, budget_deferred, execution_deferred, attempted = (
+            (
+                refreshed,
+                unchanged,
+                budget_deferred,
+                execution_deferred,
+                attempted,
+            ) = (
                 asyncio.run(
                     orchestrator._refresh_in_batches(
                         [first, second], [], deadline=123.0
@@ -382,6 +545,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             )
 
         self.assertEqual(first.thesis, "original")
+        self.assertEqual(unchanged, [])
         self.assertEqual(refreshed[0].key, second.key)
         self.assertEqual(refreshed[0].thesis, "mutated-copy")
         self.assertEqual(budget_deferred, [])
@@ -390,6 +554,74 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(first.execution_failure_count, 1)
         self.assertEqual(refreshed[0].execution_failure_count, 0)
         self.assertEqual(refreshed[0].last_execution_failure_at, "")
+
+    def test_unchanged_refresh_clears_old_failure_and_rotates_queue(self) -> None:
+        item = ParadigmCandidate(
+            key="unchanged-refresh",
+            name="Unchanged refresh",
+            thesis="original",
+            problem_shift="test",
+            mechanism="test",
+            status="observe",
+            evidence=[_origin("2608.00025")],
+            execution_failure_count=3,
+            last_execution_failure_at="2026-08-14T00:00:00Z",
+        )
+        marker = Mock()
+        orchestrator = object.__new__(ParadigmOrchestrator)
+        orchestrator.store = SimpleNamespace(mark_refresh_attempted=marker)
+        orchestrator.enricher = SimpleNamespace(
+            refresh=AsyncMock(return_value=[])
+        )
+        orchestrator.synthesizer = SimpleNamespace(run=AsyncMock())
+
+        with (
+            patch.object(config, "PARADIGM_DEEP_BATCH_SIZE", 1),
+            patch(
+                "agents.paradigm_orchestrator._remaining_seconds",
+                return_value=5.0,
+            ),
+        ):
+            refreshed, unchanged, budget, failed, attempted = asyncio.run(
+                orchestrator._refresh_in_batches([item], [], deadline=123.0)
+            )
+
+        self.assertEqual(refreshed, [])
+        self.assertEqual(budget, [])
+        self.assertEqual(failed, [])
+        self.assertEqual(attempted, 1)
+        self.assertEqual(unchanged[0].execution_failure_count, 0)
+        self.assertEqual(unchanged[0].last_execution_failure_at, "")
+        orchestrator.synthesizer.run.assert_not_awaited()
+        marker.assert_called_once_with([item])
+
+    def test_bounded_refresh_queue_rotates_instead_of_starving_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            first = ParadigmCandidate(
+                key="refresh-first",
+                name="Refresh first",
+                thesis="one",
+                problem_shift="test",
+                mechanism="test",
+                status="observe",
+            )
+            second = ParadigmCandidate(
+                key="refresh-second",
+                name="Refresh second",
+                thesis="two",
+                problem_shift="test",
+                mechanism="test",
+                status="observe",
+            )
+            store.save_candidates([first, second])
+            selected = store.load_refresh_candidates(limit=1)
+            store.mark_refresh_attempted(selected)
+            next_selected = store.load_refresh_candidates(limit=1)
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(len(next_selected), 1)
+        self.assertNotEqual(selected[0].key, next_selected[0].key)
 
     def test_origin_is_not_marked_analyzed_before_candidate_checkpoint(self) -> None:
         store = SimpleNamespace(
@@ -681,6 +913,26 @@ class ExecutionReliabilityTests(unittest.TestCase):
         )
         orchestrator.run.assert_not_awaited()
 
+    def test_pipeline_result_marker_requests_fresh_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            try:
+                import os
+
+                os.chdir(directory)
+                marker = app_main._write_pipeline_result(
+                    {
+                        "recovered_delivery_only": True,
+                        "email_sent": True,
+                        "report_path": "reports/output/old.md",
+                    }
+                )
+                payload = json.loads(marker.read_text(encoding="utf-8"))
+            finally:
+                os.chdir(previous)
+        self.assertTrue(payload["recovered_delivery_only"])
+        self.assertFalse(payload["fresh_research_completed"])
+
     def test_email_failure_reuses_validated_report_without_rerunning_research(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ParadigmStore(Path(directory) / "radar.db")
@@ -735,6 +987,10 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 patch.object(config, "EMAIL_PUSH_ENABLED", True),
                 patch.object(run_audit, "write", return_value=audit_result),
                 patch(
+                    "reports.paradigm_generator._editorial_violations",
+                    return_value=[],
+                ),
+                patch(
                     "notifications.email_notifier.send_report_email",
                     new=AsyncMock(return_value=True),
                 ) as sender,
@@ -747,6 +1003,59 @@ class ExecutionReliabilityTests(unittest.TestCase):
 
             self.assertEqual(generator.generate.await_count, 1)
             sender.assert_awaited_once()
+            self.assertIsNone(store.load_pending_report_job())
+
+    def test_stale_rendered_report_is_revalidated_before_email(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            item = ParadigmCandidate(
+                key="stale-render",
+                name="Stale render",
+                thesis="改变能力边界",
+                problem_shift="从旧问题转向新问题",
+                mechanism="新的训练接口",
+                evidence=[_origin("2608.00066")],
+            )
+            store.save_candidates([item])
+            job = store.enqueue_report(
+                [item], {"new_paradigms": 1}, report_date="2026-08-09"
+            )
+            store.save_rendered_report(job.delivery_key, "# stale report")
+            pending = store.load_pending_report_job()
+            report_path = Path(directory) / job.report_name
+
+            async def render(*_args, **_kwargs):
+                report_path.write_text("# refreshed report", encoding="utf-8")
+                return report_path
+
+            generator = SimpleNamespace(
+                output_dir=Path(directory),
+                generate=AsyncMock(side_effect=render),
+            )
+            with (
+                patch.object(config, "EMAIL_PUSH_ENABLED", False),
+                patch.object(config, "PARADIGM_REPORT_TIMEOUT_SECONDS", 30),
+                patch.object(
+                    run_audit,
+                    "write",
+                    return_value={
+                        "audit_markdown_path": str(Path(directory) / "audit.md"),
+                        "audit_json_path": str(Path(directory) / "audit.json"),
+                    },
+                ),
+                patch.object(
+                    store,
+                    "invalidate_rendered_report",
+                    wraps=store.invalidate_rendered_report,
+                ) as invalidate,
+            ):
+                asyncio.run(
+                    app_main._deliver_paradigm_job(
+                        store, generator, pending, recovered=True
+                    )
+                )
+            invalidate.assert_called_once()
+            self.assertEqual(generator.generate.await_count, 1)
             self.assertIsNone(store.load_pending_report_job())
 
     def test_empty_outbox_key_changes_when_coverage_materially_changes(self) -> None:
@@ -1089,6 +1398,22 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(health["status"], "query_failed")
         self.assertEqual(health["error_type"], "RuntimeError")
 
+    def test_discovery_source_non_list_result_isolated_as_contract_failure(self) -> None:
+        class MalformedSource:
+            source_name = "malformed-fixture"
+
+            async def safe_fetch(self):
+                return None
+
+        discovery = ParadigmDiscovery(lookback_days=7)
+        results, health = asyncio.run(
+            discovery._bounded_fetch(MalformedSource())
+        )
+
+        self.assertEqual(results, [])
+        self.assertEqual(health["status"], "query_failed")
+        self.assertEqual(health["error_type"], "TypeError")
+
     def test_feed_internal_failures_cannot_masquerade_as_completed(self) -> None:
         source = ResearchFeedSource(lookback_days=7)
         source.completed_feeds = 1
@@ -1280,6 +1605,32 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("离线回归=failure", context["workflow_step_summary"])
         self.assertNotIn("研究与邮件主流程", context["workflow_step_summary"])
 
+    def test_workflow_failure_context_identifies_continuation_failure(self) -> None:
+        outcomes = {
+            "DEPENDENCIES_STEP_OUTCOME": "success",
+            "OFFLINE_CHECKS_STEP_OUTCOME": "success",
+            "RESTORE_STATE_STEP_OUTCOME": "success",
+            "DOCTOR_STEP_OUTCOME": "success",
+            "SMOKE_STEP_OUTCOME": "skipped",
+            "PIPELINE_STEP_OUTCOME": "success",
+            "PREPARE_STATE_STEP_OUTCOME": "success",
+            "UPLOAD_STATE_STEP_OUTCOME": "success",
+            "UPLOAD_REPORT_STEP_OUTCOME": "success",
+            "UPLOAD_AUDIT_STEP_OUTCOME": "success",
+            "CONTINUATION_STEP_OUTCOME": "failure",
+        }
+        with (
+            patch.dict("os.environ", outcomes, clear=False),
+            patch(
+                "notifications.email_notifier._workflow_log_detail",
+                return_value="dispatch rejected",
+            ),
+        ):
+            context = _workflow_failure_context()
+        self.assertEqual(context["failure_stage"], "排队本周新研究")
+        self.assertEqual(context["failure_class"], "post_delivery")
+        self.assertEqual(context["failure_detail"], "dispatch rejected")
+
     def test_failure_log_summary_redacts_generic_url_credentials(self) -> None:
         sanitized = _safe_public_text(
             "https://build-user:private-pass@packages.example/simple"
@@ -1319,6 +1670,13 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("submodules: false", workflow)
         self.assertIn("尝试上一份快照", workflow)
         self.assertIn("所有未过期状态快照均不可用", workflow)
+        self.assertIn("actions: write", workflow)
+        self.assertIn("logs/pipeline_result.json", workflow)
+        self.assertIn("续投完成后排队本周新研究", workflow)
+        self.assertIn("gh workflow run weekly-radar.yml", workflow)
+        self.assertIn("steps.upload_state.outcome == 'success'", workflow)
+        self.assertIn("-f reset_state=false", workflow)
+        self.assertIn("CONTINUATION_STEP_OUTCOME", workflow)
         self.assertNotIn('if [ "$state_schema" !=', workflow)
 
     def test_gitmodules_have_complete_unique_records(self) -> None:

@@ -82,6 +82,7 @@ def _has_review_priority(item: ParadigmExtraction) -> bool:
             "technical_report",
             "official_model_release",
             "official_research",
+            "official_open_source_release",
         }
     )
 

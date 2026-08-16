@@ -5,7 +5,12 @@ from __future__ import annotations
 import math
 
 import config
-from .models import EvidenceType, ParadigmCandidate
+from .models import (
+    ORIGIN_EVIDENCE_TYPES,
+    EvidenceType,
+    ParadigmCandidate,
+    nonnegative_number,
+)
 from .reputation import resolve_organization, verified_priority_researcher
 from .rubric import finalize_candidate_rubric, substantive_secondary
 
@@ -30,7 +35,10 @@ def score_candidate(candidate: ParadigmCandidate) -> ParadigmCandidate:
     if decision == "report":
         candidate.status = "reportable"
     elif decision == "incomplete":
-        candidate.status = "rubric_incomplete"
+        # 结构不完整或综合器失败是执行状态，不是研究结论。只有
+        # pending_deep 会被下轮的完整增强/综合链路恢复；若写成一个独立
+        # 状态，它反而会落入“历史讨论刷新”并永久失去重试机会。
+        candidate.status = "pending_deep"
         candidate.rejection_reason = assessment["decision_reason"]
     elif decision == "observe":
         candidate.status = "observe"
@@ -52,16 +60,16 @@ def effective_solidity_score(candidate: ParadigmCandidate) -> float:
     types = [item.evidence_type for item in candidate.evidence]
     independent_replications = types.count(EvidenceType.INDEPENDENT_REPLICATION)
     implementations = types.count(EvidenceType.IMPLEMENTATION)
-    primary_papers = types.count(EvidenceType.PRIMARY_PAPER)
+    origins = sum(item in ORIGIN_EVIDENCE_TYPES for item in types)
     review_replies = sum(
-        int(item.metrics.get("review_replies", 0) or 0)
+        int(_numeric_value(item.metrics.get("review_replies", 0)))
         for item in candidate.evidence
         if item.source == "openreview"
     )
     bonus = (
         min(independent_replications, 2) * 1.25
         + min(implementations, 2) * 0.25
-        + min(max(primary_papers - 1, 0), 2) * 0.5
+        + min(max(origins - 1, 0), 2) * 0.5
         + (0.5 if review_replies > 0 else 0.0)
     )
     return min(candidate.solidity_score + bonus, 10.0)
@@ -115,10 +123,7 @@ def _momentum_score(candidate: ParadigmCandidate) -> float:
             "replies",
             "score",
         ):
-            try:
-                engagement += max(float(item.metrics.get(key, 0) or 0), 0.0)
-            except (TypeError, ValueError):
-                continue
+            engagement += nonnegative_number(item.metrics.get(key, 0))
 
     cross_platform = min(len(sources), 4) * 1.5
     evidence_diversity = min(len(types), 4) * 0.75
@@ -158,8 +163,7 @@ def _assess_publisher(candidate: ParadigmCandidate) -> None:
         item.raw.get("origin_kind") == "technical_report"
         or "technical report" in item.title.casefold()
         for item in candidate.evidence
-        if item.evidence_type
-        in {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG}
+        if item.evidence_type in ORIGIN_EVIDENCE_TYPES
     )
     for item in candidate.evidence:
         if item.raw.get("publisher_tier") == "established":
@@ -216,14 +220,28 @@ def _matches_established_organization(value: str) -> bool:
 
 def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
     signal_count, engagement, sources, independent = substantive_secondary(candidate)
+    origins = [
+        item for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES
+    ]
+    origin_publishers = {
+        (item.organization or "").casefold().strip()
+        for item in origins
+        if (item.organization or "").strip()
+    }
     official_uptake = any(
-        item.evidence_type == EvidenceType.IMPLEMENTATION
-        and item.raw.get("independence") in {"official", None}
+        item.evidence_type
+        in {EvidenceType.IMPLEMENTATION, EvidenceType.ORIGINAL_IMPLEMENTATION}
+        and item.raw.get("independence") in {"official", "publisher", None}
         and item.raw.get("relationship")
-        in {"paper_linked_repository", "name_and_mechanism_match"}
+        in {
+            "paper_linked_repository",
+            "name_and_mechanism_match",
+            "official_release_repository",
+            "publisher_original_implementation",
+        }
         and (
-            float(item.metrics.get("forks", 0) or 0) >= 3
-            or float(item.metrics.get("stars", 0) or 0) >= 50
+            _numeric_value(item.metrics.get("forks", 0)) >= 3
+            or _numeric_value(item.metrics.get("stars", 0)) >= 50
         )
         for item in candidate.evidence
     )
@@ -254,6 +272,15 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
                 True,
                 "关键研究者身份已由公开主页/学术 ID 核验，且官方实现已出现实质代码承接",
             )
+    if (
+        candidate.publisher_tier == "verified"
+        and len(origins) >= 2
+        and len(origin_publishers) >= 2
+    ):
+        return (
+            True,
+            "多个可核验发布者已独立提出可比较机制；技术 Rubric 通过后进入路线解读",
+        )
     if candidate.publisher_tier == "verified" and verified_people >= 2:
         return (
             True,
@@ -270,3 +297,8 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
     if candidate.publisher_tier == "verified":
         return False, "研究者身份可核验，但尚无足够二次讨论或独立承接，进入观察池"
     return False, "发布者背景未核验且缺少实质二次讨论，暂不占用周报篇幅"
+
+
+def _numeric_value(value: object) -> float:
+    """External metrics and restored legacy JSON must not crash admission."""
+    return nonnegative_number(value)

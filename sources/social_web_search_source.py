@@ -10,7 +10,13 @@ from urllib.parse import urlparse
 import httpx
 
 import config
-from paradigms.models import EvidenceType, ParadigmCandidate, TechnicalEvidence
+from paradigms.models import (
+    ORIGIN_EVIDENCE_TYPES,
+    EvidenceType,
+    ParadigmCandidate,
+    TechnicalEvidence,
+    nonnegative_number,
+)
 
 logger = logging.getLogger(__name__)
 TAVILY_SEARCH_API = "https://api.tavily.com/search"
@@ -60,7 +66,11 @@ class SocialWebSearchClient:
             [
                 config.SOURCING_LOOKBACK_DAYS,
                 *[
-                    int(item.raw.get("discovery_lookback_days", 0) or 0)
+                    int(
+                        nonnegative_number(
+                            item.raw.get("discovery_lookback_days", 0)
+                        )
+                    )
                     for item in candidate.evidence
                 ],
             ]
@@ -141,7 +151,7 @@ def _parse_results(
                 url=url,
                 summary=summary[:3000],
                 published_at=str(item.get("published_date", "")),
-                metrics={"search_relevance": float(item.get("score", 0) or 0)},
+                metrics={"search_relevance": nonnegative_number(item.get("score", 0))},
                 raw={
                     "relationship": (
                         "indexed_secondary_candidate"
@@ -164,10 +174,7 @@ def _parse_results(
 
 def _search_identity(candidate: ParadigmCandidate) -> tuple[str, str]:
     for evidence in candidate.evidence:
-        if evidence.evidence_type not in {
-            EvidenceType.PRIMARY_PAPER,
-            EvidenceType.TECHNICAL_BLOG,
-        }:
+        if evidence.evidence_type not in ORIGIN_EVIDENCE_TYPES:
             continue
         identifier = evidence.identifiers.get("arxiv") or evidence.identifiers.get(
             "doi", ""

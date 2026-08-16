@@ -26,6 +26,7 @@ _WORKFLOW_STEPS = (
     ("PREPARE_STATE_STEP_OUTCOME", "prepare_state", "准备状态制品"),
     ("UPLOAD_STATE_STEP_OUTCOME", "upload_state", "上传跨周状态"),
     ("UPLOAD_REPORT_STEP_OUTCOME", "upload_report", "上传报告制品"),
+    ("CONTINUATION_STEP_OUTCOME", "continuation", "排队本周新研究"),
     ("UPLOAD_AUDIT_STEP_OUTCOME", "upload_audit", "上传审计制品"),
 )
 
@@ -399,6 +400,7 @@ def _workflow_log_detail(stage: str) -> str:
         "restore_state": "state_restore.log",
         "doctor": "doctor.log",
         "prepare_state": "state_prepare.log",
+        "continuation": "continuation.log",
     }
     filename = log_names.get(stage, "")
     if not filename:

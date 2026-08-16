@@ -32,6 +32,8 @@ from paradigms.models import (
     ParadigmExtraction,
     ResearcherProfile,
     TechnicalEvidence,
+    assess_candidate_freshness,
+    primary_material_url,
 )
 from paradigms.rubric import evaluate_rubric, load_rubric
 from paradigms.scoring import is_reportable, score_candidate
@@ -44,6 +46,7 @@ from reports.paradigm_generator import (
     _editorial_advisories,
     _editorial_violations,
     _momentum_evidence,
+    _route_draft_violations,
     _route_fragment_key,
     _valid_editorial_report,
 )
@@ -60,6 +63,11 @@ from sources.arxiv_document_source import (
 from sources.arxiv_source import ArxivSource
 from sources.openalex_source import OpenAlexSource
 from sources.openreview_source import OpenReviewSource
+from sources.official_repository_release_source import (
+    OfficialRepositoryReleaseSource,
+    _linked_primary_material,
+    _primary_publication_date,
+)
 from sources.priority_research_source import (
     PriorityResearchPageSource,
     _ArticleParser,
@@ -202,6 +210,42 @@ class ParadigmPipelineTests(unittest.TestCase):
         selected, deferred = _apply_safety_limit(items, 0)
         self.assertEqual(selected, items)
         self.assertEqual(deferred, [])
+
+    def test_discovery_limit_does_not_drop_already_fetched_cross_source_items(
+        self,
+    ) -> None:
+        with patch.object(config, "PARADIGM_DISCOVERY_SAFETY_LIMIT", 1):
+            discovery = ParadigmDiscovery(lookback_days=7)
+        fetched = [
+            RawProject(
+                source="arxiv",
+                name=f"Fetched origin {index}",
+                url=f"https://arxiv.org/abs/2608.000{index}",
+                created_at="2026-08-15T00:00:00Z",
+                extra={"arxiv_id": f"2608.000{index}"},
+            )
+            for index in (1, 2)
+        ]
+
+        async def bounded(source):
+            values = fetched if source is discovery.arxiv else []
+            return values, {
+                "source": source.source_name,
+                "status": "completed",
+                "error_type": "",
+                "results": len(values),
+                "elapsed_seconds": 0.0,
+                "timeout_seconds": 1,
+            }
+
+        discovery._bounded_fetch = bounded
+        batch = asyncio.run(discovery.run())
+
+        self.assertEqual(len(batch.origins), 2)
+        self.assertEqual(
+            {item.identifiers["arxiv"] for item in batch.origins},
+            {"2608.0001", "2608.0002"},
+        )
 
     def test_rubric_uses_type_specific_questions(self) -> None:
         architecture = rubric_assessment(["architecture"], stage="screening")
@@ -1058,8 +1102,39 @@ class ParadigmPipelineTests(unittest.TestCase):
         score_candidate(item)
         self.assertEqual(client.chat.completions.create.await_count, 2)
         self.assertEqual(item.rubric_assessment["decision"], "incomplete")
+        self.assertEqual(item.status, "pending_deep")
         self.assertFalse(is_reportable(item))
         self.assertIn("范式综合失败", item.rejection_reason)
+
+    def test_malformed_external_metrics_cannot_crash_candidate_scoring(self) -> None:
+        item = candidate()
+        item.evidence.extend(
+            [
+                TechnicalEvidence(
+                    source="openreview",
+                    evidence_type=EvidenceType.PEER_REVIEW,
+                    title="Review discussion",
+                    url="https://openreview.net/forum?id=fixture",
+                    metrics={"review_replies": "N/A", "score": {"bad": 1}},
+                ),
+                TechnicalEvidence(
+                    source="github",
+                    evidence_type=EvidenceType.IMPLEMENTATION,
+                    title="Implementation",
+                    url="https://github.com/example/implementation",
+                    metrics={"forks": "unknown", "stars": None},
+                    raw={
+                        "relationship": "official_release_repository",
+                        "independence": "official",
+                    },
+                ),
+            ]
+        )
+
+        scored = score_candidate(item)
+
+        self.assertIs(scored, item)
+        self.assertGreaterEqual(item.momentum_score, 0.0)
 
     def test_report_delivery_signature_prevents_weekly_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1090,6 +1165,17 @@ class ParadigmPipelineTests(unittest.TestCase):
             store.attach_history([next_week])
             self.assertEqual(len(next_week.evidence), 2)
             self.assertTrue(any(e.raw.get("historical") for e in next_week.evidence))
+
+    def test_first_seen_historical_reactivation_is_labeled_update(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            item = candidate()
+            item.freshness_assessment = {
+                "classification": "historical_reactivated",
+                "decision": "include",
+            }
+            selected = store.prepare_report([item])
+            self.assertEqual(selected[0].report_kind, "update")
 
     def test_observation_pool_is_loaded_for_future_weekly_discussion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1460,6 +1546,42 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         self.assertFalse(
             any("一手材料" in value or "原文" in value for value in _editorial_violations(report, [first, second]))
+        )
+
+    def test_route_gate_rejects_extra_plausible_but_ungrounded_url(self) -> None:
+        item = candidate()
+        body = "这条路线从旧系统的能力边界出发，解释训练信号与推理接口如何变化。" * 24
+        draft = (
+            "### 从状态预测走向可行动表示\n\n"
+            f"{body}\n\n"
+            "[论文原文](https://arxiv.org/abs/2607.00001)\n\n"
+            "[看似合理但不存在的官方页面](https://deepseek.example/nonexistent)\n\n"
+            "**讨论势能判断：** 已出现少量独立讨论，但仍需等待复现。"
+        )
+
+        violations = _route_draft_violations(draft, item)
+
+        self.assertTrue(
+            any("未由证据或人物档案提供的链接" in value for value in violations),
+            violations,
+        )
+
+    def test_url_grounding_preserves_case_sensitive_path(self) -> None:
+        item = candidate()
+        item.evidence[0].url = "https://research.example/Reports/ModelV1"
+        body = "这条路线解释训练信号、推理接口与能力边界之间的因果关系。" * 28
+        draft = (
+            "### 一条可复核的技术路线\n\n"
+            f"{body}\n\n"
+            "[原文](https://research.example/reports/modelv1)\n\n"
+            "**讨论势能判断：** 当前只有有限的独立承接，仍需继续观察。"
+        )
+
+        violations = _route_draft_violations(draft, item)
+
+        self.assertTrue(
+            any("未由证据或人物档案提供的链接" in value for value in violations),
+            violations,
         )
 
     def test_missing_primary_url_stops_report_even_when_model_draft_is_valid(self) -> None:
@@ -1850,6 +1972,456 @@ class ParadigmPipelineTests(unittest.TestCase):
 
         self.assertEqual(sampled.limit_origin, "caller_sample")
         self.assertEqual(configured.limit_origin, "configured_safety_limit")
+
+    def test_primary_material_uses_durable_url_not_signed_hf_redirect(self) -> None:
+        evidence = TechnicalEvidence(
+            source="priority-research-page",
+            evidence_type=EvidenceType.TECHNICAL_BLOG,
+            title="DeepSeek Technical Report",
+            url=(
+                "https://us.aws.cdn.hf.co/xet-bridge-us/file.pdf"
+                "?Expires=1786289003&Signature=temporary"
+            ),
+            raw={
+                "canonical_source_url": (
+                    "https://huggingface.co/deepseek-ai/report/"
+                    "blob/main/technical-report.pdf"
+                )
+            },
+        )
+        self.assertEqual(
+            primary_material_url(evidence),
+            "https://huggingface.co/deepseek-ai/report/blob/main/technical-report.pdf",
+        )
+        draft = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n占位\n\n"
+            "## 接下来真正值得盯的信号\n\n占位"
+        )
+        report_candidate = candidate([evidence])
+        report = _attach_primary_source_index(draft, [report_candidate])
+        self.assertIn("/blob/main/technical-report.pdf", report)
+        self.assertNotIn("xet-bridge", report)
+        self.assertNotIn("Expires=", report)
+        evidence.raw = {}
+        self.assertEqual(primary_material_url(evidence), "")
+
+    def test_priority_source_never_promotes_modified_time_to_publish_time(self) -> None:
+        today = datetime.now(timezone.utc).date().isoformat()
+        index_url = "https://lab.example/research"
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/research":
+                return httpx.Response(
+                    200,
+                    text='<a href="/research/old-system">Old System Report</a>',
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                text=(
+                    '<meta property="article:published_time" content="2025-05-14">'
+                    f'<meta property="article:modified_time" content="{today}">'
+                    '<meta property="og:title" content="Old System Report">'
+                    + "Architecture and training details. " * 20
+                ),
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        source = PriorityResearchPageSource(lookback_days=30, pages=[index_url])
+        with patch(
+            "sources.priority_research_source.httpx.AsyncClient",
+            return_value=client,
+        ):
+            received = asyncio.run(source.fetch())
+        self.assertEqual(received, [])
+
+    def test_dated_official_changelog_section_is_recalled_without_detail_link(self) -> None:
+        today = datetime.now(timezone.utc).date().isoformat()
+        page_url = "https://api-docs.deepseek.com/updates/"
+        body = (
+            f"<html><head><title>API Updates</title></head><body>"
+            f"<h2>{today}</h2><h3>Project Redwood model update</h3>"
+            + "We introduce a model release with architecture, inference, "
+            "tool-use and benchmark details. " * 12
+            + "</body></html>"
+        )
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=body, request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        source = PriorityResearchPageSource(
+            lookback_days=30,
+            pages=[page_url],
+        )
+        with patch(
+            "sources.priority_research_source.httpx.AsyncClient",
+            return_value=client,
+        ):
+            received = asyncio.run(source.fetch())
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].url, page_url)
+        self.assertTrue(received[0].published_at.startswith(today))
+        self.assertIn("Project Redwood", received[0].summary)
+
+    def test_freshness_distinguishes_current_release_from_old_reactivation(self) -> None:
+        reference = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        old = candidate(
+            [
+                TechnicalEvidence(
+                    source="official",
+                    evidence_type=EvidenceType.TECHNICAL_BLOG,
+                    title="AlphaEvolve",
+                    url="https://deepmind.google/blog/alphaevolve/",
+                    published_at="2025-05-14T00:00:00+00:00",
+                )
+            ]
+        )
+        stale = assess_candidate_freshness(
+            old, reference_time=reference, window_days=30
+        )
+        self.assertEqual(stale["decision"], "defer")
+        self.assertEqual(
+            stale["classification"], "historical_without_current_uptake"
+        )
+
+        old.evidence.append(
+            TechnicalEvidence(
+                source="independent-lab",
+                evidence_type=EvidenceType.PRODUCT_ADOPTION,
+                title="Independent adoption",
+                url="https://example.org/adoption",
+                published_at="2026-08-12T00:00:00+00:00",
+                raw={"independence": "independent"},
+            )
+        )
+        reactivated = assess_candidate_freshness(
+            old, reference_time=reference, window_days=30
+        )
+        self.assertEqual(reactivated["decision"], "include")
+        self.assertEqual(
+            reactivated["classification"], "historical_reactivated"
+        )
+
+        old.evidence[-1] = TechnicalEvidence(
+            source="official-repository-release",
+            evidence_type=EvidenceType.IMPLEMENTATION,
+            title="Publisher repository",
+            url="https://github.com/example/release",
+            published_at="2026-08-12T00:00:00+00:00",
+            raw={
+                "relationship": "official_release_repository",
+                "independence": "publisher",
+            },
+        )
+        publisher_only = assess_candidate_freshness(
+            old, reference_time=reference, window_days=30
+        )
+        self.assertEqual(publisher_only["decision"], "defer")
+        self.assertEqual(
+            publisher_only["classification"],
+            "historical_without_current_uptake",
+        )
+
+    def test_official_repository_requires_external_primary_material(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        repositories = [
+            {
+                "name": "deepseek-harness",
+                "full_name": "deepseek-ai/deepseek-harness",
+                "html_url": "https://github.com/deepseek-ai/deepseek-harness",
+                "homepage": "https://www.deepseek.com/harness/",
+                "description": "A composable agent harness",
+                "created_at": now,
+                "fork": False,
+                "archived": False,
+                "stargazers_count": 12000,
+                "forks_count": 900,
+                "topics": ["agents"],
+            }
+        ]
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/repos"):
+                return httpx.Response(200, json=repositories, request=request)
+            return httpx.Response(
+                200,
+                text=(
+                    "DeepSeek Harness introduces a plugin architecture and "
+                    "training-time composability. https://www.deepseek.com/harness/ "
+                )
+                * 10,
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        source = OfficialRepositoryReleaseSource(
+            lookback_days=30,
+            organizations=[{"login": "deepseek-ai", "owner": "deepseek"}],
+        )
+        with (
+            patch.object(config, "GITHUB_TOKEN", "configured"),
+            patch(
+                "sources.official_repository_release_source.httpx.AsyncClient",
+                return_value=client,
+            ),
+        ):
+            evidence = asyncio.run(source.fetch())
+
+        origins = [
+            item
+            for item in evidence
+            if item.evidence_type in {
+                EvidenceType.PRIMARY_PAPER,
+                EvidenceType.TECHNICAL_BLOG,
+            }
+        ]
+        supporting = [
+            item
+            for item in evidence
+            if item.evidence_type == EvidenceType.IMPLEMENTATION
+        ]
+        self.assertEqual([item.url for item in origins], ["https://www.deepseek.com/harness/"])
+        self.assertEqual(len(supporting), 1)
+        self.assertNotEqual(origins[0].url, supporting[0].url)
+        self.assertEqual(origins[0].published_at, "")
+        self.assertEqual(origins[0].raw["release_event_at"], now)
+        self.assertEqual(
+            origins[0].raw["date_basis"], "external_primary_date_unknown"
+        )
+
+    def test_official_repository_uses_external_material_date_not_repo_date(self) -> None:
+        repository_created = "2026-08-14T10:00:00+00:00"
+        repository = {
+            "name": "old-paper-release",
+            "full_name": "deepseek-ai/old-paper-release",
+            "html_url": "https://github.com/deepseek-ai/old-paper-release",
+            "homepage": "https://www.deepseek.com/research/old-paper",
+            "created_at": repository_created,
+            "fork": False,
+            "archived": False,
+        }
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/repos"):
+                return httpx.Response(200, json=[repository], request=request)
+            if request.url.path.endswith("/readme"):
+                return httpx.Response(
+                    200,
+                    text="See https://www.deepseek.com/research/old-paper",
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                text=(
+                    '<meta property="article:published_time" '
+                    'content="2025-05-14T00:00:00Z">'
+                    + "Architecture and evaluation details. " * 20
+                ),
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        source = OfficialRepositoryReleaseSource(
+            organizations=[{"login": "deepseek-ai", "owner": "deepseek"}]
+        )
+        with (
+            patch.object(config, "GITHUB_TOKEN", "configured"),
+            patch(
+                "sources.official_repository_release_source.httpx.AsyncClient",
+                return_value=client,
+            ),
+        ):
+            evidence = asyncio.run(source.fetch())
+        origin = next(
+            item
+            for item in evidence
+            if item.evidence_type == EvidenceType.TECHNICAL_BLOG
+        )
+        self.assertEqual(origin.published_at, "2025-05-14T00:00:00+00:00")
+        self.assertEqual(origin.raw["release_event_at"], repository_created)
+
+    def test_repository_only_release_stays_supporting_and_auditable(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        repository = {
+            "name": "repository-only",
+            "full_name": "deepseek-ai/repository-only",
+            "html_url": "https://github.com/deepseek-ai/repository-only",
+            "homepage": "",
+            "created_at": now,
+            "fork": False,
+            "archived": False,
+        }
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/repos"):
+                return httpx.Response(200, json=[repository], request=request)
+            return httpx.Response(200, text="Architecture details only.", request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        source = OfficialRepositoryReleaseSource(
+            organizations=[{"login": "deepseek-ai", "owner": "deepseek"}]
+        )
+        with (
+            patch.object(config, "GITHUB_TOKEN", "configured"),
+            patch(
+                "sources.official_repository_release_source.httpx.AsyncClient",
+                return_value=client,
+            ),
+        ):
+            evidence = asyncio.run(source.fetch())
+        self.assertEqual(
+            [item.evidence_type for item in evidence],
+            [EvidenceType.IMPLEMENTATION],
+        )
+        self.assertEqual(
+            source.coverage()["repository_only_releases"],
+            ["deepseek-ai/repository-only"],
+        )
+
+    def test_minor_official_repository_watchlist_failure_is_audited_not_fatal(self) -> None:
+        source = OfficialRepositoryReleaseSource(
+            organizations=[
+                {"login": f"organization-{index}", "owner": "deepseek"}
+                for index in range(10)
+            ]
+        )
+
+        async def fake_fetch():
+            source._coverage = {
+                "configured_organizations": 10,
+                "checked_organizations": 9,
+                "failed_organizations": ["organization-9:HTTPStatusError"],
+            }
+            return []
+
+        source.fetch = AsyncMock(side_effect=fake_fetch)
+        with patch.object(config, "GITHUB_TOKEN", "configured"):
+            self.assertEqual(asyncio.run(source.safe_fetch()), [])
+        self.assertEqual(source.fetch_status, "completed_with_warnings")
+        self.assertEqual(source.fetch_error, "MinorOrganizationFailures")
+
+    def test_official_repository_pages_until_it_reaches_window_boundary(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        first_page = [
+            {
+                "name": f"repo-{index}",
+                "full_name": f"deepseek-ai/repo-{index}",
+                "html_url": f"https://github.com/deepseek-ai/repo-{index}",
+                "created_at": now,
+                # Forks do not become evidence, but still occupy the GitHub
+                # organization listing and therefore exercise pagination.
+                "fork": True,
+                "archived": False,
+            }
+            for index in range(100)
+        ]
+        requested_pages: list[int] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/repos"):
+                page = int(request.url.params.get("page", "1"))
+                requested_pages.append(page)
+                return httpx.Response(
+                    200,
+                    json=first_page if page == 1 else [],
+                    request=request,
+                )
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        source = OfficialRepositoryReleaseSource(
+            organizations=[{"login": "deepseek-ai", "owner": "deepseek"}]
+        )
+        with (
+            patch.object(config, "GITHUB_TOKEN", "configured"),
+            patch(
+                "sources.official_repository_release_source.httpx.AsyncClient",
+                return_value=client,
+            ),
+        ):
+            evidence = asyncio.run(source.fetch())
+        self.assertEqual(evidence, [])
+        self.assertEqual(requested_pages, [1, 2])
+        self.assertEqual(
+            source.coverage()["repository_pages_by_organization"],
+            {"deepseek-ai": 2},
+        )
+
+    def test_official_repository_partial_pagination_is_not_a_zero_hit(self) -> None:
+        source = OfficialRepositoryReleaseSource(
+            organizations=[
+                {"login": f"organization-{index}", "owner": "deepseek"}
+                for index in range(10)
+            ]
+        )
+
+        async def fake_fetch():
+            source._coverage = {
+                "configured_organizations": 10,
+                "checked_organizations": 10,
+                "failed_organizations": [],
+                "repository_page_failures": [
+                    "organization-0:page_2:HTTPStatusError"
+                ],
+                "external_primary_targets": 0,
+                "external_primary_validation_failures": 0,
+            }
+            return []
+
+        source.fetch = AsyncMock(side_effect=fake_fetch)
+        with patch.object(config, "GITHUB_TOKEN", "configured"):
+            self.assertEqual(asyncio.run(source.safe_fetch()), [])
+        self.assertEqual(source.fetch_status, "partial")
+        self.assertEqual(
+            source.fetch_error, "MaterialRepositoryPaginationLoss"
+        )
+
+    def test_material_official_primary_validation_loss_marks_source_partial(self) -> None:
+        source = OfficialRepositoryReleaseSource(
+            organizations=[{"login": "deepseek-ai", "owner": "deepseek"}]
+        )
+
+        async def fake_fetch():
+            source._coverage = {
+                "configured_organizations": 1,
+                "checked_organizations": 1,
+                "failed_organizations": [],
+                "external_primary_targets": 1,
+                "external_primary_validation_failures": 1,
+            }
+            return []
+
+        source.fetch = AsyncMock(side_effect=fake_fetch)
+        with patch.object(config, "GITHUB_TOKEN", "configured"):
+            self.assertEqual(asyncio.run(source.safe_fetch()), [])
+        self.assertEqual(source.fetch_status, "partial")
+        self.assertEqual(source.fetch_error, "MaterialPrimaryValidationLoss")
+
+    def test_repository_readme_does_not_pick_an_arbitrary_cited_paper(self) -> None:
+        readme = (
+            "Related work: https://arxiv.org/abs/2501.00001 and "
+            "https://arxiv.org/abs/2502.00002"
+        )
+        self.assertEqual(_linked_primary_material("deepseek", readme, ""), "")
+        labeled = (
+            readme
+            + "\n[Technical report](https://arxiv.org/abs/2608.00003)"
+        )
+        self.assertEqual(
+            _linked_primary_material("deepseek", labeled, ""),
+            "https://arxiv.org/abs/2608.00003",
+        )
+
+    def test_repository_primary_date_prefers_exact_metadata_over_arxiv_month(self) -> None:
+        self.assertEqual(
+            _primary_publication_date(
+                "https://arxiv.org/abs/2608.00003",
+                '<meta name="citation_date" content="2026-08-27">',
+            ),
+            "2026-08-27T00:00:00+00:00",
+        )
 
     def test_arxiv_report_query_failure_does_not_drop_regular_feed(self) -> None:
         source = ArxivSource(max_results=5, lookback_days=7)

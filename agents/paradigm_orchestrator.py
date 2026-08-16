@@ -6,6 +6,7 @@ import asyncio
 import copy
 import logging
 import time
+from collections import Counter
 from datetime import datetime, timezone
 
 import config
@@ -23,7 +24,9 @@ from paradigms.clustering import (
 from paradigms.discovery import ParadigmDiscovery
 from paradigms.enrichment import EvidenceEnricher
 from paradigms.models import (
+    ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
+    assess_candidate_freshness,
     key_researcher_profiles,
     primary_material_url,
     verified_organization_attribution,
@@ -181,6 +184,38 @@ class ParadigmOrchestrator:
                 f"解析零链接 {official_coverage.get('parse_zero_links', 0)}；"
                 f"详情失败 {official_coverage.get('detail_failures', 0)}；"
                 f"形成原点 {official_coverage.get('evidence', 0)}"
+            ),
+        )
+        repository_coverage = batch.coverage.get("official_repositories") or {}
+        repository_failures = repository_coverage.get("failed_organizations") or []
+        repository_page_failures = (
+            repository_coverage.get("repository_page_failures") or []
+        )
+        repository_only = repository_coverage.get("repository_only_releases") or []
+        repository_unverified = (
+            repository_coverage.get("unverified_primary_releases") or []
+        )
+        run_audit.event(
+            "official_repository_release_coverage",
+            (
+                "warning"
+                if repository_failures
+                or repository_page_failures
+                or repository_unverified
+                else "passed"
+            ),
+            (
+                f"官方 GitHub 组织 {repository_coverage.get('checked_organizations', 0)}/"
+                f"{repository_coverage.get('configured_organizations', 0)}；"
+                f"窗口内新仓库 {repository_coverage.get('recent_repositories', 0)}；"
+                f"链接到独立一手材料 {repository_coverage.get('linked_primary_origins', 0)}；"
+                f"外部一手链接核验失败 "
+                f"{repository_coverage.get('external_primary_validation_failures', 0)}/"
+                f"{repository_coverage.get('external_primary_targets', 0)}；"
+                f"仅仓库、未生成范式原点 {repository_only[:10]}；"
+                f"外部一手链接未通过 HTTP 核验 {repository_unverified[:10]}；"
+                f"组织读取失败 {repository_failures[:10]}；"
+                f"仓库分页中断 {repository_page_failures[:10]}"
             ),
         )
         domain_coverage_incomplete = any(
@@ -425,6 +460,7 @@ class ParadigmOrchestrator:
         )
         (
             refreshed,
+            refresh_unchanged,
             refresh_budget_deferred,
             refresh_execution_deferred,
             refresh_attempted,
@@ -447,6 +483,7 @@ class ParadigmOrchestrator:
             + len(refresh_execution_deferred)
         )
         stats["refreshed_paradigms"] = len(refreshed)
+        stats["refresh_unchanged_count"] = len(refresh_unchanged)
         run_audit.checkpoint(stats)
         candidates = [*new_candidates, *refreshed]
         # Tavily/Reddit 的用户正文只供本轮综合与人物核验，之后即清除；
@@ -485,6 +522,26 @@ class ParadigmOrchestrator:
                         "answers", []
                     ),
                 }
+            )
+
+        # 综合器/最终 Rubric 的结构失败不是“技术不值得关注”。这些路线必须
+        # 回到完整深挖队列，而且要进入本轮 backlog 统计；否则空报告会把
+        # 实际的模型输出故障误写成“本周没有新范式”。
+        research_incomplete_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.status == "pending_deep"
+            and candidate.rubric_assessment.get("decision") == "incomplete"
+        ]
+        stats["candidate_research_incomplete_count"] = len(
+            research_incomplete_candidates
+        )
+        if research_incomplete_candidates:
+            run_audit.event(
+                "deep_research_contract",
+                "deferred",
+                f"{len(research_incomplete_candidates)} 条路线的综合/Rubric 输出"
+                "未闭合；已保留 pending_deep，下轮重新执行完整深挖，不写成淘汰",
             )
 
         # 支持证据单独去重入库，但绝不独立生成范式。
@@ -546,6 +603,42 @@ class ParadigmOrchestrator:
         stats["delivery_source_deferred_count"] = len(
             delivery_source_deferred
         )
+        freshness_deferred = []
+        for candidate in reportable:
+            assessment = assess_candidate_freshness(
+                candidate,
+                window_days=self.high_signal_discovery_lookback_days,
+            )
+            candidate.freshness_assessment = assessment
+            if assessment["decision"] == "defer":
+                candidate.status = "observe"
+                candidate.rejection_reason = assessment["reason"]
+                freshness_deferred.append(candidate)
+        if freshness_deferred:
+            deferred_keys = {candidate.key for candidate in freshness_deferred}
+            reportable = [
+                candidate
+                for candidate in reportable
+                if candidate.key not in deferred_keys
+            ]
+            run_audit.event(
+                "report_freshness",
+                "deferred",
+                f"{len(freshness_deferred)} 条技术 Rubric 已通过，但一手材料"
+                "并非本期发布且没有本期独立承接（或发布日期不可核验）；"
+                "保留观察，不把首次入库误写成本周新范式："
+                + "、".join(
+                    (candidate.route_family or candidate.name)[:60]
+                    for candidate in freshness_deferred[:6]
+                ),
+            )
+        else:
+            run_audit.event(
+                "report_freshness",
+                "passed",
+                "所有待交付路线均有窗口内一手发布，或有窗口内独立承接/指标增量",
+            )
+        stats["freshness_deferred_count"] = len(freshness_deferred)
         stats["reportable_count"] = len(reportable)
         reportable = self.store.prepare_report(reportable)
         reportable = sorted(
@@ -574,6 +667,7 @@ class ParadigmOrchestrator:
             stats["recall_coverage_incomplete"]
             or stats["analysis_deferred_count"]
             or stats["candidate_deferred_count"]
+            or stats["candidate_research_incomplete_count"]
             or stats["refresh_deferred_count"]
             or stats["delivery_profile_deferred_count"]
             or stats["delivery_source_deferred_count"]
@@ -582,6 +676,7 @@ class ParadigmOrchestrator:
         stats["pending_work_count"] = (
             stats["analysis_deferred_count"]
             + stats["candidate_deferred_count"]
+            + stats["candidate_research_incomplete_count"]
             + stats["refresh_deferred_count"]
             + stats["delivery_profile_deferred_count"]
             + stats["delivery_source_deferred_count"]
@@ -610,6 +705,7 @@ class ParadigmOrchestrator:
                 *candidates,
                 *deferred_candidates,
                 *refresh_execution_deferred,
+                *refresh_unchanged,
             ]
         )
         # 发现结果与覆盖基线是两个检查点。已抓到的原点即使后续失败也保留
@@ -630,7 +726,17 @@ class ParadigmOrchestrator:
                 "本轮领域/核心学术召回未闭合；保留旧地图版本，下次继续高信号补扫",
             )
         self.pending_delivery = reportable
-        stats["saved_count"] = len(candidates) + len(deferred_candidates)
+        stats["saved_count"] = len(
+            {
+                candidate.key
+                for candidate in [
+                    *candidates,
+                    *deferred_candidates,
+                    *refresh_execution_deferred,
+                    *refresh_unchanged,
+                ]
+            }
+        )
         stats["elapsed_seconds"] = (
             datetime.now(timezone.utc) - started
         ).total_seconds()
@@ -654,7 +760,104 @@ class ParadigmOrchestrator:
         failed_count = 0
         hydration_totals = _empty_hydration_stats()
         completed_origins = []
+        budget_deferred = []
         batch_size = config.PARADIGM_ANALYSIS_BATCH_SIZE
+
+        def record_failed(items: list, reason: str) -> None:
+            nonlocal analyzed_count, failed_count
+            now = datetime.now(timezone.utc).isoformat()
+            for item in items:
+                item.raw["analysis_failure_count"] = (
+                    _safe_int(item.raw.get("analysis_failure_count", 0)) + 1
+                )
+                item.raw["last_analysis_failure_at"] = now
+            self.store.mark_evidence(items, analyzed=False)
+            analyzed_count += len(items)
+            failed_count += len(items)
+            run_audit.event(
+                "origin_analysis_item",
+                "deferred",
+                f"{len(items)} 条原点因 {reason} 保留 pending；未写成技术淘汰",
+            )
+
+        async def analyze_group(group: list) -> None:
+            """Split only unexpected batch failures; accept valid peer outputs."""
+
+            nonlocal analyzed_count, failed_count
+            remaining = _remaining_seconds(deadline)
+            if remaining <= 0:
+                budget_deferred.extend(group)
+                return
+            try:
+                values = await asyncio.wait_for(
+                    self.analyzer.run(group),
+                    timeout=remaining,
+                )
+                returned, unknown = _validated_origin_stage_output(group, values)
+            except asyncio.TimeoutError:
+                budget_deferred.extend(group)
+                return
+            except Exception as exc:
+                if len(group) > 1:
+                    midpoint = len(group) // 2
+                    run_audit.event(
+                        "origin_analysis_batch",
+                        "isolating",
+                        f"{len(group)} 条原点批次发生 {type(exc).__name__}；"
+                        "二分隔离坏样本，健康同批材料继续",
+                    )
+                    await analyze_group(group[:midpoint])
+                    await analyze_group(group[midpoint:])
+                    return
+                logger.exception("单条机制抽取异常；原点保留 pending")
+                record_failed(group, type(exc).__name__)
+                return
+
+            allowed = {item.fingerprint for item in group}
+            if unknown:
+                run_audit.event(
+                    "origin_analysis_contract",
+                    "warning",
+                    f"丢弃 {unknown} 条不属于当前输入批次的抽取输出",
+                )
+            returned_fingerprints = {
+                item.evidence.fingerprint for item in returned
+            }
+            failed_fingerprints = {
+                item.evidence.fingerprint
+                for item in returned
+                if not item.canonical_name
+                and not item.rubric_assessment
+                and bool(item.rejection_reason)
+            }
+            missing_fingerprints = allowed - returned_fingerprints
+            if missing_fingerprints:
+                run_audit.event(
+                    "origin_analysis_contract",
+                    "deferred",
+                    f"模型/分析器漏回 {len(missing_fingerprints)} 条输入；"
+                    "只保留漏项待重试，已返回的同批结果继续提交",
+                )
+            terminal_failures = failed_fingerprints | missing_fingerprints
+            successful = [
+                item for item in group if item.fingerprint not in terminal_failures
+            ]
+            failed = [
+                item for item in group if item.fingerprint in terminal_failures
+            ]
+            if failed:
+                now = datetime.now(timezone.utc).isoformat()
+                for item in failed:
+                    item.raw["analysis_failure_count"] = (
+                        _safe_int(item.raw.get("analysis_failure_count", 0)) + 1
+                    )
+                    item.raw["last_analysis_failure_at"] = now
+                self.store.mark_evidence(failed, analyzed=False)
+            completed_origins.extend(successful)
+            extractions.extend(returned)
+            analyzed_count += len(group)
+            failed_count += len(failed)
+
         for offset in range(0, len(origins), batch_size):
             remaining = _remaining_seconds(deadline)
             if remaining <= 0:
@@ -667,19 +870,14 @@ class ParadigmOrchestrator:
                     completed_origins,
                 )
             origin_batch = origins[offset : offset + batch_size]
-
-            async def process_batch():
-                hydration = await self.enricher.hydrate_priority_origins(
-                    origin_batch
-                )
-                extracted = await self.analyzer.run(origin_batch)
-                return hydration, extracted
-
             try:
-                hydration, batch_extractions = await asyncio.wait_for(
-                    process_batch(), timeout=remaining
+                hydration = await asyncio.wait_for(
+                    self.enricher.hydrate_priority_origins(origin_batch),
+                    timeout=remaining,
                 )
-            except TimeoutError:
+                if not isinstance(hydration, dict):
+                    raise _StageOutputContractError("正文补水统计不是 dict")
+            except asyncio.TimeoutError:
                 return (
                     extractions,
                     analyzed_count,
@@ -689,62 +887,33 @@ class ParadigmOrchestrator:
                     completed_origins,
                 )
             except Exception as exc:
-                logger.exception(
-                    "机制抽取批次异常；%s 条原点保留 pending 后继续",
-                    len(origin_batch),
-                )
+                targets = sum(_is_high_priority_origin(item) for item in origin_batch)
+                hydration = {
+                    "priority_origin_targets": targets,
+                    "priority_origin_hydrated": 0,
+                    "priority_origin_hydration_failed": targets,
+                }
+                logger.exception("原点正文补水批次异常；降级使用现有摘要继续抽取")
                 run_audit.event(
-                    "origin_analysis_batch",
-                    "deferred",
-                    f"{len(origin_batch)} 条原点发生 {type(exc).__name__}；"
-                    "未写成技术淘汰，保留 pending",
+                    "priority_origin_hydration",
+                    "warning",
+                    f"{len(origin_batch)} 条批次发生 {type(exc).__name__}；"
+                    "正文补水降级，但机制抽取仍使用已持久化摘要继续",
                 )
-                for item in origin_batch:
-                    item.raw["analysis_failure_count"] = (
-                        int(item.raw.get("analysis_failure_count", 0) or 0) + 1
-                    )
-                    item.raw["last_analysis_failure_at"] = datetime.now(
-                        timezone.utc
-                    ).isoformat()
-                self.store.mark_evidence(origin_batch, analyzed=False)
-                analyzed_count += len(origin_batch)
-                failed_count += len(origin_batch)
-                continue
-
             for key, value in hydration.items():
-                hydration_totals[key] += int(value or 0)
-            failed_fingerprints = {
-                item.evidence.fingerprint
-                for item in batch_extractions
-                if not item.canonical_name
-                and not item.rubric_assessment
-                and bool(item.rejection_reason)
-            }
-            successful_origins = [
-                item
-                for item in origin_batch
-                if item.fingerprint not in failed_fingerprints
-            ]
-            failed_origins = [
-                item
-                for item in origin_batch
-                if item.fingerprint in failed_fingerprints
-            ]
-            for item in failed_origins:
-                item.raw["analysis_failure_count"] = (
-                    int(item.raw.get("analysis_failure_count", 0) or 0) + 1
+                if key in hydration_totals:
+                    hydration_totals[key] += _safe_int(value)
+            await analyze_group(origin_batch)
+            if budget_deferred:
+                budget_deferred.extend(origins[offset + len(origin_batch) :])
+                return (
+                    extractions,
+                    analyzed_count,
+                    failed_count,
+                    budget_deferred,
+                    hydration_totals,
+                    completed_origins,
                 )
-                item.raw["last_analysis_failure_at"] = datetime.now(
-                    timezone.utc
-                ).isoformat()
-            # 不能在候选快照持久化之前把原点标成 analyzed。否则深挖前异常
-            # 会让下次运行跳过论文，却没有任何 pending candidate 可以续跑。
-            completed_origins.extend(successful_origins)
-            if failed_origins:
-                self.store.mark_evidence(failed_origins, analyzed=False)
-            extractions.extend(batch_extractions)
-            analyzed_count += len(origin_batch)
-            failed_count += len(failed_fingerprints)
         return (
             extractions,
             analyzed_count,
@@ -760,116 +929,231 @@ class ParadigmOrchestrator:
         supporting: list,
         deadline: float,
     ) -> tuple[list, list, list]:
-        completed = []
-        execution_deferred = []
+        completed: list = []
+        budget_deferred: list = []
+        execution_deferred: list = []
         batch_size = config.PARADIGM_DEEP_BATCH_SIZE
-        for offset in range(0, len(candidates), batch_size):
+
+        async def process_group(group: list) -> None:
             remaining = _remaining_seconds(deadline)
             if remaining <= 0:
-                return completed, candidates[offset:], execution_deferred
-            # External enrichment mutates candidates.  Work on a copy so an
-            # interrupted batch never persists half-scrubbed community text.
-            candidate_batch = copy.deepcopy(
-                candidates[offset : offset + batch_size]
-            )
+                budget_deferred.extend(group)
+                return
+            candidate_batch = copy.deepcopy(group)
 
             async def process_batch():
                 values = await self.enricher.run(candidate_batch, supporting)
+                _validate_candidate_stage_output(
+                    candidate_batch, values, "external_enrichment"
+                )
                 values = await self.synthesizer.run(values)
-                return await self.trajectory.run(values)
-
-            try:
-                values = await asyncio.wait_for(
-                    process_batch(), timeout=remaining
+                _validate_candidate_stage_output(
+                    candidate_batch, values, "paradigm_synthesis"
                 )
-            except TimeoutError:
-                return completed, candidates[offset:], execution_deferred
-            except Exception as exc:
-                failed_batch = candidates[offset : offset + batch_size]
-                logger.exception(
-                    "候选深挖批次异常；%s 条路线保留 pending 后继续",
-                    len(failed_batch),
+                values = await self.trajectory.run(values)
+                _validate_candidate_stage_output(
+                    candidate_batch, values, "researcher_trajectory"
                 )
-                run_audit.event(
-                    "deep_analysis_batch",
-                    "deferred",
-                    f"{len(failed_batch)} 条路线发生 {type(exc).__name__}；"
-                    "未写成技术淘汰，保留 pending",
-                )
-                for candidate in failed_batch:
-                    candidate.execution_failure_count += 1
-                    candidate.last_execution_failure_at = datetime.now(
-                        timezone.utc
-                    ).isoformat()
-                    _record_deferred_candidate(
-                        candidate,
-                        "深挖执行异常；保留 pending，下轮重试。"
-                        f"错误类型：{type(exc).__name__}",
-                    )
-                execution_deferred.extend(failed_batch)
-                continue
-            for candidate in values:
-                candidate.execution_failure_count = 0
-                candidate.last_execution_failure_at = ""
-            completed.extend(values)
-        return completed, [], execution_deferred
-
-    async def _refresh_in_batches(
-        self,
-        candidates: list,
-        supporting: list,
-        deadline: float,
-    ) -> tuple[list, list, list, int]:
-        refreshed = []
-        execution_deferred = []
-        attempted = 0
-        batch_size = config.PARADIGM_DEEP_BATCH_SIZE
-        for offset in range(0, len(candidates), batch_size):
-            remaining = _remaining_seconds(deadline)
-            if remaining <= 0:
-                return refreshed, candidates[offset:], execution_deferred, attempted
-            candidate_batch = copy.deepcopy(
-                candidates[offset : offset + batch_size]
-            )
-
-            async def process_batch():
-                values = await self.enricher.refresh(candidate_batch, supporting)
-                if values:
-                    values = await self.synthesizer.run(values)
                 return values
 
             try:
                 values = await asyncio.wait_for(
                     process_batch(), timeout=remaining
                 )
-            except TimeoutError:
-                return refreshed, candidates[offset:], execution_deferred, attempted
+            except asyncio.TimeoutError:
+                budget_deferred.extend(group)
+                return
             except Exception as exc:
-                failed_batch = candidates[offset : offset + batch_size]
-                attempted += len(failed_batch)
-                for candidate in failed_batch:
-                    candidate.execution_failure_count += 1
-                    candidate.last_execution_failure_at = datetime.now(
-                        timezone.utc
-                    ).isoformat()
-                execution_deferred.extend(failed_batch)
-                logger.exception(
-                    "历史路线刷新批次异常；%s 条路线保留原快照后继续",
-                    len(failed_batch),
+                if len(group) > 1:
+                    midpoint = len(group) // 2
+                    run_audit.event(
+                        "deep_analysis_batch",
+                        "isolating",
+                        f"{len(group)} 条路线批次发生 {type(exc).__name__}；"
+                        "二分隔离坏样本，健康路线继续",
+                    )
+                    await process_group(group[:midpoint])
+                    await process_group(group[midpoint:])
+                    return
+                failed = group[0]
+                logger.exception("单条候选深挖异常；路线保留 pending")
+                failed.execution_failure_count += 1
+                failed.last_execution_failure_at = datetime.now(
+                    timezone.utc
+                ).isoformat()
+                _record_deferred_candidate(
+                    failed,
+                    "深挖执行异常；保留 pending，下轮重试。"
+                    f"错误类型：{type(exc).__name__}",
                 )
-                run_audit.event(
-                    "refresh_analysis_batch",
-                    "deferred",
-                    f"{len(failed_batch)} 条历史路线发生 {type(exc).__name__}；"
-                    "保留原快照，下轮重试",
-                )
-                continue
+                execution_deferred.append(failed)
+                return
             for candidate in values:
                 candidate.execution_failure_count = 0
                 candidate.last_execution_failure_at = ""
+            completed.extend(values)
+
+        for offset in range(0, len(candidates), batch_size):
+            group = candidates[offset : offset + batch_size]
+            await process_group(group)
+            if budget_deferred:
+                budget_deferred.extend(candidates[offset + len(group) :])
+                break
+        return completed, budget_deferred, execution_deferred
+
+    async def _refresh_in_batches(
+        self,
+        candidates: list,
+        supporting: list,
+        deadline: float,
+    ) -> tuple[list, list, list, list, int]:
+        refreshed: list = []
+        unchanged: list = []
+        budget_deferred: list = []
+        execution_deferred: list = []
+        attempted = 0
+        batch_size = config.PARADIGM_DEEP_BATCH_SIZE
+
+        async def process_group(group: list) -> None:
+            nonlocal attempted
+            remaining = _remaining_seconds(deadline)
+            if remaining <= 0:
+                budget_deferred.extend(group)
+                return
+            candidate_batch = copy.deepcopy(group)
+
+            async def process_batch():
+                values = await self.enricher.refresh(candidate_batch, supporting)
+                _validate_candidate_stage_output(
+                    candidate_batch,
+                    values,
+                    "community_refresh",
+                    allow_subset=True,
+                )
+                if values:
+                    changed_inputs = [
+                        candidate
+                        for candidate in candidate_batch
+                        if candidate.key in {value.key for value in values}
+                    ]
+                    values = await self.synthesizer.run(values)
+                    _validate_candidate_stage_output(
+                        changed_inputs,
+                        values,
+                        "refresh_synthesis",
+                    )
+                return values
+
+            try:
+                values = await asyncio.wait_for(
+                    process_batch(), timeout=remaining
+                )
+            except asyncio.TimeoutError:
+                attempted += len(group)
+                _mark_refresh_attempted(self, group)
+                budget_deferred.extend(group)
+                return
+            except Exception as exc:
+                if len(group) > 1:
+                    midpoint = len(group) // 2
+                    run_audit.event(
+                        "refresh_analysis_batch",
+                        "isolating",
+                        f"{len(group)} 条历史路线批次发生 {type(exc).__name__}；"
+                        "二分隔离坏样本，健康路线继续",
+                    )
+                    await process_group(group[:midpoint])
+                    await process_group(group[midpoint:])
+                    return
+                attempted += 1
+                failed = group[0]
+                failed.execution_failure_count += 1
+                failed.last_execution_failure_at = datetime.now(
+                    timezone.utc
+                ).isoformat()
+                execution_deferred.append(failed)
+                _mark_refresh_attempted(self, group)
+                logger.exception("单条历史路线刷新异常；保留原快照后继续")
+                run_audit.event(
+                    "refresh_analysis_batch",
+                    "deferred",
+                    f"路线 {failed.key[:80]} 发生 {type(exc).__name__}；"
+                    "保留原快照，下轮重试",
+                )
+                return
+
+            attempted += len(group)
+            _mark_refresh_attempted(self, group)
+            changed_keys = {candidate.key for candidate in values}
+            for candidate in candidate_batch:
+                candidate.execution_failure_count = 0
+                candidate.last_execution_failure_at = ""
+                if candidate.key not in changed_keys:
+                    unchanged.append(candidate)
             refreshed.extend(values)
-            attempted += len(candidate_batch)
-        return refreshed, [], execution_deferred, attempted
+
+        for offset in range(0, len(candidates), batch_size):
+            group = candidates[offset : offset + batch_size]
+            await process_group(group)
+            if budget_deferred:
+                budget_deferred.extend(candidates[offset + len(group) :])
+                break
+        return refreshed, unchanged, budget_deferred, execution_deferred, attempted
+
+
+class _StageOutputContractError(RuntimeError):
+    """A stage returned a structurally incomplete or foreign result set."""
+
+
+def _validated_origin_stage_output(group: list, values) -> tuple[list, int]:
+    if not isinstance(values, list):
+        raise _StageOutputContractError("机制抽取输出不是 list")
+    allowed = {item.fingerprint for item in group}
+    returned = []
+    unknown = 0
+    for extraction in values:
+        try:
+            fingerprint = extraction.evidence.fingerprint
+        except (AttributeError, TypeError) as exc:
+            raise _StageOutputContractError(
+                "机制抽取元素缺少 evidence"
+            ) from exc
+        if fingerprint not in allowed:
+            unknown += 1
+            continue
+        returned.append(extraction)
+    return returned, unknown
+
+
+def _validate_candidate_stage_output(
+    expected: list,
+    values,
+    stage: str,
+    *,
+    allow_subset: bool = False,
+) -> None:
+    """Prevent silent cardinality loss between mutating async stages."""
+
+    if not isinstance(values, list):
+        raise _StageOutputContractError(f"{stage} 输出不是 list")
+    expected_keys = Counter(str(candidate.key) for candidate in expected)
+    try:
+        returned_keys = Counter(str(candidate.key) for candidate in values)
+    except AttributeError as exc:
+        raise _StageOutputContractError(f"{stage} 输出缺少 candidate.key") from exc
+    extra = returned_keys - expected_keys
+    missing = expected_keys - returned_keys
+    if extra or (missing and not allow_subset):
+        raise _StageOutputContractError(
+            f"{stage} 输出基数不守恒: missing={dict(missing)}, extra={dict(extra)}"
+        )
+
+
+def _mark_refresh_attempted(orchestrator, candidates: list) -> None:
+    store = getattr(orchestrator, "store", None)
+    marker = getattr(store, "mark_refresh_attempted", None)
+    if marker is not None:
+        marker(candidates)
 
 
 def _origin_analysis_priority(evidence) -> tuple[int, int, int, int, int, str]:
@@ -881,10 +1165,10 @@ def _origin_analysis_priority(evidence) -> tuple[int, int, int, int, int, str]:
     }.get(str(evidence.raw.get("publisher_tier", "unknown")), 0)
     return (
         int(bool(evidence.raw.get("explicit_seed"))),
-        int(evidence.raw.get("origin_priority", 0) or 0),
+        _safe_int(evidence.raw.get("origin_priority", 0)),
         int(evidence.raw.get("origin_kind") == "technical_report"),
         publisher_rank,
-        -int(evidence.raw.get("analysis_failure_count", 0) or 0),
+        -_safe_int(evidence.raw.get("analysis_failure_count", 0)),
         evidence.published_at or "",
     )
 
@@ -950,7 +1234,7 @@ def _origin_execution_order(pending: list, newly_discovered: list) -> list:
 def _is_high_priority_origin(evidence) -> bool:
     return bool(
         evidence.raw.get("explicit_seed")
-        or int(evidence.raw.get("origin_priority", 0) or 0) >= 2
+        or _safe_int(evidence.raw.get("origin_priority", 0)) >= 2
         or evidence.raw.get("origin_kind") == "technical_report"
     )
 
@@ -958,14 +1242,17 @@ def _is_high_priority_origin(evidence) -> bool:
 def _deep_analysis_priority(candidate) -> tuple[float, int, float, float, int]:
     """顺序只影响执行先后；Rubric 决定是否深挖，数量不由排序截断。"""
     origin_priority = max(
-        (int(item.raw.get("origin_priority", 0) or 0) for item in candidate.evidence),
+        (
+            _safe_int(item.raw.get("origin_priority", 0))
+            for item in candidate.evidence
+        ),
         default=0,
     )
     return (
         float(origin_priority),
-        -int(candidate.execution_failure_count or 0),
-        float(candidate.screening_rubric.get("score", 0.0)),
-        float(candidate.screening_rubric.get("answer_coverage", 0.0)),
+        -_safe_int(candidate.execution_failure_count),
+        _safe_float(candidate.screening_rubric.get("score", 0.0)),
+        _safe_float(candidate.screening_rubric.get("answer_coverage", 0.0)),
         len(candidate.evidence),
     )
 
@@ -1014,6 +1301,20 @@ def _remaining_seconds(deadline: float) -> float:
         # asyncio.wait_for requires a finite number on some event-loop versions.
         return 365 * 24 * 60 * 60
     return max(deadline - time.monotonic(), 0.0)
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_float(value) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _empty_hydration_stats() -> dict[str, int]:
@@ -1082,8 +1383,7 @@ def _delivery_profile_ready(candidate) -> bool:
 
 def _delivery_primary_source_ready(candidate) -> bool:
     return any(
-        evidence.evidence_type
-        in {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG}
+        evidence.evidence_type in ORIGIN_EVIDENCE_TYPES
         and primary_material_url(evidence)
         for evidence in candidate.evidence
     )

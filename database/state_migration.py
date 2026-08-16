@@ -42,6 +42,7 @@ _REQUIRED_COLUMNS = {
         "payload_json",
         "first_seen_at",
         "last_seen_at",
+        "last_refresh_attempt_at",
         "last_reported_signature",
         "last_reported_at",
     },
@@ -92,7 +93,8 @@ def migrate_state(
     """Validate an artifact and apply all backwards-compatible migrations.
 
     Version 2 added ``radar_meta``; version 3 added the durable report outbox and
-    a delivery identifier; version 4 adds resumable route-level report fragments.
+    a delivery identifier; version 4 added resumable route-level report fragments;
+    version 5 adds fair refresh scheduling plus domain-payload validation.
     All additions are backwards-compatible, so opening
     the database with :class:`ParadigmStore` performs the migration.  Future
     versions must extend this function before raising the schema version.
@@ -123,6 +125,7 @@ def migrate_state(
 
     ParadigmStore(path)
     _validate_sqlite(path, require_current=True)
+    _validate_domain_payloads(path)
     return config.PARADIGM_STATE_SCHEMA_VERSION
 
 
@@ -174,11 +177,84 @@ def _validate_sqlite(path: Path, *, require_current: bool) -> None:
         expected_columns = set(_REQUIRED_COLUMNS[table])
         if not require_current and table == "report_deliveries":
             expected_columns.discard("delivery_key")
+        if not require_current and table == "paradigms":
+            expected_columns.discard("last_refresh_attempt_at")
         missing_columns = expected_columns - columns.get(table, set())
         if missing_columns:
             raise ValueError(
                 f"状态数据库表 {table} 缺少字段: {sorted(missing_columns)}"
             )
+
+
+def _validate_domain_payloads(path: Path) -> None:
+    """Reject structurally valid SQLite files with corrupt domain JSON.
+
+    GitHub recovery walks immutable snapshots from newest to oldest. Raising
+    here lets it fall back before the production pipeline spends tokens or
+    sends mail with a state file that can never be deserialized.
+    """
+
+    import json
+
+    from paradigms.models import candidate_from_dict, technical_evidence_from_dict
+
+    try:
+        with sqlite3.connect(path) as connection:
+            for fingerprint, payload_json in connection.execute(
+                "SELECT fingerprint, payload_json FROM evidence_state"
+            ):
+                evidence = technical_evidence_from_dict(json.loads(payload_json))
+                if evidence.fingerprint != str(fingerprint):
+                    raise ValueError(
+                        f"证据 fingerprint 与 payload 不一致: {fingerprint}"
+                    )
+            for paradigm_key, payload_json in connection.execute(
+                "SELECT paradigm_key, payload_json FROM paradigms"
+            ):
+                candidate = candidate_from_dict(json.loads(payload_json))
+                if candidate.key != str(paradigm_key):
+                    raise ValueError(
+                        f"范式 key 与 payload 不一致: {paradigm_key}"
+                    )
+            for delivery_key, status, candidates_json, stats_json, content in (
+                connection.execute(
+                    """
+                    SELECT delivery_key, status, candidate_payload_json,
+                           stats_json, report_content
+                    FROM report_outbox
+                    """
+                )
+            ):
+                if str(status) not in {
+                    "pending_render",
+                    "rendered",
+                    "sending",
+                    "delivered",
+                }:
+                    raise ValueError(
+                        f"交付任务状态不可识别: {delivery_key}={status}"
+                    )
+                payloads = json.loads(candidates_json)
+                stats = json.loads(stats_json)
+                if not isinstance(payloads, list) or not isinstance(stats, dict):
+                    raise ValueError(f"交付任务 JSON 结构损坏: {delivery_key}")
+                for payload in payloads:
+                    candidate_from_dict(payload)
+                if str(status) in {"rendered", "sending"} and not str(content):
+                    raise ValueError(
+                        f"交付任务状态为 {status} 但没有报告制品: {delivery_key}"
+                    )
+            for delivery_id, paradigm_key, payload_json in connection.execute(
+                "SELECT id, paradigm_key, payload_json FROM report_deliveries"
+            ):
+                candidate = candidate_from_dict(json.loads(payload_json))
+                if candidate.key != str(paradigm_key):
+                    raise ValueError(
+                        "历史交付中的范式 key 与 payload 不一致: "
+                        f"delivery={delivery_id}"
+                    )
+    except (json.JSONDecodeError, TypeError, KeyError) as exc:
+        raise ValueError(f"状态数据库包含不可恢复的领域 JSON: {exc}") from exc
 
 
 def main() -> None:

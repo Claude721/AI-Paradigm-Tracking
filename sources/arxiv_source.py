@@ -16,6 +16,7 @@ from paradigms.landscape import (
     arxiv_query_plan,
     classify_frontier_domains,
 )
+from paradigms.models import nonnegative_number
 from paradigms.publication import classify_publication
 from paradigms.reputation import resolve_organization
 
@@ -262,7 +263,7 @@ class ArxivSource(BaseSource):
         deduped = list({item.url: item for item in results}.values())
         deduped.sort(
             key=lambda item: (
-                int(item.extra.get("origin_priority", 0) or 0),
+                int(nonnegative_number(item.extra.get("origin_priority", 0))),
                 item.created_at or "",
             ),
             reverse=True,

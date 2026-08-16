@@ -226,6 +226,157 @@ RESEARCHERS: tuple[dict, ...] = (
 )
 
 
+# 手工核验的个人思想信源。feed_urls 只记录实际验证过的 RSS/Atom；没有
+# 稳定 Feed 的研究者仍保留 homepage/X 作为身份与人工复核目录，不猜测
+# Feed 地址。origin_policy=concept_origin 表示文章可提出机制假说，绝不表示
+# 自动成为范式；secondary_only 只能作为独立解读或扩散证据。
+KOL_SOURCE_VERSION = "2026-08-15.1"
+KOL_SOURCES: tuple[dict, ...] = (
+    {
+        "id": "lilian-weng", "name": "Lilian Weng",
+        "aliases": ("Lilian Weng",), "focus": "Agent、强化学习、生成模型与基础模型",
+        "homepage": "https://lilianweng.github.io/",
+        "feed_urls": ("https://lilianweng.github.io/index.xml",),
+        "x_handle": "lilianweng", "origin_policy": "secondary_only",
+    },
+    {
+        "id": "andrej-karpathy", "name": "Andrej Karpathy",
+        "aliases": ("Andrej Karpathy",), "focus": "大模型训练、Agent、软件与人机接口",
+        "homepage": "https://karpathy.ai/", "writing_url": "https://karpathy.bearblog.dev/",
+        "feed_urls": (), "x_handle": "karpathy", "origin_policy": "concept_origin",
+    },
+    {
+        "id": "simon-willison", "name": "Simon Willison",
+        "aliases": ("Simon Willison",), "focus": "LLM 工程、Agent 工具与开发者基础设施",
+        "homepage": "https://simonwillison.net/",
+        "feed_urls": ("https://simonwillison.net/atom/entries/",),
+        "x_handle": "simonw", "origin_policy": "secondary_only",
+    },
+    {
+        "id": "nathan-lambert", "name": "Nathan Lambert",
+        "aliases": ("Nathan Lambert",), "focus": "后训练、RLHF、开放模型与推理",
+        "homepage": "https://natolambert.com/writing", "writing_url": "https://www.interconnects.ai/",
+        "feed_urls": ("https://www.interconnects.ai/feed",),
+        "x_handle": "natolambert", "origin_policy": "secondary_only",
+    },
+    {
+        "id": "sebastian-raschka", "name": "Sebastian Raschka",
+        "aliases": ("Sebastian Raschka",), "focus": "LLM 架构、训练与可复现工程",
+        "homepage": "https://sebastianraschka.com/", "writing_url": "https://magazine.sebastianraschka.com/",
+        "feed_urls": ("https://magazine.sebastianraschka.com/feed",),
+        "x_handle": "rasbt", "origin_policy": "secondary_only",
+    },
+    {
+        "id": "chip-huyen", "name": "Chip Huyen",
+        "aliases": ("Chip Huyen", "Huyen Chip"), "focus": "AI 系统、推理基础设施与 Agent",
+        "homepage": "https://huyenchip.com/", "feed_urls": ("https://huyenchip.com/feed.xml",),
+        "x_handle": "chipro", "origin_policy": "concept_origin",
+    },
+    {
+        "id": "eugene-yan", "name": "Eugene Yan",
+        "aliases": ("Eugene Yan",), "focus": "推荐系统、LLM 产品与评测",
+        "homepage": "https://eugeneyan.com/", "feed_urls": ("https://eugeneyan.com/rss/",),
+        "x_handle": "eugeneyan", "origin_policy": "concept_origin",
+    },
+    {
+        "id": "hamel-husain", "name": "Hamel Husain",
+        "aliases": ("Hamel Husain",), "focus": "LLM evals、Agent 与应用工程",
+        "homepage": "https://hamel.dev/", "feed_urls": ("https://hamel.dev/index.xml",),
+        "x_handle": "HamelHusain", "origin_policy": "concept_origin",
+    },
+    {
+        "id": "jeremy-howard", "name": "Jeremy Howard",
+        "aliases": ("Jeremy Howard",), "focus": "深度学习、模型训练与开放教育",
+        "homepage": "https://jeremy.fast.ai/", "feed_urls": ("https://jeremy.fast.ai/feed.xml",),
+        "x_handle": "jeremyphoward", "origin_policy": "concept_origin",
+    },
+    {
+        "id": "jay-alammar", "name": "Jay Alammar",
+        "aliases": ("Jay Alammar",), "focus": "Transformer、语言模型与可视化解释",
+        "homepage": "https://jalammar.github.io/", "feed_urls": ("https://jalammar.github.io/feed.xml",),
+        "x_handle": "JayAlammar", "origin_policy": "secondary_only",
+    },
+    {
+        "id": "tim-dettmers", "name": "Tim Dettmers",
+        "aliases": ("Tim Dettmers",), "focus": "高效训练、量化与大模型系统",
+        "homepage": "https://timdettmers.com/", "feed_urls": ("https://timdettmers.com/feed/",),
+        "x_handle": "Tim_Dettmers", "origin_policy": "concept_origin",
+    },
+    {
+        "id": "chris-olah", "name": "Chris Olah",
+        "aliases": ("Chris Olah", "Christopher Olah"), "focus": "可解释性、神经网络表征与安全",
+        "homepage": "https://colah.github.io/", "feed_urls": ("https://colah.github.io/rss.xml",),
+        "x_handle": "ch402", "origin_policy": "concept_origin",
+    },
+    {
+        "id": "danijar-hafner", "name": "Danijar Hafner",
+        "aliases": ("Danijar Hafner",), "focus": "World Model、Dreamer 与强化学习",
+        "homepage": "https://danijar.com/", "feed_urls": ("https://danijar.com/feed.xml",),
+        "x_handle": "danijarh", "origin_policy": "concept_origin",
+    },
+    {
+        "id": "george-hotz", "name": "George Hotz",
+        "aliases": ("George Hotz", "geohot"), "focus": "端到端自动驾驶、AI 系统与计算",
+        "homepage": "https://geohot.github.io/blog/", "feed_urls": ("https://geohot.github.io/blog/feed.xml",),
+        "x_handle": "realGeorgeHotz", "origin_policy": "concept_origin",
+    },
+    {
+        "id": "su-jianlin", "name": "苏剑林",
+        "aliases": ("苏剑林", "Jianlin Su"), "focus": "语言模型、生成模型、训练目标与数学机制",
+        "homepage": "https://kexue.fm/", "feed_urls": ("https://kexue.fm/feed",),
+        "origin_policy": "concept_origin",
+    },
+    {
+        "id": "jack-clark", "name": "Jack Clark",
+        "aliases": ("Jack Clark",), "focus": "前沿模型、政策与研究趋势",
+        "homepage": "https://jack-clark.net/", "feed_urls": ("https://jack-clark.net/feed/",),
+        "x_handle": "jackclarkSF", "origin_policy": "secondary_only",
+    },
+    {
+        "id": "gary-marcus", "name": "Gary Marcus",
+        "aliases": ("Gary Marcus",), "focus": "AI 能力边界、认知与产业批评",
+        "homepage": "https://garymarcus.substack.com/", "feed_urls": ("https://garymarcus.substack.com/feed",),
+        "x_handle": "GaryMarcus", "origin_policy": "secondary_only",
+    },
+    {
+        "id": "zvi-mowshowitz", "name": "Zvi Mowshowitz",
+        "aliases": ("Zvi Mowshowitz",), "focus": "AI 前沿动态、治理与社区讨论",
+        "homepage": "https://thezvi.substack.com/", "feed_urls": ("https://thezvi.substack.com/feed",),
+        "x_handle": "TheZvi", "origin_policy": "secondary_only",
+    },
+    {
+        "id": "astral-codex-ten", "name": "Scott Alexander",
+        "aliases": ("Scott Alexander", "Astral Codex Ten"), "focus": "理性、AI 与跨学科技术讨论",
+        "homepage": "https://www.astralcodexten.com/", "feed_urls": ("https://www.astralcodexten.com/feed",),
+        "origin_policy": "secondary_only",
+    },
+    {
+        "id": "latent-space", "name": "Latent Space",
+        "aliases": ("Latent Space",), "focus": "AI 工程、模型发布与研究者访谈",
+        "homepage": "https://www.latent.space/", "feed_urls": ("https://www.latent.space/feed",),
+        "x_handle": "latentspacepod", "origin_policy": "secondary_only",
+    },
+    # 无稳定 Feed：保留权威主页与已知 X 入口，供身份核验、可选 X API 和人工复核。
+    {"id": "yann-lecun", "name": "Yann LeCun", "aliases": ("Yann LeCun",), "focus": "JEPA、自监督与 World Model", "homepage": "https://yann.lecun.com/", "feed_urls": (), "x_handle": "ylecun", "origin_policy": "concept_origin"},
+    {"id": "fei-fei-li", "name": "Fei-Fei Li", "aliases": ("Fei-Fei Li", "李飞飞"), "focus": "视觉、空间智能与 World Model", "homepage": "https://profiles.stanford.edu/fei-fei-li", "feed_urls": (), "x_handle": "drfeifei", "origin_policy": "concept_origin"},
+    {"id": "kaiming-he", "name": "Kaiming He", "aliases": ("Kaiming He", "何恺明"), "focus": "架构、自监督与视觉生成", "homepage": "https://kaiminghe.com/", "feed_urls": (), "origin_policy": "concept_origin"},
+    {"id": "yoshua-bengio", "name": "Yoshua Bengio", "aliases": ("Yoshua Bengio",), "focus": "深度学习、世界模型与 AI 安全", "homepage": "https://yoshuabengio.org/", "feed_urls": (), "x_handle": "Yoshua_Bengio", "origin_policy": "concept_origin"},
+    {"id": "richard-sutton", "name": "Richard Sutton", "aliases": ("Richard Sutton",), "focus": "强化学习、持续学习与经验时代", "homepage": "http://incompleteideas.net/", "feed_urls": (), "origin_policy": "concept_origin"},
+    {"id": "sergey-levine", "name": "Sergey Levine", "aliases": ("Sergey Levine",), "focus": "机器人学习、RL 与基础策略", "homepage": "https://people.eecs.berkeley.edu/~svlevine/", "feed_urls": (), "x_handle": "svlevine", "origin_policy": "concept_origin"},
+    {"id": "chelsea-finn", "name": "Chelsea Finn", "aliases": ("Chelsea Finn",), "focus": "元学习、机器人与基础策略", "homepage": "https://ai.stanford.edu/~cbfinn/", "feed_urls": (), "x_handle": "chelseabfinn", "origin_policy": "concept_origin"},
+    {"id": "jim-fan", "name": "Linxi Jim Fan", "aliases": ("Linxi Jim Fan", "Jim Fan"), "focus": "具身 Agent、机器人基础模型与仿真", "homepage": "https://www.jimfan.me/", "feed_urls": (), "x_handle": "DrJimFan", "origin_policy": "concept_origin"},
+    {"id": "percy-liang", "name": "Percy Liang", "aliases": ("Percy Liang",), "focus": "基础模型、Agent 与评测", "homepage": "https://cs.stanford.edu/~pliang/", "feed_urls": (), "x_handle": "percyliang", "origin_policy": "concept_origin"},
+    {"id": "andrew-ng", "name": "Andrew Ng", "aliases": ("Andrew Ng", "吴恩达"), "focus": "AI 产品、学习系统与产业趋势", "homepage": "https://www.andrewng.org/", "feed_urls": (), "x_handle": "AndrewYNg", "origin_policy": "concept_origin"},
+    {"id": "francois-chollet", "name": "François Chollet", "aliases": ("François Chollet", "Francois Chollet"), "focus": "抽象推理、智能测量与新架构", "homepage": "https://fchollet.com/", "feed_urls": (), "x_handle": "fchollet", "origin_policy": "concept_origin"},
+    {"id": "david-ha", "name": "David Ha", "aliases": ("David Ha",), "focus": "World Models、生成与开放研究", "homepage": "https://ha-david.github.io/", "feed_urls": (), "x_handle": "hardmaru", "origin_policy": "concept_origin"},
+    {"id": "jun-zhu", "name": "Jun Zhu", "aliases": ("Jun Zhu", "朱军"), "focus": "概率机器学习、强化学习与基础模型", "homepage": "http://ml.cs.tsinghua.edu.cn/~jun/", "feed_urls": (), "origin_policy": "concept_origin"},
+    {"id": "zhiyuan-liu", "name": "Zhiyuan Liu", "aliases": ("Zhiyuan Liu", "刘知远"), "focus": "语言模型、知识与开放模型", "homepage": "https://nlp.csai.tsinghua.edu.cn/~lzy/", "feed_urls": (), "origin_policy": "concept_origin"},
+    {"id": "jie-tang", "name": "Jie Tang", "aliases": ("Jie Tang", "唐杰"), "focus": "知识、基础模型与科学智能", "homepage": "https://keg.cs.tsinghua.edu.cn/jietang/", "feed_urls": (), "origin_policy": "concept_origin"},
+    {"id": "zhi-hua-zhou", "name": "Zhi-Hua Zhou", "aliases": ("Zhi-Hua Zhou", "周志华"), "focus": "机器学习理论与新学习范式", "homepage": "https://cs.nju.edu.cn/zhouzh/", "feed_urls": (), "origin_policy": "concept_origin"},
+    {"id": "weinan-e", "name": "Weinan E", "aliases": ("Weinan E", "鄂维南"), "focus": "AI for Science、数学与新型模型", "homepage": "https://weinan-e.com/", "feed_urls": (), "origin_policy": "concept_origin"},
+)
+
+
 RESEARCH_SOURCES: tuple[dict, ...] = (
     # tier=established：持续发布正式研究/Technical Report 的官方索引。
     {"url": "https://openai.com/research/index/", "owner": "openai", "tier": "established"},
@@ -262,6 +413,7 @@ RESEARCH_SOURCES: tuple[dict, ...] = (
     {"url": "https://www.moonshot.ai/", "owner": "moonshot", "tier": "verified", "allowed_domains": ("moonshot.ai", "kimi.com")},
     {"url": "https://z.ai/blog", "owner": "zhipu", "tier": "established", "allowed_domains": ("z.ai", "zhipuai.cn")},
     {"url": "https://www.deepseek.com/en/transparency/", "owner": "deepseek", "tier": "established", "allowed_domains": ("deepseek.com", "github.com")},
+    {"url": "https://api-docs.deepseek.com/updates/", "owner": "deepseek", "tier": "verified", "allowed_domains": ("api-docs.deepseek.com", "deepseek.com"), "page_mode": "changelog"},
     {"url": "https://chat.stepfun.com/research/en", "owner": "stepfun", "tier": "established", "allowed_domains": ("stepfun.com", "chat.stepfun.com", "github.com")},
     {"url": "https://www.minimax.io/blog", "owner": "minimax", "tier": "established"},
     {"url": "https://modelbest.cn/", "owner": "modelbest", "tier": "established"},
@@ -272,6 +424,39 @@ RESEARCH_SOURCES: tuple[dict, ...] = (
     {"url": "https://crfm.stanford.edu/", "owner": "stanford-crfm", "tier": "verified"},
     {"url": "https://www.ri.cmu.edu/publications/", "owner": "cmu-ri", "tier": "verified"},
     {"url": "https://wp.nyu.edu/cilvr/cilvr-group-publications/", "owner": "nyu-cilvr", "tier": "verified"},
+)
+
+
+# 官方 GitHub 组织是“发布事件雷达”，不是范式背书。仓库链接外部一手
+# 论文/技术页时优先使用外部原点；没有外链时，只有结构化 README 与代码
+# 接口真正定义了原创 intervention 才能形成原生实现假说。stars 不能单独晋级。
+OFFICIAL_GITHUB_ORGANIZATIONS: tuple[dict, ...] = (
+    {"login": "openai", "owner": "openai"},
+    {"login": "anthropics", "owner": "anthropic"},
+    {"login": "google-deepmind", "owner": "google-deepmind"},
+    {"login": "facebookresearch", "owner": "meta-fair"},
+    {"login": "meta-llama", "owner": "meta-fair"},
+    {"login": "microsoft", "owner": "microsoft-research"},
+    {"login": "NVIDIA", "owner": "nvidia-research"},
+    {"login": "apple", "owner": "apple-ml"},
+    {"login": "mistralai", "owner": "mistral"},
+    {"login": "cohere-ai", "owner": "cohere-labs"},
+    {"login": "allenai", "owner": "ai2"},
+    {"login": "huggingface", "owner": "huggingface-research"},
+    {"login": "deepseek-ai", "owner": "deepseek"},
+    {"login": "MoonshotAI", "owner": "moonshot"},
+    {"login": "zai-org", "owner": "zhipu"},
+    {"login": "THUDM", "owner": "zhipu"},
+    {"login": "QwenLM", "owner": "alibaba-qwen"},
+    {"login": "Tencent", "owner": "tencent-hunyuan"},
+    {"login": "bytedance", "owner": "bytedance-seed"},
+    {"login": "stepfun-ai", "owner": "stepfun"},
+    {"login": "MiniMax-AI", "owner": "minimax"},
+    {"login": "OpenBMB", "owner": "modelbest"},
+    {"login": "OpenGVLab", "owner": "shanghai-ai-lab"},
+    {"login": "InternLM", "owner": "shanghai-ai-lab"},
+    {"login": "FlagOpen", "owner": "baai"},
+    {"login": "PaddlePaddle", "owner": "baidu"},
 )
 
 
@@ -302,7 +487,24 @@ def default_monitored_organization_aliases() -> list[str]:
 
 
 def default_researcher_aliases() -> list[str]:
-    return [alias for item in RESEARCHERS for alias in item["aliases"]]
+    values = [alias for item in RESEARCHERS for alias in item["aliases"]]
+    values.extend(alias for item in KOL_SOURCES for alias in item["aliases"])
+    return list(dict.fromkeys(values))
+
+
+def default_kol_x_accounts() -> list[str]:
+    return [
+        str(item["x_handle"])
+        for item in KOL_SOURCES
+        if str(item.get("x_handle", "")).strip()
+    ]
+
+
+def kol_source_by_id(source_id: str) -> dict | None:
+    return next(
+        (item for item in KOL_SOURCES if item["id"] == source_id),
+        None,
+    )
 
 
 def source_record(url: str) -> dict | None:

@@ -199,6 +199,7 @@ def main() -> int:
                 "smokecheck.py",
                 "setup_env.py",
                 "runtime_clock.py",
+                "research_watchlist.py",
                 "test_hf.py",
                 "test_hf_spaces.py",
             ],

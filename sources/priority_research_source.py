@@ -22,6 +22,7 @@ from paradigms.publication import (
     looks_like_linked_research_document,
 )
 from paradigms.reputation import source_identity, source_link_allowed
+from research_watchlist import source_record
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class _ResearchLink:
     title: str
     url: str
     published_at: str = ""
+    body_hint: str = ""
 
 
 class PriorityResearchPageSource:
@@ -138,6 +140,17 @@ class PriorityResearchPageSource:
                     logger.warning("官方研究入口返回失败 %s: %s", index_url, exc)
                     continue
                 links = _discover_index_links(response.text, str(response.url))
+                metadata = source_record(index_url) or {}
+                if metadata.get("page_mode") == "changelog":
+                    latest = _discover_latest_changelog_entry(
+                        response.text,
+                        index_url,
+                        cutoff,
+                    )
+                    # Changelog pages often use headings rather than detail links.
+                    # Treat the newest dated section as one official release origin,
+                    # not the whole multi-year page and not a parse failure.
+                    links = [latest] if latest else []
                 allowed_links = [
                     link for link in links if source_link_allowed(index_url, link.url)
                 ]
@@ -210,7 +223,17 @@ class PriorityResearchPageSource:
                     self.page_coverage[index_url].get("detail_failures", 0)
                 ) + 1
                 continue
-            if _is_pdf_response(response, str(response.url)):
+            if link.body_hint:
+                article = _ArticleParser(str(response.url))
+                article.feed(response.text)
+                title = link.title or article.title
+                body = link.body_hint
+                authors = article.authors
+                site_name = article.site_name
+                published = link.published_at
+                modified = article.modified_at
+                linked_documents = []
+            elif _is_pdf_response(response, str(response.url)):
                 try:
                     title, body, authors = _extract_pdf_document(response.content)
                 except Exception as exc:
@@ -218,6 +241,7 @@ class PriorityResearchPageSource:
                     continue
                 site_name = ""
                 published = link.published_at
+                modified = ""
                 linked_documents: list[dict[str, str]] = []
             else:
                 article = _ArticleParser(str(response.url))
@@ -226,11 +250,10 @@ class PriorityResearchPageSource:
                 body = _compact_text(article.text)
                 authors = article.authors
                 site_name = article.site_name
-                published = (
-                    article.modified_at
-                    or article.published_at
-                    or link.published_at
-                )
+                # dateModified 只表示网页最近被编辑，不能把一年前发布的工作
+                # 伪装成本周新技术。原始发布日期与修改时间必须分栏保留。
+                published = article.published_at or link.published_at
+                modified = article.modified_at
                 linked_documents = [
                     {"title": label or "linked research document", "url": url}
                     for label, url in article.links
@@ -246,6 +269,9 @@ class PriorityResearchPageSource:
                 )
             published_dt = _parse_date(published)
             if published_dt and published_dt < cutoff:
+                continue
+            modified_dt = _parse_date(modified)
+            if not published_dt and modified_dt and modified_dt < cutoff:
                 continue
             title = title or link.title
             if not title or len(body) < 120:
@@ -281,7 +307,9 @@ class PriorityResearchPageSource:
                     source=self.source_name,
                     evidence_type=EvidenceType.TECHNICAL_BLOG,
                     title=title,
-                    url=str(response.url),
+                    # 永久保留索引发现的稳定 URL；HTTP 跳转终点可能是带
+                    # Expires/Signature 的临时 CDN 下载地址。
+                    url=link.url,
                     summary=body[:summary_limit],
                     published_at=(published_dt.isoformat() if published_dt else published),
                     authors=list(dict.fromkeys(authors)),
@@ -297,6 +325,17 @@ class PriorityResearchPageSource:
                         "publisher_tier": publisher_tier,
                         "publisher_evidence": publisher_evidence,
                         "research_index_url": index_url,
+                        "canonical_source_url": link.url,
+                        "source_published_at": published,
+                        "source_modified_at": modified,
+                        "date_basis": (
+                            "published"
+                            if published_dt
+                            else "modified_only"
+                            if modified_dt
+                            else "unknown"
+                        ),
+                        "resolved_fetch_host": urlparse(str(response.url)).netloc,
                         "linked_research_documents": linked_documents,
                         "source_owner_id": str(source_meta.get("owner", "")) if source_meta else "",
                     },
@@ -531,6 +570,45 @@ def _discover_index_links(html_text: str, base_url: str) -> list[_ResearchLink]:
         by_url.values(),
         key=lambda item: (bool(item.published_at), item.published_at),
         reverse=True,
+    )
+
+
+def _discover_latest_changelog_entry(
+    html_text: str,
+    page_url: str,
+    cutoff: datetime,
+) -> _ResearchLink | None:
+    """Extract the newest dated section from a first-party changelog page."""
+
+    parser = _ArticleParser(page_url)
+    parser.feed(html_text)
+    text = _compact_text(parser.text)
+    matches = list(
+        re.finditer(r"\b(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})\b", text)
+    )
+    dated: list[tuple[datetime, re.Match[str]]] = []
+    for match in matches:
+        published = _parse_date(match.group(1))
+        if published and published >= cutoff:
+            dated.append((published, match))
+    if not dated:
+        return None
+    published, match = max(dated, key=lambda value: value[0])
+    next_start = next(
+        (value.start() for value in matches if value.start() > match.start()),
+        min(match.end() + 5000, len(text)),
+    )
+    section = _compact_text(text[match.end() : next_start])[:5000]
+    if len(section) < 80:
+        section = _compact_text(text[match.start() : match.end() + 5000])[:5000]
+    title = re.split(r"(?<=[.!?。！？])\s+", section, maxsplit=1)[0][:220]
+    if len(title) < 5:
+        title = parser.title or f"Official update {published.date().isoformat()}"
+    return _ResearchLink(
+        title=title,
+        url=page_url,
+        published_at=published.date().isoformat(),
+        body_hint=section,
     )
 
 

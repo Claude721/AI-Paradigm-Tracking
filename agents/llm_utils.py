@@ -39,7 +39,7 @@ def _ollama_defaults() -> dict[str, str]:
     """ollama 的默认值优先从 OLLAMA_* 环境变量读取"""
     return {
         "base_url": config.OLLAMA_BASE_URL or "http://localhost:11434/v1",
-        "model": config.OLLAMA_MODEL or "qwen3:14b",
+        "model": config.OLLAMA_MODEL or "qwen3.7:14b",
         "api_key": "ollama",
     }
 

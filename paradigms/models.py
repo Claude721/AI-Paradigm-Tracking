@@ -1,7 +1,8 @@
 """技术范式雷达的领域模型。
 
 与旧版 ``RawProject`` 不同，这里的最小单位是“证据”，最终聚合单位是
-“技术范式”。GitHub 仓库、社区帖子只作为证据，不能单独定义一个范式。
+“技术范式”。论文、原创技术文章与原生实现都只能先提出机制假说；是否形成
+路线仍由技术 Rubric、发布者身份和外部承接共同决定。
 """
 
 from __future__ import annotations
@@ -9,16 +10,20 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 class EvidenceType(str, Enum):
     PRIMARY_PAPER = "primary_paper"
     TECHNICAL_BLOG = "technical_blog"
+    CONCEPT_ESSAY = "concept_essay"
+    ORIGINAL_IMPLEMENTATION = "original_implementation"
     PEER_REVIEW = "peer_review"
     INDEPENDENT_REPLICATION = "independent_replication"
     IMPLEMENTATION = "implementation"
@@ -26,6 +31,30 @@ class EvidenceType(str, Enum):
     COMMUNITY_DISCUSSION = "community_discussion"
     SECONDARY_INTERPRETATION = "secondary_interpretation"
     PRODUCT_ADOPTION = "product_adoption"
+
+
+# 能够提出一个新机制假说的“一手原点”。这是统一的领域契约，避免发现、
+# 评分、持久化和报告各自维护一套不一致的论文/博客白名单。
+ORIGIN_EVIDENCE_TYPES = frozenset(
+    {
+        EvidenceType.PRIMARY_PAPER,
+        EvidenceType.TECHNICAL_BLOG,
+        EvidenceType.CONCEPT_ESSAY,
+        EvidenceType.ORIGINAL_IMPLEMENTATION,
+    }
+)
+
+
+def nonnegative_number(value: object, default: float = 0.0) -> float:
+    """Coerce untrusted counters without allowing NaN/Infinity downstream."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        number = float(default)
+    if not math.isfinite(number):
+        number = float(default)
+    return max(number, 0.0)
 
 
 def safe_public_contact_target(label: str, target: str) -> str:
@@ -65,6 +94,54 @@ def safe_public_contact_target(label: str, target: str) -> str:
     return value if address.is_global else ""
 
 
+_SIGNED_URL_QUERY_KEYS = {
+    "expires",
+    "policy",
+    "signature",
+    "x-amz-algorithm",
+    "x-amz-credential",
+    "x-amz-date",
+    "x-amz-expires",
+    "x-amz-security-token",
+    "x-amz-signature",
+    "x-amz-signedheaders",
+}
+
+
+def _canonical_material_url(value: str) -> str:
+    """Canonicalize durable material links and reject expiring object URLs."""
+
+    safe = safe_public_contact_target("source", value)
+    if not safe:
+        return ""
+    parsed = urlsplit(safe)
+    hostname = (parsed.hostname or "").casefold()
+    # Hugging Face may redirect a stable resolve URL to a short-lived Xet/S3
+    # download. Such a URL works during the run but is guaranteed to rot later.
+    if (
+        hostname.endswith(".cdn.hf.co")
+        or hostname in {"cdn-lfs.huggingface.co", "cdn-lfs-us-1.huggingface.co"}
+        or hostname.endswith(".xethub.hf.co")
+    ):
+        return ""
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    query_keys = {key.casefold() for key, _ in query_pairs}
+    if query_keys & _SIGNED_URL_QUERY_KEYS:
+        return ""
+    path = parsed.path
+    if hostname == "huggingface.co" and "/resolve/" in path:
+        path = path.replace("/resolve/", "/blob/", 1)
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            path,
+            urlencode(query_pairs, doseq=True),
+            "",
+        )
+    )
+
+
 def primary_material_url(evidence: "TechnicalEvidence") -> str:
     """Return a direct, public first-party/academic material URL.
 
@@ -72,7 +149,12 @@ def primary_material_url(evidence: "TechnicalEvidence") -> str:
     the original work the user must be able to open from the report.
     """
 
-    value = safe_public_contact_target("source", evidence.url)
+    # Fetchers may follow a stable public URL to a signed CDN object. Preserve
+    # their explicitly recorded canonical input URL instead of reporting the
+    # transient response URL.
+    value = _canonical_material_url(
+        str(evidence.raw.get("canonical_source_url", ""))
+    ) or _canonical_material_url(evidence.url)
     if not value:
         return ""
     parsed = urlsplit(value)
@@ -95,6 +177,124 @@ def primary_material_url(evidence: "TechnicalEvidence") -> str:
             else ""
         )
     return value
+
+
+def _evidence_datetime(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def assess_candidate_freshness(
+    candidate: "ParadigmCandidate",
+    *,
+    reference_time: datetime | None = None,
+    window_days: int = 30,
+) -> dict[str, Any]:
+    """Separate a newly published route from an old route with new uptake.
+
+    A clean database only means "not seen by this installation". It must never
+    turn an old, undated official page into a current-week breakthrough.
+    """
+
+    now = reference_time or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("reference_time must be timezone-aware")
+    now = now.astimezone(timezone.utc)
+    cutoff = now - timedelta(days=max(window_days, 1))
+    primary_types = ORIGIN_EVIDENCE_TYPES
+    uptake_types = {
+        EvidenceType.PEER_REVIEW,
+        EvidenceType.INDEPENDENT_REPLICATION,
+        EvidenceType.IMPLEMENTATION,
+        EvidenceType.CITATION,
+        EvidenceType.COMMUNITY_DISCUSSION,
+        EvidenceType.SECONDARY_INTERPRETATION,
+        EvidenceType.PRODUCT_ADOPTION,
+    }
+    dated_primary: list[tuple[datetime, TechnicalEvidence]] = []
+    undated_primary: list[TechnicalEvidence] = []
+    current_uptake: list[TechnicalEvidence] = []
+    for evidence in candidate.evidence:
+        if evidence.evidence_type in primary_types:
+            published = _evidence_datetime(evidence.published_at)
+            if published:
+                dated_primary.append((published, evidence))
+            else:
+                undated_primary.append(evidence)
+            continue
+        if evidence.evidence_type not in uptake_types:
+            continue
+        if evidence.raw.get("indexed_discovery_only"):
+            continue
+        # 发布者自己的公告、仓库与作者自发帖只能证明“确实发布过”，
+        # 不能证明外部社区正在承接。否则新建一个官方仓库就会把旧论文
+        # 错判为本期重新升温。
+        relationship = str(evidence.raw.get("relationship", "")).casefold()
+        independence = str(evidence.raw.get("independence", "")).casefold()
+        if relationship in {
+            "author_self_release",
+            "official_release_repository",
+            "publisher_self_release",
+        } or independence in {"author", "publisher", "self"}:
+            continue
+        published = _evidence_datetime(evidence.published_at)
+        has_current_delta = bool(evidence.raw.get("metric_delta"))
+        if (published and cutoff <= published <= now + timedelta(days=1)) or has_current_delta:
+            current_uptake.append(evidence)
+
+    recent_primary = [
+        evidence
+        for published, evidence in dated_primary
+        if cutoff <= published <= now + timedelta(days=1)
+    ]
+    latest_primary = max((value for value, _ in dated_primary), default=None)
+    if recent_primary:
+        classification = "recent_primary"
+        decision = "include"
+        reason = "存在窗口内可核验发布日期的一手材料"
+    elif current_uptake:
+        classification = "historical_reactivated"
+        decision = "include"
+        reason = "一手材料不是本期新发布，但存在窗口内独立承接或可核验指标增量"
+    elif dated_primary:
+        classification = "historical_without_current_uptake"
+        decision = "defer"
+        reason = "一手材料早于本期窗口，且没有窗口内独立承接"
+    else:
+        classification = "unknown_date_without_current_uptake"
+        decision = "defer"
+        reason = "一手材料发布日期不可核验，且没有窗口内独立承接"
+    return {
+        "version": "freshness-v1",
+        "classification": classification,
+        "decision": decision,
+        "reason": reason,
+        "window_days": max(window_days, 1),
+        "latest_primary_published_at": (
+            latest_primary.isoformat() if latest_primary else ""
+        ),
+        "recent_primary_urls": [
+            primary_material_url(value) for value in recent_primary
+            if primary_material_url(value)
+        ],
+        "current_uptake_urls": [
+            value.url for value in current_uptake
+            if safe_public_contact_target("source", value.url)
+        ],
+        "undated_primary_count": len(undated_primary),
+    }
 
 
 @dataclass
@@ -120,6 +320,7 @@ class TechnicalEvidence:
             or self.identifiers.get("arxiv")
             or self.identifiers.get("openalex")
             or self.identifiers.get("semantic_scholar")
+            or self.identifiers.get("forum_post")
             or self.url.strip().lower().rstrip("/")
             or self.title.strip().lower()
         )
@@ -338,6 +539,9 @@ class ParadigmCandidate:
     # 加入客观发布者/承接题，决定最终是否进入报告。
     screening_rubric: dict[str, Any] = field(default_factory=dict)
     rubric_assessment: dict[str, Any] = field(default_factory=dict)
+    # 新材料与“第一次进入本地数据库”必须分开。该字段只用于交付时效审计，
+    # 不改变技术 Rubric 的结论。
+    freshness_assessment: dict[str, Any] = field(default_factory=dict)
     total_score: float = 0.0
     status: str = "watch"
     report_kind: str = "new"
@@ -398,7 +602,12 @@ def verified_organization_attribution(
     """
 
     official_organization_release = any(
-        evidence.evidence_type == EvidenceType.TECHNICAL_BLOG
+        evidence.evidence_type
+        in {
+            EvidenceType.TECHNICAL_BLOG,
+            EvidenceType.CONCEPT_ESSAY,
+            EvidenceType.ORIGINAL_IMPLEMENTATION,
+        }
         and str(evidence.raw.get("origin_kind", "")).startswith("official_")
         for evidence in candidate.evidence
     )
@@ -414,10 +623,7 @@ def verified_organization_attribution(
     if not publisher_ready:
         return {}
     for evidence in candidate.evidence:
-        if evidence.evidence_type not in {
-            EvidenceType.PRIMARY_PAPER,
-            EvidenceType.TECHNICAL_BLOG,
-        }:
+        if evidence.evidence_type not in ORIGIN_EVIDENCE_TYPES:
             continue
         organization = evidence.organization.strip()
         source_url = primary_material_url(evidence)
@@ -435,25 +641,140 @@ def normalize_paradigm_name(text: str) -> str:
 
 def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
     """从数据库 JSON 恢复候选，供“仅重新生成报告”模式使用。"""
-    evidence = [technical_evidence_from_dict(item) for item in payload.get("evidence", [])]
+    if not isinstance(payload, dict):
+        raise ValueError("候选状态 payload 必须是 JSON object")
+    _validate_payload_types(
+        payload,
+        "候选状态",
+        strings={
+            "key", "name", "thesis", "problem_shift", "mechanism", "why_now",
+            "evidence_assessment", "trend_interpretation", "route_family",
+            "background", "design_philosophy", "technical_explanation",
+            "application_value", "secondary_discussion_summary", "publisher_tier",
+            "admission_reason", "marketing_overclaim_risk", "novelty_type",
+            "lineage_parent", "status", "report_kind", "rejection_reason",
+            "last_execution_failure_at",
+        },
+        lists={
+            "open_questions", "objective_momentum_signals", "publisher_evidence",
+            "innovation_types", "lineage_path", "keywords", "evidence",
+            "researchers",
+        },
+        mappings={
+            "mental_model", "community_coverage", "screening_rubric",
+            "rubric_assessment", "freshness_assessment",
+        },
+        numbers={
+            "novelty_score", "solidity_score", "scope_score", "momentum_score",
+            "researcher_score", "volume_score", "incremental_penalty",
+            "total_score", "execution_failure_count",
+        },
+    )
+    raw_evidence = payload.get("evidence", [])
+    raw_researchers = payload.get("researchers", [])
+    if not isinstance(raw_evidence, list) or not isinstance(raw_researchers, list):
+        raise ValueError("候选状态中的 evidence/researchers 必须是数组")
+    evidence = [technical_evidence_from_dict(item) for item in raw_evidence]
     researchers = [
-        ResearcherProfile(**item) for item in payload.get("researchers", [])
+        _researcher_profile_from_dict(item)
+        for item in raw_researchers
     ]
-    fields = {
+    known = {value.name for value in fields(ParadigmCandidate)}
+    payload_fields = {
         key: value
         for key, value in payload.items()
-        if key not in {"evidence", "researchers"}
+        if key in known and key not in {"evidence", "researchers"}
     }
-    return ParadigmCandidate(**fields, evidence=evidence, researchers=researchers)
+    return ParadigmCandidate(
+        **payload_fields,
+        evidence=evidence,
+        researchers=researchers,
+    )
 
 
 def technical_evidence_from_dict(payload: dict[str, Any]) -> TechnicalEvidence:
-    return TechnicalEvidence(
-        **{
-            **payload,
-            "evidence_type": EvidenceType(payload["evidence_type"]),
-        }
+    if not isinstance(payload, dict):
+        raise ValueError("证据状态 payload 必须是 JSON object")
+    _validate_payload_types(
+        payload,
+        "证据状态",
+        strings={
+            "source", "evidence_type", "title", "url", "summary",
+            "published_at", "organization",
+        },
+        lists={"authors", "keywords"},
+        mappings={"metrics", "identifiers", "raw"},
     )
+    values = _known_dataclass_fields(TechnicalEvidence, payload)
+    if "evidence_type" not in values:
+        raise ValueError("证据状态缺少 evidence_type")
+    values["evidence_type"] = EvidenceType(values["evidence_type"])
+    return TechnicalEvidence(**values)
+
+
+def _researcher_profile_from_dict(payload: dict[str, Any]) -> ResearcherProfile:
+    _validate_payload_types(
+        payload,
+        "研究者状态",
+        strings={
+            "name", "role", "current_affiliation", "research_trajectory",
+            "public_email", "public_email_source", "background_summary",
+            "public_bio_excerpt", "key_person_reason",
+        },
+        lists={
+            "prior_affiliations", "representative_works", "contact_search_notes",
+        },
+        mappings={"profile_urls", "identifiers"},
+        numbers={"trajectory_consistency"},
+    )
+    return ResearcherProfile(
+        **_known_dataclass_fields(ResearcherProfile, payload)
+    )
+
+
+def _validate_payload_types(
+    payload: dict[str, Any],
+    label: str,
+    *,
+    strings: set[str] | None = None,
+    lists: set[str] | None = None,
+    mappings: set[str] | None = None,
+    numbers: set[str] | None = None,
+) -> None:
+    """Fail closed on domain-shape corruption while allowing retired fields."""
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} payload 必须是 JSON object")
+    expectations = (
+        (strings or set(), str, "字符串"),
+        (lists or set(), list, "数组"),
+        (mappings or set(), dict, "object"),
+        (numbers or set(), (int, float), "数字"),
+    )
+    for names, expected, expected_label in expectations:
+        for name in names:
+            if name in payload and not isinstance(payload[name], expected):
+                raise ValueError(
+                    f"{label}字段 {name} 必须是{expected_label}"
+                )
+    for name in numbers or set():
+        if name in payload and not math.isfinite(float(payload[name])):
+            raise ValueError(f"{label}字段 {name} 必须是有限数字")
+
+
+def _known_dataclass_fields(model, payload: dict[str, Any]) -> dict[str, Any]:
+    """Ignore retired JSON fields while keeping malformed rows fail-closed.
+
+    State artifacts can outlive a code revision. Additive dataclass changes are
+    handled by defaults, and retired fields should not make a healthy older
+    artifact unrestorable. Structural type errors still raise so migration can
+    fall back to an older immutable snapshot instead of hiding corruption.
+    """
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"{model.__name__} payload 必须是 JSON object")
+    known = {value.name for value in fields(model)}
+    return {key: value for key, value in payload.items() if key in known}
 
 
 def material_metric_signature(
@@ -486,7 +807,4 @@ def _metric_bucket(value: object) -> int:
 
 
 def _numeric(value: object) -> float:
-    try:
-        return max(float(value or 0), 0.0)
-    except (TypeError, ValueError):
-        return 0.0
+    return nonnegative_number(value)

@@ -75,6 +75,33 @@ def collect_checks() -> list[Check]:
             f"已配置 {len(config.RESEARCH_FEED_URLS)} 个 Feed" if config.RESEARCH_FEED_URLS else "尚未配置 RESEARCH_FEED_URLS",
         ),
         Check(
+            "LessWrong / Alignment Forum RSS",
+            "原创思想与概念机制",
+            (
+                "ready"
+                if config.LESSWRONG_SOURCE_ENABLED
+                or config.ALIGNMENT_FORUM_SOURCE_ENABLED
+                else "degraded"
+            ),
+            (
+                f"公开 RSS 已启用；LessWrong karma 下限={config.LESSWRONG_KARMA_THRESHOLD}；"
+                "阈值不是精确帖子互动量"
+                if config.LESSWRONG_SOURCE_ENABLED
+                or config.ALIGNMENT_FORUM_SOURCE_ENABLED
+                else "两个高信号论坛源均已关闭"
+            ),
+        ),
+        Check(
+            "手工 KOL Feed",
+            "个人原创思想与身份入口",
+            "ready" if config.KOL_SOURCE_ENABLED else "degraded",
+            (
+                f"内置目录已启用；自定义 Feed {len(config.KOL_CUSTOM_FEED_URLS)} 个"
+                if config.KOL_SOURCE_ENABLED
+                else "已关闭个人思想源自动读取"
+            ),
+        ),
+        Check(
             "高优先级官方研究页面",
             "Technical Report/官方发布",
             "ready" if config.PRIORITY_RESEARCH_PAGES else "missing",
@@ -189,6 +216,10 @@ def collect_checks() -> list[Check]:
 
 _BOOLEAN_ENVIRONMENT_KEYS = (
     "SEMANTIC_SCHOLAR_ENABLED",
+    "LESSWRONG_SOURCE_ENABLED",
+    "ALIGNMENT_FORUM_SOURCE_ENABLED",
+    "KOL_SOURCE_ENABLED",
+    "KOL_X_SOURCE_ENABLED",
     "TAVILY_SOCIAL_SEARCH_ENABLED",
     "REDDIT_API_ACCESS_APPROVED",
     "FOLLOW_BUILDERS_ENABLED",
@@ -203,6 +234,7 @@ _BOOLEAN_ENVIRONMENT_KEYS = (
 _INTEGER_ENVIRONMENT_RANGES: dict[str, tuple[int, int | None]] = {
     "LLM_REQUEST_TIMEOUT_SECONDS": (30, None),
     "SMOKE_CHECK_TIMEOUT_SECONDS": (5, 120),
+    "LESSWRONG_KARMA_THRESHOLD": (0, 500),
     "TAVILY_REQUEST_SAFETY_LIMIT": (0, None),
     "PRIORITY_RESEARCH_LINK_SAFETY_LIMIT": (0, None),
     "PRIORITY_RESEARCH_CONCURRENCY": (1, 12),
@@ -297,6 +329,8 @@ def _source_endpoint_syntax_check() -> Check:
         invalid.append("PRIORITY_RESEARCH_PAGES")
     if any(not valid_http(value) for value in config.RESEARCH_FEED_URLS):
         invalid.append("RESEARCH_FEED_URLS")
+    if any(not valid_http(value) for value in config.KOL_CUSTOM_FEED_URLS):
+        invalid.append("KOL_CUSTOM_FEED_URLS")
     follow_base = config.FOLLOW_BUILDERS_FEED_URL.strip()
     if config.FOLLOW_BUILDERS_ENABLED:
         parsed_follow = urlparse(follow_base)

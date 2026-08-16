@@ -1,4 +1,4 @@
-"""使用 LLM 从论文/技术博客中抽取“范式假说”，不做热度先验。"""
+"""使用 LLM 从一手技术材料中抽取“范式假说”，不做热度先验。"""
 
 from __future__ import annotations
 
@@ -46,7 +46,26 @@ class ParadigmAnalyzer:
 
         async def guarded(item: TechnicalEvidence) -> list[ParadigmExtraction]:
             async with semaphore:
-                return await self.extract(item)
+                try:
+                    values = await self.extract(item)
+                except Exception as exc:
+                    # ``extract`` already converts ordinary LLM/JSON failures
+                    # into a retryable placeholder. This outer boundary catches
+                    # programming/data edge cases so one malformed origin cannot
+                    # cancel healthy peers in asyncio.gather.
+                    logger.exception(
+                        "范式抽取发生未隔离异常 [%s]；仅保留该原点待重试",
+                        item.title[:80],
+                    )
+                    return [
+                        self._failed_extraction(
+                            item,
+                            f"抽取未隔离异常: {type(exc).__name__}",
+                        )
+                    ]
+                if not values:
+                    return [self._failed_extraction(item, "抽取结果意外为空")]
+                return values
 
         batches = await asyncio.gather(*(guarded(item) for item in evidence))
         return [extraction for batch in batches for extraction in batch]
@@ -890,7 +909,12 @@ def _bounded_synthesis_evidence(
     ledger.  Nothing is silently reclassified as rejected or absent.
     """
 
-    primary_types = {"primary_paper", "technical_blog"}
+    primary_types = {
+        "primary_paper",
+        "technical_blog",
+        "concept_essay",
+        "original_implementation",
+    }
     uptake_types = {
         "independent_replication",
         "implementation",

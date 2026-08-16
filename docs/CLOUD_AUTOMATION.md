@@ -5,12 +5,12 @@
 - 每周五 09:15（Asia/Shanghai）由 GitHub 云端运行，本机无需开机。
 - GitHub Actions 页面提供“Run workflow”按钮，可以随时手动执行，并选择 7/30/60/90 天窗口或填写精确 arXiv ID。
 - 手动运行还可以勾选 `reset_state`，强制忽略旧数据库。
-- `smoke_only=true` 时只做小成本真实能力验证：Qwen 必须按契约回复 `OK`；arXiv、Hugging Face、OpenAlex、GitHub 等单端点能力只发一个最小请求，Follow Builders、OpenReview、官方研究页和 RSS 最多按配置顺序 failover 5 个入口并在首个成功后停止；Tavily 只消耗一个 basic request，SMTP 只登录不发信。每项默认 30 秒总时限，不会调用生产召回器、生成报告或改动去重数据库。
+- `smoke_only=true` 时只做小成本真实能力验证：Qwen 必须按契约回复 `OK`；arXiv、Hugging Face、OpenAlex、GitHub 等单端点能力只发一个最小请求，Follow Builders、OpenReview、官方研究页、LessWrong/KOL RSS 最多按配置顺序 failover 5 个入口并在首个成功后停止；Tavily 只消耗一个 basic request，SMTP 只登录不发信。每项默认 30 秒总时限，不会调用生产召回器、生成报告或改动去重数据库。
 - 自动与手动触发都执行 `python main.py`，报告生成后都会发送邮件。
-- 研究检查点、报告渲染和邮件投递已经解耦。研究完成后先写入持久化 outbox；报告或 SMTP 失败会让任务失败，但不会撤销已完成研究，也不会把该报告登记成已成功交付。下一次完整运行先续投旧 outbox，再开始新研究。
-- 报告若包含英文长段、评分表、字段拼装、缺少关键人物/公开检索记录或缺少任一路线的一手链接，会先自动重写一次；仍不合格则任务失败且不发送邮件。人物与原文索引由结构化证据确定性生成，不依赖模型抄写。
+- 研究检查点、报告渲染和邮件投递已经解耦。研究完成后先写入持久化 outbox；报告或 SMTP 失败会让任务失败，但不会撤销已完成研究，也不会把该报告登记成已成功交付。下一次进程只续投旧 outbox 并安全退出；云端在新状态 artifact 上传成功后会自动排队第二个完整研究 run，避免同一 90 分钟 job 叠加两类长任务，也避免周五研究被历史续投吞掉。
+- 报告若包含英文长段、评分表、字段拼装、缺少关键人物/公开检索记录或缺少任一路线的一手链接，会先自动重写一次；仍不合格则任务失败且不发送邮件。人物与原文索引由结构化证据确定性生成，不依赖模型抄写；全文每一个 HTTP(S) URL 都必须原样来自证据或人物档案，一个有效原文不能掩盖另一个猜测链接。
 - 成功邮件除研究 Memo 外，还会附带本轮结构化筛选审计和运行日志；审计记录信源返回量、筛选理由及各阶段 token 用量，不保存 prompt、模型正文或私有推理。
-- 去重数据库会在生产运行结束后以 `always()` 语义保存为私有 Actions artifact，包括报告/SMTP 失败后留下的研究检查点与 outbox。旧版兼容 schema 会先由应用迁移和校验，不能只因元数据版本变化就丢弃状态。除非手动勾选 `reset_state=true`，状态缺失、损坏或不兼容都会 fail closed，不会静默冷启动。
+- 去重数据库会在生产运行结束后以 `always()` 语义保存为私有 Actions artifact，包括报告/SMTP 失败后留下的研究检查点与 outbox。当前 schema v5 除 SQLite `quick_check`、表/字段迁移外，还会逐行反序列化证据、候选、outbox 与历史交付 JSON，并核对 fingerprint/key；最新 artifact 即使数据库页完整、但领域 payload 已损坏，也会被拒绝并继续尝试更早的不可变快照。除非手动勾选 `reset_state=true`，所有快照均缺失、损坏或不兼容都会 fail closed，不会静默冷启动。
 - 工作流先在清空生产配置、拒绝网络和忽略 `.env` 的子进程中运行完整离线单元测试、无第三方包的失败提醒导入检查与静态编译，再接触生产状态和真实接口。任一普通生产步骤失败时，最后的 `always() && failure()` 步骤会尝试发送独立失败提醒，并指出首个失败步骤、运行 commit 与离线失败用例；不会再把回归测试失败误报成研究主流程失败。GitHub 直接取消整个 job、Runner 宕机或达到 90 分钟硬超时时，任何后置步骤都无法保证执行，因此必须依靠软预算主动收尾。若运行成功但召回、研究或交付仍未闭合，邮件主题会明确标注 `[研究未完成]`，审计会区分 Rubric 淘汰与运行延后；它不能被理解为“本期无新信号”。
 
 ## 1. 私有 GitHub 仓库
@@ -36,7 +36,7 @@
 | `REDDIT_CLIENT_ID` | 否 | Reddit 批准 Data API 访问后创建的 OAuth Client ID |
 | `REDDIT_CLIENT_SECRET` | 否 | 对应 OAuth Client Secret；不得放在 Variable |
 
-不要创建名为 `GITHUB_TOKEN` 的 Secret。GitHub 会为每次运行自动提供权限受限的临时 token，工作流已直接使用。
+不要创建名为 `GITHUB_TOKEN` 的 Secret。GitHub 会为每次运行自动提供权限受限的临时 token，工作流已直接使用。工作流声明 `actions: write` 只用于在历史续投完成并成功保存状态后触发下一次 `workflow_dispatch`；代码仍是 `contents: read`，不会推送或改写仓库。
 
 ## 3. 配置 Actions Variables
 
@@ -49,6 +49,12 @@
 | `OPENREVIEW_VENUES` | 逗号分隔的 venue id |
 | `SEMANTIC_SCHOLAR_ENABLED` | 没有获批 Key 时填 `false`；只有同时创建 Key Secret 时才填 `true` |
 | `RESEARCH_FEED_URLS` | 已验证的官方 RSS/Atom 地址，逗号分隔 |
+| `LESSWRONG_SOURCE_ENABLED` | 可选；默认 `true`，使用公开官方 RSS，无需 Secret |
+| `LESSWRONG_KARMA_THRESHOLD` | 可选；默认 `30`，只表示 frontpage Feed 的 karma 入选下限 |
+| `ALIGNMENT_FORUM_SOURCE_ENABLED` | 可选；默认 `true`，使用公开官方 RSS |
+| `KOL_SOURCE_ENABLED` | 可选；默认 `true`，读取代码内手工核验的个人 Feed |
+| `KOL_CUSTOM_FEED_URLS` | 可选自定义 Feed；因身份未内置核验，默认只作二次解读 |
+| `KOL_X_SOURCE_ENABLED` | 可选；默认 `true`，但只有配置 X Bearer Token 才读取内置 handle 的近期短文 |
 | `RESEARCH_WATCHLIST_MODE` | 推荐 `merge`；自定义值追加到仓库内置目录，只有明确需要时才用 `replace` |
 | `PRIORITY_RESEARCH_PAGES` | 可选的额外官方研究索引；留空使用内置海内外目录，追加页面不会自动成为权威背书 |
 | `PRIORITY_RESEARCH_LINK_SAFETY_LIMIT` | 官方入口 HTTP 抓取熔断；默认 `0`，读取日期窗口内全部候选链接 |
@@ -78,13 +84,13 @@
 | `PARADIGM_DEEP_BATCH_SIZE` | 推荐 `1`；深挖检查点粒度，避免半完成档案入库 |
 | `EMAIL_MAX_ATTACHMENT_BYTES` | 推荐 `10000000`；报告异常膨胀时阻断发送并保留 outbox |
 
-不配置变量时，RSS 信源为空；研究入口、组织与重点研究者使用仓库中的版本化默认目录，不影响工作流语法。若仓库已有旧版 `PRIORITY_RESEARCH_PAGES` 或 `ESTABLISHED_RESEARCH_ORGANIZATIONS` 长名单，`merge` 会保留它们并同时加载新默认目录，不会冻结后续更新。
+不配置变量时，自定义研究 RSS 为空，但 LessWrong、Alignment Forum 与内置 KOL Feed 默认启用；研究入口、组织与重点研究者使用仓库中的版本化默认目录，不影响工作流语法。若仓库已有旧版 `PRIORITY_RESEARCH_PAGES` 或 `ESTABLISHED_RESEARCH_ORGANIZATIONS` 长名单，`merge` 会保留它们并同时加载新默认目录，不会冻结后续更新。
 
 静态体检会直接拒绝拼错的布尔值、非整数、越界并发/超时值，以及格式错误的官方页面、Feed、Follow Builders 和 OpenReview venue，而不是沿用默认值继续运行。例如 `flase`、`three-thousand`、`PARADIGM_REPORT_ROUTE_CONCURRENCY=99` 或缺少 `https://` 的页面地址都会在访问状态 artifact 和真实 API 之前失败，并在告警邮件中列出变量名而不回显可能含凭据的完整 URL。
 
-GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留空时同时发现社区和普通技术网页，结果仍只算索引线索。Rubric 与前沿覆盖地图都随代码提交，无需创建 Secret 或 Variable。旧版 `PARADIGM_MAX_ANALYSIS_ITEMS`、`PARADIGM_MAX_DEEP_CANDIDATES` 等 Variable 可以删除；即使保留，新代码也不会读取。Reddit 的 Client ID/Secret 必须和“已批准”开关一起配置；只填密钥但不开启批准开关时，代码不会请求 Reddit API。Semantic Scholar 同理：Secret 留空、Variable 为 `false` 时，代码不会匿名请求。
+GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留空时同时发现社区和普通技术网页，结果仍只算索引线索。LessWrong/KOL RSS、Rubric、前沿覆盖地图和个人目录都随代码提交，无需创建 Secret 或 Variable。旧版 `PARADIGM_MAX_ANALYSIS_ITEMS`、`PARADIGM_MAX_DEEP_CANDIDATES` 等 Variable 可以删除；即使保留，新代码也不会读取。Reddit 的 Client ID/Secret 必须和“已批准”开关一起配置；只填密钥但不开启批准开关时，代码不会请求 Reddit API。Semantic Scholar 同理：Secret 留空、Variable 为 `false` 时，代码不会匿名请求。
 
-跨提交恢复状态会从新到旧校验不可变快照，跳过下载失败、压缩包损坏、缺少数据库或无法迁移的快照；找到最近一份健康 SQLite 后再迁移到当前 schema 并读取前沿覆盖地图版本。它不再因为 commit SHA 或一个可迁移的版本号变化就重置。普通 Prompt、Skill 或报告样式更新会延续跨周历史；覆盖地图升级时仍恢复旧数据库用于证据去重，但程序会用 60 天窗口补扫新加入的技术面。已经分析过且正文未变化的材料不会再次调用 LLM。报告中每条已通过闸门的路线草稿也会按候选证据与写作 Skill 签名保存；总编超时后，下次只补未完成路线并重做轻量开篇，不重烧完整路线写作。存在待交付 outbox 时，本次运行完成它后即退出，不在同一 90 分钟 Job 中叠加新研究；需要最新一周结果时再启动一次正常运行。若找不到任何健康 artifact，工作流会明确失败并要求人工判断；只有确定要建立新基线时才以 `reset_state=true` 运行。
+跨提交恢复状态会从新到旧校验不可变快照，跳过下载失败、压缩包损坏、缺少数据库或无法迁移的快照；找到最近一份健康 SQLite 后再迁移到当前 schema 并读取前沿覆盖地图版本。它不再因为 commit SHA 或一个可迁移的版本号变化就重置。普通 Prompt、Skill 或报告样式更新会延续跨周历史；覆盖地图升级时仍恢复旧数据库用于证据去重，但程序会用 60 天窗口补扫新加入的技术面。已经分析过且正文未变化的材料不会再次调用 LLM。报告中每条已通过闸门的路线草稿也会按候选证据与写作 Skill 签名保存；总编超时后，下次只补未完成路线并重做轻量开篇，不重烧完整路线写作。存在待交付 outbox 时，本次进程完成它后即退出，不在同一 90 分钟 Job 中叠加新研究；工作流会先上传包含“已交付”确认的新状态，再自动 dispatch 一个 `reset_state=false`、`smoke_only=false` 的后续 run。自动 dispatch 失败会让当前任务失败并触发告警，不能静默把续投当成本周研究。若找不到任何健康 artifact，工作流会明确失败并要求人工判断；只有确定要建立新基线时才以 `reset_state=true` 运行。
 
 ## 4. 首次手动验收
 
@@ -107,7 +113,7 @@ GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留�
 - 依赖安装、离线回归、配置体检、状态恢复、主流程、状态/报告/审计上传都有稳定 step id。配置在下载或覆盖跨周状态前 fail fast。失败提醒会报告第一处失败而不是笼统归因给 pipeline；审计 artifact 同时保留 `dependencies.log`、`offline_checks.json/log`、`doctor.log` 和状态准备/恢复日志。普通步骤失败时会尽量保留 `current_run.log`、结构化审计、outbox 和包含 Actions 链接的告警。硬取消/Runner 故障仍是平台边界，不能承诺后置步骤执行。
 - 三类 artifact 都使用包含 `run_id` 的不可变名称；状态恢复选择最近一份未过期快照。这样新上传失败不会先删除上一份健康状态，重新运行也不会与旧 attempt 争抢同名 artifact。
 - 如果连续超过 90 天没有任何可用状态 artifact，下一次生产运行会 fail closed，不会自行当作首跑。人工确认后使用 `reset_state=true` 创建新基线。
-- 代码 commit 变化不会自动丢弃旧状态；兼容的数据库 schema 会迁移。损坏或超出兼容范围时任务会失败，只有用户明确选择 `reset_state` 才冷启动。覆盖地图版本变化会保留旧去重历史并扩大为 60 天补扫。V0 阶段确需清空所有历史时才手动勾选 `reset_state`。
+- 代码 commit 变化不会自动丢弃旧状态；兼容的数据库 schema 会迁移，已退役的 JSON 字段会忽略，字段类型错误、不可解析 JSON、key/fingerprint 不一致则回退上一份快照。所有快照均损坏或超出兼容范围时任务会失败，只有用户明确选择 `reset_state` 才冷启动。覆盖地图版本变化会保留旧去重历史并扩大为 60 天补扫。V0 阶段确需清空所有历史时才手动勾选 `reset_state`。
 - 周报没有合格路线且所有计划材料已完成判断时，仍会成功发送“空雷达”；这是研究结论。若召回覆盖、软预算、人物/一手链接契约或其他 backlog 未闭合，则邮件标题必须标为 `[研究未完成]`，附件只能称为状态/阶段性 memo，不能把尚未分析冒充零创新。
 - GitHub 公共仓库连续 60 天无活动可能停用 scheduled workflow，因此本项目建议使用私有仓库。
 - 修改工作流后，确保更改已经进入默认分支。

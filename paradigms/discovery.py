@@ -13,15 +13,28 @@ from urllib.parse import urlparse
 import config
 from sources.arxiv_source import ArxivSource
 from sources.base import RawProject
+from sources.curated_intelligence_source import (
+    CuratedKOLSource,
+    CuratedKOLXSource,
+    HighSignalForumSource,
+)
 from sources.hf_papers_source import HuggingFacePapersSource
 from sources.follow_builders_source import FollowBuildersSource
 from sources.openalex_source import OpenAlexSource
 from sources.openreview_source import OpenReviewSource
+from sources.official_repository_release_source import (
+    OfficialRepositoryReleaseSource,
+)
 from sources.priority_research_source import PriorityResearchPageSource
 from sources.research_feed_source import ResearchFeedSource
 
 from .landscape import classify_frontier_domains, coverage_report
-from .models import EvidenceType, TechnicalEvidence
+from .models import (
+    ORIGIN_EVIDENCE_TYPES,
+    EvidenceType,
+    TechnicalEvidence,
+    nonnegative_number,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +48,11 @@ class DiscoveryBatch:
 
 
 class ParadigmDiscovery:
-    """发现源只允许论文和技术博客；热榜/社区只作为支持证据。
+    """发现论文、正式技术页、原创思想文章与原生代码机制。
 
     普通领域召回只扫本次任务窗口；较长回补窗口仅用于正式报告、
-    重点研究者与官方研究入口。这是召回车道的语义分工，不是 Top-K。
+    重点研究者、官方研究入口和高信号思想源。这是召回车道的语义分工，
+    不是 Top-K；所有原点后续仍走同一技术与势能闸门。
     """
 
     def __init__(
@@ -73,10 +87,22 @@ class ParadigmDiscovery:
         self.priority_pages = PriorityResearchPageSource(
             lookback_days=self.high_signal_lookback_days
         )
+        self.official_repositories = OfficialRepositoryReleaseSource(
+            lookback_days=self.high_signal_lookback_days
+        )
         self.openalex = OpenAlexSource(
             lookback_days=self.broad_lookback_days
         )
         self.openreview = OpenReviewSource(
+            lookback_days=self.broad_lookback_days
+        )
+        self.kol_feeds = CuratedKOLSource(
+            lookback_days=self.high_signal_lookback_days
+        )
+        self.high_signal_forums = HighSignalForumSource(
+            lookback_days=self.high_signal_lookback_days
+        )
+        self.kol_x = CuratedKOLXSource(
             lookback_days=self.broad_lookback_days
         )
         self.evidence_sources = [
@@ -84,6 +110,9 @@ class ParadigmDiscovery:
             self.openreview,
             ResearchFeedSource(lookback_days=self.high_signal_lookback_days),
             self.priority_pages,
+            self.kol_feeds,
+            self.high_signal_forums,
+            self.kol_x,
         ]
 
     async def run(self) -> DiscoveryBatch:
@@ -92,6 +121,7 @@ class ParadigmDiscovery:
             self.hf,
             self.follow_builders,
             *self.evidence_sources,
+            self.official_repositories,
         ]
         fetched = await asyncio.gather(
             *(self._bounded_fetch(source) for source in sources),
@@ -100,7 +130,9 @@ class ParadigmDiscovery:
         source_health = {
             str(health["source"]): health for _, health in fetched
         }
-        arxiv_raw, hf_raw, follow_raw, *native_batches = batches
+        arxiv_raw, hf_raw, follow_raw, *native_and_repository_batches = batches
+        native_batches = native_and_repository_batches[:-1]
+        repository_batch = native_and_repository_batches[-1]
 
         origins = [_raw_to_origin(item) for item in arxiv_raw]
         supporting = [_hf_to_support(item) for item in hf_raw]
@@ -119,7 +151,22 @@ class ParadigmDiscovery:
             and _within_lookback(item, self.broad_lookback_days)
         )
         for batch in native_batches:
-            origins.extend(batch)
+            origins.extend(
+                item for item in batch if item.evidence_type in ORIGIN_EVIDENCE_TYPES
+            )
+            supporting.extend(
+                item for item in batch if item.evidence_type not in ORIGIN_EVIDENCE_TYPES
+            )
+        origins.extend(
+            item
+            for item in repository_batch
+            if item.evidence_type in ORIGIN_EVIDENCE_TYPES
+        )
+        supporting.extend(
+            item
+            for item in repository_batch
+            if item.evidence_type not in ORIGIN_EVIDENCE_TYPES
+        )
 
         source_counts = {
             "arxiv": len(arxiv_raw),
@@ -131,6 +178,9 @@ class ParadigmDiscovery:
                 source.source_name: len(batch)
                 for source, batch in zip(self.evidence_sources, native_batches)
             }
+        )
+        source_counts[self.official_repositories.source_name] = len(
+            repository_batch
         )
 
         origins = _merge_origins(origins)
@@ -144,24 +194,18 @@ class ParadigmDiscovery:
         origins = sorted(
             origins,
             key=lambda item: (
-                int(item.raw.get("origin_priority", 0) or 0),
+                int(nonnegative_number(item.raw.get("origin_priority", 0))),
                 item.published_at or "",
             ),
             reverse=True,
         )
-        if (
-            config.PARADIGM_DISCOVERY_SAFETY_LIMIT > 0
-            and len(origins) > config.PARADIGM_DISCOVERY_SAFETY_LIMIT
-        ):
-            logger.warning(
-                "触发用户显式配置的 discovery safety limit：%s → %s；"
-                "这只是运行熔断，不代表其余材料未通过研究筛选",
-                len(origins),
-                config.PARADIGM_DISCOVERY_SAFETY_LIMIT,
-            )
-            origins = origins[: config.PARADIGM_DISCOVERY_SAFETY_LIMIT]
+        # ``PARADIGM_DISCOVERY_SAFETY_LIMIT`` can stop further arXiv transport
+        # lanes, and those unexecuted lanes are explicitly marked incomplete.
+        # It must not slice the already fetched cross-source result here: doing
+        # so would discard known origins before the durable pending checkpoint
+        # and repeatedly starve the same tail on every retry.
         logger.info(
-            "范式发现完成：%s 条原始论文/博客，%s 条平台支持信号",
+            "范式发现完成：%s 条一手机制原点，%s 条平台/解读支持信号",
             len(origins),
             len(supporting),
         )
@@ -182,6 +226,10 @@ class ParadigmDiscovery:
         coverage["recall_lanes"] = self.arxiv.recall_coverage()
         coverage["source_health"] = source_health
         coverage["official_pages"] = self.priority_pages.coverage()
+        coverage["official_repositories"] = self.official_repositories.coverage()
+        coverage["curated_kol_sources"] = self.kol_feeds.coverage()
+        coverage["high_signal_forums"] = self.high_signal_forums.coverage()
+        coverage["curated_kol_x"] = self.kol_x.coverage()
         coverage["academic_indexes"] = {
             "arxiv": self.arxiv.coverage(),
             "openalex": self.openalex.coverage(),
@@ -199,7 +247,11 @@ class ParadigmDiscovery:
                 "openalex": self.broad_lookback_days,
                 "openreview_submission_created_at": self.broad_lookback_days,
                 "official_research_pages": self.high_signal_lookback_days,
+                "official_repository_release_events": self.high_signal_lookback_days,
                 "research_feeds": self.high_signal_lookback_days,
+                "curated_kol_feeds": self.high_signal_lookback_days,
+                "lesswrong_alignment_forum": self.high_signal_lookback_days,
+                "curated_kol_x_recent_search": min(self.broad_lookback_days, 7),
             },
         }
         return DiscoveryBatch(
@@ -219,6 +271,10 @@ class ParadigmDiscovery:
                 source.safe_fetch(),
                 timeout=self.source_timeout_seconds,
             )
+            if not isinstance(results, list):
+                raise TypeError(
+                    f"{name} 返回 {type(results).__name__}，预期 list"
+                )
             status = str(getattr(source, "fetch_status", "completed"))
             error = str(getattr(source, "fetch_error", ""))
         except TimeoutError:
@@ -427,8 +483,8 @@ def _merge_origin_raw(current: dict, incoming: dict) -> None:
     """Merge provenance without allowing a weaker index to downgrade identity."""
 
     priority = max(
-        int(current.get("origin_priority", 0) or 0),
-        int(incoming.get("origin_priority", 0) or 0),
+        int(nonnegative_number(current.get("origin_priority", 0))),
+        int(nonnegative_number(incoming.get("origin_priority", 0))),
     )
     tier_rank = {"unknown": 0, "verified": 1, "established": 2}
     current_tier = str(current.get("publisher_tier", "unknown"))
@@ -477,6 +533,14 @@ def _merge_origin_raw(current: dict, incoming: dict) -> None:
     priority_researcher = bool(
         current.get("priority_researcher_match")
     ) or bool(incoming.get("priority_researcher_match"))
+    selection_signals = list(
+        dict.fromkeys(
+            [
+                *(current.get("selection_signals") or []),
+                *(incoming.get("selection_signals") or []),
+            ]
+        )
+    )
 
     current.update(incoming)
     current["origin_priority"] = priority
@@ -497,3 +561,5 @@ def _merge_origin_raw(current: dict, incoming: dict) -> None:
     current["frontier_domains"] = frontier_domains
     current["explicit_seed"] = explicit_seed
     current["priority_researcher_match"] = priority_researcher
+    if selection_signals:
+        current["selection_signals"] = selection_signals

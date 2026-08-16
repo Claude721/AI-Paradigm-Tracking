@@ -1,5 +1,5 @@
 {
-  "version": "2026-07-28.1",
+  "version": "2026-08-15.1",
   "description": "AI 技术范式雷达的版本化前沿覆盖地图。它描述需要持续观察的能力层与产业技术栈，不把具体论文或产品名硬编码为长期规则。",
   "domains": [
     {
@@ -15,8 +15,8 @@
       "label": "推理、强化学习与 Agent",
       "group": "core_models",
       "arxiv_categories": ["cs.AI", "cs.CL", "cs.LG"],
-      "query_phrases": ["reasoning model", "test-time compute", "reinforcement learning reasoning", "agentic learning", "tool-using agent", "agent memory", "software engineering agent", "computer use agent", "program synthesis"],
-      "match_terms": ["reasoning", "test-time compute", "reinforcement learning", "agent", "tool use", "planning", "verifier", "memory", "software engineering", "computer use", "program synthesis", "code model"]
+      "query_phrases": ["reasoning model", "test-time compute", "reinforcement learning reasoning", "agentic learning", "tool-using agent", "agent memory", "software engineering agent", "computer use agent", "program synthesis", "recursive self-improvement", "self-improving agent", "AI scientist"],
+      "match_terms": ["reasoning", "test-time compute", "reinforcement learning", "agent", "tool use", "planning", "verifier", "memory", "software engineering", "computer use", "program synthesis", "code model", "recursive self-improvement", "self-improving agent", "AI scientist", "RSI"]
     },
     {
       "id": "multimodal_generation",
@@ -55,8 +55,8 @@
       "label": "数据工程与新学习范式",
       "group": "learning_systems",
       "arxiv_categories": ["cs.AI", "cs.CL", "cs.CV", "cs.LG", "stat.ML"],
-      "query_phrases": ["self-supervised learning", "continual learning", "test-time learning", "synthetic data", "data curation", "self-improving model", "online adaptation"],
-      "match_terms": ["self-supervised", "continual learning", "test-time learning", "synthetic data", "data curation", "self-improving", "online adaptation", "curriculum", "weak supervision"]
+      "query_phrases": ["self-supervised learning", "continual learning", "test-time learning", "synthetic data", "data curation", "self-improving model", "online adaptation", "recursive self-improvement", "self-referential improvement"],
+      "match_terms": ["self-supervised", "continual learning", "test-time learning", "synthetic data", "data curation", "self-improving", "recursive self-improvement", "self-referential improvement", "online adaptation", "curriculum", "weak supervision"]
     },
     {
       "id": "ml_systems_hardware",

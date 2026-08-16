@@ -13,6 +13,7 @@ from paradigms.reputation import (
 from paradigms.scoring import _assess_publisher
 from research_watchlist import (
     ESTABLISHED_ORGANIZATION_IDS,
+    OFFICIAL_GITHUB_ORGANIZATIONS,
     ORGANIZATIONS_BY_ID,
     RESEARCH_SOURCES,
 )
@@ -26,6 +27,15 @@ class ResearchWatchlistTest(unittest.TestCase):
         self.assertIn("https://wayve.ai/science/", source_urls)
         self.assertIn("https://www.tri.global/publications", source_urls)
         self.assertTrue(all(item["owner"] in ORGANIZATIONS_BY_ID for item in RESEARCH_SOURCES))
+        github_logins = [item["login"].casefold() for item in OFFICIAL_GITHUB_ORGANIZATIONS]
+        self.assertEqual(len(github_logins), len(set(github_logins)))
+        self.assertTrue(
+            all(
+                item["owner"] in ORGANIZATIONS_BY_ID
+                for item in OFFICIAL_GITHUB_ORGANIZATIONS
+            )
+        )
+        self.assertIn("deepseek-ai", github_logins)
 
     def test_required_domestic_and_global_organizations_exist(self) -> None:
         for organization_id in (

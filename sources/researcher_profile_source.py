@@ -340,6 +340,17 @@ def _seed_profiles(
         for name, url in (evidence.raw.get("author_profile_urls") or {}).items()
         if name and url
     }
+    curated_public_profiles = {
+        str(name): {
+            str(label): str(url)
+            for label, url in values.items()
+            if label and url
+        }
+        for name, values in (
+            evidence.raw.get("author_public_profiles") or {}
+        ).items()
+        if name and isinstance(values, dict)
+    }
     public_emails = {
         str(name): str(email)
         for name, email in (evidence.raw.get("author_public_emails") or {}).items()
@@ -445,6 +456,20 @@ def _seed_profiles(
         )
         if role and not profile.role:
             profile.role = role
+        curated = next(
+            (
+                values
+                for author_name, values in curated_public_profiles.items()
+                if _name_similarity(name, author_name) >= 0.92
+            ),
+            {},
+        )
+        if curated:
+            for label, url in curated.items():
+                profile.profile_urls.setdefault(label, url)
+            note = "已检查公开个人主页与手工核验的 KOL 目录，并记录职业联系入口"
+            if note not in profile.contact_search_notes:
+                profile.contact_search_notes.append(note)
         openalex_id = next(
             (
                 identifier

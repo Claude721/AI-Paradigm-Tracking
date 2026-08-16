@@ -13,7 +13,12 @@ from urllib.parse import quote
 import httpx
 
 import config
-from paradigms.models import EvidenceType, ParadigmCandidate, TechnicalEvidence
+from paradigms.models import (
+    ORIGIN_EVIDENCE_TYPES,
+    EvidenceType,
+    ParadigmCandidate,
+    TechnicalEvidence,
+)
 from sources.reddit_evidence_source import RedditEvidenceClient
 from sources.social_web_search_source import SocialWebSearchClient
 
@@ -244,8 +249,7 @@ class CommunityEvidenceClient:
             (
                 item.title
                 for item in candidate.evidence
-                if item.evidence_type
-                in {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG}
+                if item.evidence_type in ORIGIN_EVIDENCE_TYPES
             ),
             candidate.name,
         )
@@ -286,8 +290,7 @@ class CommunityEvidenceClient:
             author_self_release = any(
                 _same_person_name(social_name, author)
                 for evidence in candidate.evidence
-                if evidence.evidence_type
-                in {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG}
+                if evidence.evidence_type in ORIGIN_EVIDENCE_TYPES
                 for author in evidence.authors
             )
             results.append(

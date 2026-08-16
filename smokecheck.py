@@ -17,11 +17,12 @@ import httpx
 
 import config
 from agents.llm_utils import build_client, resolve_all
+from research_watchlist import KOL_SOURCES
 
 
 ARXIV_API = "https://export.arxiv.org/api/query"
 HF_PAPERS_API = "https://huggingface.co/api/daily_papers"
-SMOKE_CONTRACT_VERSION = "2026-08-15.2"
+SMOKE_CONTRACT_VERSION = "2026-08-15.3"
 SMOKE_FALLBACK_LIMIT = 5
 
 
@@ -145,6 +146,29 @@ async def run_smoke_checks(
             _research_feeds,
             require_results=False,
             skipped_detail="未配置 RESEARCH_FEED_URLS",
+            blocking_on_failure=False,
+        )
+    )
+    results.append(
+        await _check(
+            "LessWrong / Alignment Forum RSS",
+            bool(
+                config.LESSWRONG_SOURCE_ENABLED
+                or config.ALIGNMENT_FORUM_SOURCE_ENABLED
+            ),
+            _lesswrong_feed,
+            require_results=True,
+            skipped_detail="高信号论坛 Feed 已关闭",
+            blocking_on_failure=False,
+        )
+    )
+    results.append(
+        await _check(
+            "手工 KOL RSS",
+            config.KOL_SOURCE_ENABLED,
+            _curated_kol_feed,
+            require_results=True,
+            skipped_detail="KOL_SOURCE_ENABLED=false",
             blocking_on_failure=False,
         )
     )
@@ -626,6 +650,70 @@ async def _research_feeds() -> tuple[int, str]:
             except Exception as exc:
                 failures.append((_endpoint_label(feed_url), exc))
     raise _all_probes_failed("研究 RSS/Atom", failures)
+
+
+async def _lesswrong_feed() -> tuple[int, str]:
+    urls = []
+    if config.LESSWRONG_SOURCE_ENABLED:
+        urls.extend(
+            [
+                "https://www.lesswrong.com/feed.xml?view=curated",
+                (
+                    "https://www.lesswrong.com/feed.xml?view=frontpage&"
+                    f"karmaThreshold={config.LESSWRONG_KARMA_THRESHOLD}"
+                ),
+            ]
+        )
+    if config.ALIGNMENT_FORUM_SOURCE_ENABLED:
+        urls.append(
+            "https://www.alignmentforum.org/feed.xml?view=frontpage&"
+            f"karmaThreshold={config.LESSWRONG_KARMA_THRESHOLD}"
+        )
+    return await _public_feed_failover(urls, "高信号论坛 Feed")
+
+
+async def _curated_kol_feed() -> tuple[int, str]:
+    urls = [
+        str(url)
+        for record in KOL_SOURCES
+        for url in record.get("feed_urls", ())
+    ][:SMOKE_FALLBACK_LIMIT]
+    return await _public_feed_failover(urls, "手工 KOL Feed")
+
+
+async def _public_feed_failover(
+    urls: list[str],
+    label: str,
+) -> tuple[int, str]:
+    failures: list[tuple[str, Exception]] = []
+    async with httpx.AsyncClient(
+        timeout=20,
+        follow_redirects=True,
+        headers={
+            "Accept": "application/rss+xml, application/atom+xml, application/xml",
+            "User-Agent": "AI-Paradigm-Radar/3.3",
+        },
+    ) as client:
+        for url in urls[:SMOKE_FALLBACK_LIMIT]:
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                try:
+                    root = ET.fromstring(response.text)
+                except ET.ParseError as exc:
+                    raise ValueError(f"{label} 响应不是有效 XML") from exc
+                nodes = root.findall(".//item") or root.findall(
+                    "{http://www.w3.org/2005/Atom}entry"
+                )
+                if not nodes:
+                    raise ValueError(f"{label} 没有 item/entry")
+                return len(nodes), (
+                    f"有界 Feed failover；成功 host={urlparse(url).hostname or 'unknown'}；"
+                    f"entries={len(nodes)}{_prior_failures(failures)}"
+                )
+            except Exception as exc:
+                failures.append((_endpoint_label(url), exc))
+    raise _all_probes_failed(label, failures)
 
 
 async def _github() -> tuple[int, str]:

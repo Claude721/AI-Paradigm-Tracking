@@ -21,7 +21,7 @@
 │                     ▼                                    │
 │  ┌──────────────────────────────────────────┐            │
 │  │  Provider 内置默认值                       │  ← 兜底    │
-│  │  ollama → localhost:11434 / qwen3:14b    │            │
+│  │  ollama → localhost:11434 / qwen3.7:14b  │            │
 │  │  dashscope → aliyun URL / qwen3.7-plus   │            │
 │  │  volcengine → volces URL / doubao-pro-32k│            │
 │  └──────────────────────────────────────────┘            │
@@ -44,6 +44,7 @@ except ImportError:  # GitHub dependency-install failures still need stdlib aler
         return False
 
 from research_watchlist import (
+    default_kol_x_accounts,
     default_monitored_organization_aliases,
     default_organization_aliases,
     default_priority_pages,
@@ -229,6 +230,19 @@ RESEARCH_FEED_URLS: list[str] = [
     if value.strip()
 ]
 
+# 高信号思想源均使用公开 RSS/Atom，不需要 Secret。LessWrong 的阈值是
+# RSS 入选条件，只能解释为 karma 下限，不能伪装成帖子的精确互动量。
+LESSWRONG_SOURCE_ENABLED: bool = _env_bool("LESSWRONG_SOURCE_ENABLED", True)
+LESSWRONG_KARMA_THRESHOLD: int = max(
+    0, min(_env_int("LESSWRONG_KARMA_THRESHOLD", 30), 500)
+)
+ALIGNMENT_FORUM_SOURCE_ENABLED: bool = _env_bool(
+    "ALIGNMENT_FORUM_SOURCE_ENABLED", True
+)
+KOL_SOURCE_ENABLED: bool = _env_bool("KOL_SOURCE_ENABLED", True)
+KOL_CUSTOM_FEED_URLS: list[str] = _env_csv("KOL_CUSTOM_FEED_URLS")
+KOL_X_SOURCE_ENABLED: bool = _env_bool("KOL_X_SOURCE_ENABLED", True)
+
 # 内置名单版本化保存在 research_watchlist.py。环境变量默认只追加少量自定义
 # 项，避免 GitHub 中的旧 Variable 阻止仓库名单随版本更新；replace 可显式替换。
 RESEARCH_WATCHLIST_MODE: str = os.getenv(
@@ -272,9 +286,15 @@ PRIORITY_RESEARCHERS: list[str] = _merge_watchlist(
 )
 
 # ── Twitter 追踪账号（逗号分隔） ─────────────────────────
-_tw_accounts = os.getenv("TWITTER_WATCH_ACCOUNTS", "")
+# 内置 KOL handle 仅在配置了官方 X API 时用于精确账号追踪；没有 token 时
+# 不会请求 X，也不会把搜索引擎索引冒充平台完整覆盖。
 TWITTER_WATCH_ACCOUNTS: list[str] = [
-    a.strip().lstrip("@") for a in _tw_accounts.split(",") if a.strip()
+    value.lstrip("@")
+    for value in _merge_watchlist(
+        default_kol_x_accounts(),
+        [item.lstrip("@") for item in _env_csv("TWITTER_WATCH_ACCOUNTS")],
+        RESEARCH_WATCHLIST_MODE,
+    )
 ]
 
 # ── 微信公众号信源（we-mp-rss 本地服务）──────────────────
@@ -364,7 +384,7 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
 PARADIGM_KEY_RESEARCHER_LIMIT: int = max(
     1, min(_env_int("PARADIGM_KEY_RESEARCHER_LIMIT", 3), 6)
 )
-PARADIGM_STATE_SCHEMA_VERSION: int = 4
+PARADIGM_STATE_SCHEMA_VERSION: int = 5
 
 # 云端任务必须在 GitHub 的硬超时之前主动收尾。该预算只决定本轮执行到
 # backlog 的哪个位置，不参与 Rubric、排序分数或研究去留；未处理项会持久化

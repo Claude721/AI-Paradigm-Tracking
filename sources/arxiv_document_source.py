@@ -11,7 +11,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from paradigms.models import TechnicalEvidence
+from paradigms.models import TechnicalEvidence, nonnegative_number
 from paradigms.publication import classify_publication
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ class ArxivDocumentClient:
             logger.warning("arXiv HTML 补水失败 [%s]: %s", arxiv_id, exc)
             if (
                 evidence.raw.get("origin_kind") == "technical_report"
-                or int(evidence.raw.get("origin_priority", 0) or 0) >= 2
+                or nonnegative_number(evidence.raw.get("origin_priority", 0)) >= 2
             ):
                 return await self._hydrate_pdf(
                     evidence,

@@ -11,7 +11,13 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 import config
-from paradigms.models import EvidenceType, ParadigmCandidate, TechnicalEvidence
+from paradigms.models import (
+    ORIGIN_EVIDENCE_TYPES,
+    EvidenceType,
+    ParadigmCandidate,
+    TechnicalEvidence,
+    nonnegative_number,
+)
 
 logger = logging.getLogger(__name__)
 REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
@@ -82,7 +88,7 @@ class RedditEvidenceClient:
             if not _post_is_related(candidate, work_title, post):
                 continue
             created = datetime.fromtimestamp(
-                float(post.get("created_utc", 0) or 0), timezone.utc
+                nonnegative_number(post.get("created_utc", 0)), timezone.utc
             )
             if created < cutoff:
                 continue
@@ -107,13 +113,13 @@ class RedditEvidenceClient:
                     url=f"https://www.reddit.com{permalink}" if permalink else "",
                     summary="\n\n".join(value for value in summary_parts if value)[:6000],
                     published_at=datetime.fromtimestamp(
-                        float(post.get("created_utc", 0) or 0), timezone.utc
+                        nonnegative_number(post.get("created_utc", 0)), timezone.utc
                     ).isoformat(),
                     authors=[str(post.get("author", ""))],
                     metrics={
-                        "score": int(post.get("score", 0) or 0),
-                        "comments": int(post.get("num_comments", 0) or 0),
-                        "upvote_ratio": float(post.get("upvote_ratio", 0) or 0),
+                        "score": int(nonnegative_number(post.get("score", 0))),
+                        "comments": int(nonnegative_number(post.get("num_comments", 0))),
+                        "upvote_ratio": nonnegative_number(post.get("upvote_ratio", 0)),
                     },
                     identifiers={"reddit": post_id},
                     raw={
@@ -146,7 +152,10 @@ class RedditEvidenceClient:
                 return ""
             payload = response.json()
             self._access_token = str(payload.get("access_token", ""))
-            expires_in = max(float(payload.get("expires_in", 3600) or 3600), 60.0)
+            expires_in = max(
+                nonnegative_number(payload.get("expires_in", 3600), 3600),
+                60.0,
+            )
             self._expires_at = time.monotonic() + expires_in - 30
             return self._access_token
 
@@ -189,10 +198,7 @@ class RedditEvidenceClient:
 
 def _search_identity(candidate: ParadigmCandidate) -> tuple[str, str]:
     for evidence in candidate.evidence:
-        if evidence.evidence_type not in {
-            EvidenceType.PRIMARY_PAPER,
-            EvidenceType.TECHNICAL_BLOG,
-        }:
+        if evidence.evidence_type not in ORIGIN_EVIDENCE_TYPES:
             continue
         identifier = evidence.identifiers.get("arxiv") or evidence.identifiers.get(
             "doi", ""

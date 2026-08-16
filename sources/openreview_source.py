@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 import config
-from paradigms.models import EvidenceType, TechnicalEvidence
+from paradigms.models import EvidenceType, TechnicalEvidence, nonnegative_number
 
 logger = logging.getLogger(__name__)
 OPENREVIEW_SEARCH_API = "https://api2.openreview.net/notes/search"
@@ -173,7 +173,7 @@ class OpenReviewSource:
                 author_ids = _value(content.get("authorids")) or []
                 venue = _value(content.get("venueid")) or ""
                 details = note.get("details") or {}
-                reply_count = int(details.get("replyCount", 0) or 0)
+                reply_count = int(nonnegative_number(details.get("replyCount", 0)))
                 note_id = note.get("id", "")
                 items.append(
                     TechnicalEvidence(
@@ -195,7 +195,7 @@ class OpenReviewSource:
                             "author_openreview_ids": author_ids,
                             "origin_date_basis": "submission_created_at",
                             "discussion_last_modified_at": int(
-                                note.get("tmdate") or 0
+                                nonnegative_number(note.get("tmdate"))
                             ),
                             "discovery_lookback_days": self.lookback_days,
                         },

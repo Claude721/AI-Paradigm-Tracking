@@ -16,6 +16,7 @@ from .models import (
     ParadigmCandidate,
     TechnicalEvidence,
     material_metric_signature,
+    nonnegative_number,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ class EvidenceEnricher:
         targets = [
             item
             for item in evidence
-            if int(item.raw.get("origin_priority", 0) or 0) >= 2
+            if nonnegative_number(item.raw.get("origin_priority", 0)) >= 2
             or item.raw.get("explicit_seed")
         ]
         semaphore = asyncio.Semaphore(self.concurrency)
@@ -104,6 +105,14 @@ class EvidenceEnricher:
                     }
                 except Exception as exc:
                     logger.warning("历史范式社区刷新失败 [%s]: %s", candidate.name, exc)
+                    # CommunityEvidenceClient already isolates ordinary GitHub/
+                    # HN/Tavily/Reddit/X failures and records their coverage.
+                    # Reaching this boundary means the whole refresh operation
+                    # failed structurally; returning None would falsely mean
+                    # “checked successfully, no new uptake”.
+                    raise RuntimeError(
+                        f"社区刷新结构性失败: {type(exc).__name__}"
+                    ) from exc
                 candidate.evidence = _dedupe_evidence(candidate.evidence)
                 changed = False
                 for item in candidate.evidence:
@@ -169,6 +178,13 @@ class EvidenceEnricher:
             }
         else:
             logger.warning("社区证据增强失败 [%s]: %s", candidate.name, community)
+            candidate.community_coverage = {
+                **self.community.coverage(),
+                **candidate.community_coverage,
+                "community_runtime": (
+                    f"社区证据总入口发生结构性异常：{type(community).__name__}"
+                ),
+            }
         candidate.evidence = list(
             {item.fingerprint: item for item in candidate.evidence}.values()
         )
@@ -217,14 +233,16 @@ class EvidenceEnricher:
         candidate: ParadigmCandidate, supporting: list[TechnicalEvidence]
     ) -> None:
         candidate_ids = {
-            value.lower()
+            str(value).lower()
             for item in candidate.evidence
             for value in item.identifiers.values()
             if value
         }
         titles = [item.title.lower() for item in candidate.evidence]
         for item in supporting:
-            support_ids = {value.lower() for value in item.identifiers.values() if value}
+            support_ids = {
+                str(value).lower() for value in item.identifiers.values() if value
+            }
             title_match = max(
                 (SequenceMatcher(None, item.title.lower(), title).ratio() for title in titles),
                 default=0.0,

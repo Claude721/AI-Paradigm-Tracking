@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 from contextlib import contextmanager
@@ -213,6 +214,26 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
     report_path = generator.output_dir / job.report_name
     report_path.parent.mkdir(parents=True, exist_ok=True)
     rendered = bool(job.report_content)
+    if rendered:
+        from reports.paradigm_generator import _editorial_violations
+
+        persisted_violations = _editorial_violations(
+            job.report_content,
+            job.candidates,
+        )
+        if persisted_violations:
+            store.invalidate_rendered_report(
+                job.delivery_key,
+                "持久化报告不再满足当前交付契约："
+                + "；".join(persisted_violations[:8]),
+            )
+            rendered = False
+            run_audit.event(
+                "report_outbox",
+                "stale_render_invalidated",
+                f"历史报告制品 {job.delivery_key[:12]} 未通过当前 URL/编辑"
+                "质量契约，已回退到待渲染；研究快照保持不变",
+            )
     if rendered:
         report_path.write_text(job.report_content, encoding="utf-8")
         run_audit.event(
@@ -413,6 +434,26 @@ async def run_pipeline() -> dict:
         raise
 
 
+def _write_pipeline_result(result: dict) -> Path:
+    """Write a non-secret workflow hand-off marker after a successful run."""
+
+    output = Path("logs/pipeline_result.json")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    recovered_only = bool(result.get("recovered_delivery_only"))
+    payload = {
+        "recovered_delivery_only": recovered_only,
+        "fresh_research_completed": not recovered_only,
+        "result_kind": str(result.get("result_kind", "")),
+        "email_sent": bool(result.get("email_sent")),
+        "report_path": str(result.get("report_path", "")),
+    }
+    output.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return output
+
+
 async def regenerate_report() -> dict:
     """续投待交付任务，或基于最近已交付候选重新生成报告。"""
     with _pipeline_lock():
@@ -603,7 +644,8 @@ def main() -> None:
         asyncio.run(send_failure_email())
     else:
         setup_logging()
-        asyncio.run(run_pipeline())
+        result = asyncio.run(run_pipeline())
+        _write_pipeline_result(result)
 
 
 if __name__ == "__main__":

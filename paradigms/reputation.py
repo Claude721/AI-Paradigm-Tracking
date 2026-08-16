@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import config
 from research_watchlist import (
+    KOL_SOURCES,
     ORGANIZATIONS,
     RESEARCHERS,
     organization_record,
@@ -84,6 +85,9 @@ def verified_priority_researcher(profile: object) -> dict | None:
     if not any(exact_alias_match(name, alias) for alias in config.PRIORITY_RESEARCHERS):
         return None
     for item in RESEARCHERS:
+        if any(exact_alias_match(name, alias) for alias in item["aliases"]):
+            return item
+    for item in KOL_SOURCES:
         if any(exact_alias_match(name, alias) for alias in item["aliases"]):
             return item
     return {"name": name, "aliases": (name,), "focus": "用户追加的重点研究者"}

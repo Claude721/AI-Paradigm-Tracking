@@ -1,6 +1,6 @@
 # AI 前沿机构与研究者 Watchlist
 
-> 调研与核验日期：2026-07-28。机器可读的完整默认目录位于 `research_watchlist.py`；本文件解释为什么纳入、如何分层，以及哪些名字不能构成自动背书。
+> 调研与核验日期：2026-08-15。机器可读的完整默认目录位于 `research_watchlist.py`；本文件解释为什么纳入、如何分层，以及哪些名字不能构成自动背书。
 
 ## 1. 名单不是“名气榜”
 
@@ -21,7 +21,9 @@
 
 AI4S 作为独立技术栈覆盖 [FutureHouse Research](https://www.futurehouse.org/research)、[Arc Institute Publications](https://arcinstitute.org/publications)、[Microsoft Research AI for Science](https://www.microsoft.com/en-us/research/lab/microsoft-research-ai-for-science/)、[Isomorphic Labs Articles](https://www.isomorphiclabs.com/articles) 与 [Lila Sciences 技术页](https://www.lila.ai/tech)。FutureHouse、Arc 与 Microsoft AI for Science 已有连续、可审计研究产出；Isomorphic 与 Lila 目前作为 `verified` 主动入口，不能仅凭公司叙事自动晋级。
 
-中国侧覆盖 [Baidu ERNIE Blog](https://ernie.baidu.com/blog/)、[ByteDance Seed Research](https://seed.bytedance.com/en/research)、[Qwen Publications](https://qwenlm.github.io/publication/)、[Kimi Research](https://www.kimi.com/blog/)、[Moonshot AI](https://www.moonshot.ai/)、[Z.ai Blog](https://z.ai/blog)、[DeepSeek Transparency](https://www.deepseek.com/en/transparency/)、[StepFun Research](https://chat.stepfun.com/research/en)、[MiniMax Blog](https://www.minimax.io/blog) 与 [ModelBest](https://modelbest.cn/)。
+中国侧覆盖 [Baidu ERNIE Blog](https://ernie.baidu.com/blog/)、[ByteDance Seed Research](https://seed.bytedance.com/en/research)、[Qwen Publications](https://qwenlm.github.io/publication/)、[Kimi Research](https://www.kimi.com/blog/)、[Moonshot AI](https://www.moonshot.ai/)、[Z.ai Blog](https://z.ai/blog)、[DeepSeek Transparency](https://www.deepseek.com/en/transparency/)、[DeepSeek API Updates](https://api-docs.deepseek.com/updates/)、[StepFun Research](https://chat.stepfun.com/research/en)、[MiniMax Blog](https://www.minimax.io/blog) 与 [ModelBest](https://modelbest.cn/)。其中 changelog 入口按最新显式日期切分发布事件；模型发布可以进入审计和机制初筛，但没有 Technical Report 或独立技术机制时不会因品牌直接进周报。
+
+同一 owner 目录还维护一组已核验官方 GitHub 组织，用于发现“官方网页尚未收录、但新仓库已经发布”的事件。它不是第五种背书层：系统只按组织身份与仓库 `created_at` 召回，不靠项目名关键词；仓库链接到外部一手论文/官方技术页时使用外部原点，技术首先由结构化 README 与代码接口定义时才形成 `original_implementation` 假说。SDK、demo、聚合列表和信息不足的 README 不具备原点资格，star/fork 不能替代独立承接。
 
 Google Research、Apple、Amazon、IBM、xAI、腾讯 ARC、华为诺亚、BAIR、Stanford CRFM、CMU RI 和 NYU CILVR 也会被主动读取，但默认 tier 是 `verified`：它们的页面要么覆盖面很宽，要么偏模型发布/动态页面，要么普通论文数量很大，不能仅凭入口直接晋级。Z.ai、Qwen 新站、腾讯 ARC 和华为诺亚的动态页面可能需要专用解析器；通用抓取失败时，arXiv/OpenAlex 仍是第二条召回路径。
 
@@ -79,7 +81,19 @@ World Model 路线尤其说明了为什么需要同时维护“机构—实验�
 
 T‑Rex 这类大型合作是人物规则的反例测试：报告应先识别 Dantong Niu、Zhuoyang Liu、Zekai Wang 的共同一作角色，再说明 Fei‑Fei Li、Ken Goldberg、Pieter Abbeel 等资深研究网络带来的研究连续性与传播势能，不能把工作简写成“李飞飞发布了一篇论文”。
 
-## 6. 配置与维护规则
+## 6. 个人思想源与 KOL 目录
+
+机器目录当前收录 37 个具名作者/编辑源，其中 19 个已经实测 RSS/Atom，可由周任务自动读取；其他条目只保存主页与已知 X handle，避免猜测 Feed 或依赖关键词搜索来确认身份。目录优先覆盖三种角色：反复提出新机制的研究者、把训练/推理过程讲清楚的技术实践者、以及能够提供高质量独立解读的编辑者。
+
+自动读取的高信号个人 Feed 包括 [Lilian Weng](https://lilianweng.github.io/)、[Simon Willison](https://simonwillison.net/)、[Nathan Lambert](https://natolambert.com/writing)、[Sebastian Raschka](https://sebastianraschka.com/)、[Chip Huyen](https://huyenchip.com/)、[Eugene Yan](https://eugeneyan.com/)、[Hamel Husain](https://hamel.dev/)、[Jeremy Howard](https://jeremy.fast.ai/)、[Jay Alammar](https://jalammar.github.io/)、[Tim Dettmers](https://timdettmers.com/)、[Chris Olah](https://colah.github.io/)、[Danijar Hafner](https://danijar.com/)、[George Hotz](https://geohot.github.io/blog/) 与 [苏剑林](https://kexue.fm/)。目录对作者角色做保守区分：Lilian Weng、Simon Willison、Nathan Lambert、Sebastian Raschka 与 Jay Alammar 的 Feed 默认先作为高质量解释/扩散证据；Chip Huyen、Eugene Yan、Hamel Husain、Jeremy Howard、Tim Dettmers、Chris Olah、Danijar Hafner、George Hotz 与苏剑林的机制性文章可以提出 `concept_essay` 假说。任何作者名气和自发传播都不能替代可执行步骤、可证伪边界与外部承接。
+
+自动读取但默认只作二次解读的源包括 [Jack Clark / Import AI](https://jack-clark.net/)、[Gary Marcus](https://garymarcus.substack.com/)、[Zvi Mowshowitz](https://thezvi.substack.com/)、[Astral Codex Ten](https://www.astralcodexten.com/) 与 [Latent Space](https://www.latent.space/)。它们可帮助理解社区在讨论什么，不能仅凭一篇评论生成新路线。
+
+无稳定 Feed 的重点主页包括 [Andrej Karpathy](https://karpathy.ai/)、[Yann LeCun](https://yann.lecun.com/)、[Fei‑Fei Li](https://profiles.stanford.edu/fei-fei-li)、[Kaiming He](https://kaiminghe.com/)、[Yoshua Bengio](https://yoshuabengio.org/)、[Richard Sutton](http://incompleteideas.net/)、[Sergey Levine](https://people.eecs.berkeley.edu/~svlevine/)、[Chelsea Finn](https://ai.stanford.edu/~cbfinn/)、[Linxi Jim Fan](https://www.jimfan.me/)、[Percy Liang](https://cs.stanford.edu/~pliang/)、[Andrew Ng](https://www.andrewng.org/)、[François Chollet](https://fchollet.com/)、[David Ha](https://ha-david.github.io/)、[Jun Zhu](http://ml.cs.tsinghua.edu.cn/~jun/)、[Zhiyuan Liu](https://nlp.csai.tsinghua.edu.cn/~lzy/)、[Jie Tang](https://keg.cs.tsinghua.edu.cn/jietang/)、[Zhi‑Hua Zhou](https://cs.nju.edu.cn/zhouzh/) 与 [Weinan E](https://weinan-e.com/)。配置 X API 后，目录中的 handle 可用于精确账号追踪；没有 X API 时这些主页仍参与身份核验，但系统不会声称已覆盖其全部即时发言。
+
+LessWrong 与 Alignment Forum 单独作为社区思想源：使用官方 RSS 的 curated/frontpage/karmaThreshold 能避开脆弱的页面爬虫，但阈值只表示 Feed 选择条件。原帖首先是一个机制原点；只有其他主体的实质评论、复现、引用或采用才属于二次承接。
+
+## 7. 配置与维护规则
 
 - 默认使用 `RESEARCH_WATCHLIST_MODE=merge`。GitHub Variables 中的值只追加，不会冻结未来代码更新；只有明确需要完全自定义时才用 `replace`。
 - 不添加整所大学、宽泛企业母体或歧义短词；禁止裸称包括 `AI Lab`、`ARC Lab`、`Seed`、`GLM`、`Ling`。
@@ -87,3 +101,4 @@ T‑Rex 这类大型合作是人物规则的反例测试：报告应先识别 Da
 - 用户追加的 Priority 页面没有内置 owner 元数据，只允许同域抓取并视为 `verified`；不能通过网页 `og:site_name` 冒充知名机构。
 - 每季度核验页面可访问性、团队更名、研究者当前任职与研究方向；重大模型厂商发布正式 Technical Report 时即时更新。
 - 新增/升级组织时至少记录一个官方入口、标准名称、必要别名、明确的研究方向与分层理由。名单只影响召回和身份先验，永远不覆盖项目的技术硬门槛。
+- 新增个人思想源时优先验证 RSS/Atom；没有稳定 Feed 时只登记主页/X，不猜地址。必须明确 `concept_origin` 或 `secondary_only`，前者也只能生成机制假说，不能自动晋级。

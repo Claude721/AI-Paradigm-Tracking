@@ -35,7 +35,9 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  # 恢复历史待交付后，当前 job 会在状态快照上传成功后自动排队一次本周
+  # 新研究；否则一次成功的续投会静默吞掉周五研究任务。
+  actions: write
 
 concurrency:
   group: paradigm-radar-delivery
@@ -65,6 +67,12 @@ jobs:
       GITHUB_TOKEN: ${{ github.token }}
       OPENREVIEW_VENUES: ${{ vars.OPENREVIEW_VENUES }}
       RESEARCH_FEED_URLS: ${{ vars.RESEARCH_FEED_URLS }}
+      LESSWRONG_SOURCE_ENABLED: ${{ vars.LESSWRONG_SOURCE_ENABLED || 'true' }}
+      LESSWRONG_KARMA_THRESHOLD: ${{ vars.LESSWRONG_KARMA_THRESHOLD || '30' }}
+      ALIGNMENT_FORUM_SOURCE_ENABLED: ${{ vars.ALIGNMENT_FORUM_SOURCE_ENABLED || 'true' }}
+      KOL_SOURCE_ENABLED: ${{ vars.KOL_SOURCE_ENABLED || 'true' }}
+      KOL_CUSTOM_FEED_URLS: ${{ vars.KOL_CUSTOM_FEED_URLS }}
+      KOL_X_SOURCE_ENABLED: ${{ vars.KOL_X_SOURCE_ENABLED || 'true' }}
       RESEARCH_WATCHLIST_MODE: ${{ vars.RESEARCH_WATCHLIST_MODE || 'merge' }}
       PRIORITY_RESEARCH_PAGES: ${{ vars.PRIORITY_RESEARCH_PAGES }}
       PRIORITY_RESEARCH_LINK_SAFETY_LIMIT: ${{ vars.PRIORITY_RESEARCH_LINK_SAFETY_LIMIT || '0' }}
@@ -73,6 +81,7 @@ jobs:
       MONITORED_RESEARCH_ORGANIZATIONS: ${{ vars.MONITORED_RESEARCH_ORGANIZATIONS }}
       PRIORITY_RESEARCHERS: ${{ vars.PRIORITY_RESEARCHERS }}
       TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER_TOKEN }}
+      TWITTER_WATCH_ACCOUNTS: ${{ vars.TWITTER_WATCH_ACCOUNTS }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       TAVILY_DISCOVERY_DOMAINS: ${{ vars.TAVILY_DISCOVERY_DOMAINS }}
       TAVILY_REQUEST_SAFETY_LIMIT: ${{ vars.TAVILY_REQUEST_SAFETY_LIMIT || '0' }}
@@ -222,7 +231,10 @@ jobs:
       - name: 抓取、分析并发送邮件
         id: pipeline
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
-        run: python main.py
+        run: |
+          python main.py
+          recovered_only="$(jq -r '.recovered_delivery_only // false' logs/pipeline_result.json)"
+          echo "recovered_delivery_only=$recovered_only" >> "$GITHUB_OUTPUT"
 
       - name: 记录状态对应的代码版本
         id: prepare_state
@@ -263,6 +275,24 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+      - name: 续投完成后排队本周新研究
+        id: continuation
+        if: ${{ success() && steps.pipeline.outputs.recovered_delivery_only == 'true' && steps.upload_state.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '7' }}
+          SEED_ARXIV_IDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seed_arxiv_ids || '' }}
+        run: |
+          exec > >(tee logs/continuation.log) 2>&1
+          gh workflow run weekly-radar.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF_NAME" \
+            -f lookback_days="$LOOKBACK_DAYS" \
+            -f seed_arxiv_ids="$SEED_ARXIV_IDS" \
+            -f reset_state=false \
+            -f smoke_only=false
+          echo "历史待交付已完成并持久化；已排队新的完整研究 run"
+
       - name: 保存运行日志与筛选审计
         id: upload_audit
         if: always()
@@ -277,8 +307,10 @@ jobs:
             logs/doctor.log
             logs/state_restore.log
             logs/state_prepare.log
+            logs/continuation.log
             logs/run_audit_latest.md
             logs/run_audit_latest.json
+            logs/pipeline_result.json
             logs/smoke_test_latest.json
           retention-days: 90
           if-no-files-found: warn
@@ -298,5 +330,6 @@ jobs:
           UPLOAD_STATE_STEP_OUTCOME: ${{ steps.upload_state.outcome || 'not-run' }}
           UPLOAD_REPORT_STEP_OUTCOME: ${{ steps.upload_report.outcome || 'not-run' }}
           UPLOAD_AUDIT_STEP_OUTCOME: ${{ steps.upload_audit.outcome || 'not-run' }}
+          CONTINUATION_STEP_OUTCOME: ${{ steps.continuation.outcome || 'not-run' }}
           AUDIT_ARTIFACT_NAME: paradigm-radar-audit-${{ github.run_id }}
         run: python main.py --notify-failure

@@ -60,6 +60,7 @@ Venue ID 来自 OpenReview 页面 URL 中 `group?id=` 后面的部分，不能�
 - [ ] 4 个以上官方研究 RSS/Atom Feed
 - [ ] 高优先级官方研究页面保留默认值或已核验覆盖
 - [ ] Follow Builders 二次传播 Feed 已启用
+- [ ] LessWrong / Alignment Forum 与内置 KOL Feed 保持启用（无需 Key）
 - [ ] 如需按工作标题搜索作者/KOL，配置 X API Bearer Token（可选）
 - [ ] SMTP 邮件推送
 
@@ -86,7 +87,7 @@ SEMANTIC_SCHOLAR_API_KEY=
 GitHub：
 
 1. 打开 https://github.com/settings/tokens 。
-2. 创建只读 Token；本项目只搜索公开仓库，不需要写权限。
+2. 创建只读 Token；本项目只搜索公开仓库和读取已核验研究组织的新仓库/README，不需要仓库写权限。
 3. 填写：
 
 ```env
@@ -100,6 +101,19 @@ RESEARCH_FEED_URLS=https://research.google/blog/rss/,https://bair.berkeley.edu/b
 ```
 
 只填写 RSS/Atom XML 地址，不能填写普通博客首页。单个 Feed 失效时系统会跳过，不影响其他 Feed。
+
+高信号论坛与个人思想源使用内置、已验证的 RSS/Atom，默认无需任何 Secret：
+
+```env
+LESSWRONG_SOURCE_ENABLED=true
+LESSWRONG_KARMA_THRESHOLD=30
+ALIGNMENT_FORUM_SOURCE_ENABLED=true
+KOL_SOURCE_ENABLED=true
+KOL_CUSTOM_FEED_URLS=
+KOL_X_SOURCE_ENABLED=true
+```
+
+LessWrong 的 `karmaThreshold=30` 是 frontpage Feed 的入选下限，不是系统取得的精确帖子 karma；curated Feed 也只证明编辑精选。内置 KOL 目录同时保存姓名、主页、已验证 Feed 和可选 X handle。自定义 Feed 没有内置身份元数据，默认只能作为二次解读；要让某位作者的原创文章具备机制原点资格，应在 `research_watchlist.py` 中补齐其主页、Feed、方向和 `origin_policy` 后提交代码。
 
 高优先级官方页面用于补足“重要机构没有 RSS、Technical Report 尚未进入 arXiv”的缺口。完整默认目录版本化保存在 `research_watchlist.py`，覆盖海内外基础模型公司、World Model/机器人组织和具名高校实验室。通常保持以下值即可：
 
@@ -115,6 +129,8 @@ PRIORITY_RESEARCHERS=
 
 `merge` 表示环境变量只追加少量自定义项，仓库更新时仍会获得新的内置名单；`replace` 才会完全替换默认目录。GitHub 中曾保存过旧版长名单也不需要删除，默认会去重合并。新增页面只提高召回优先级：只有内置目录记录了 owner 与 tier 的页面才继承发布者身份，用户追加页面只能同域抓取并降为 `verified`。
 
+官方 GitHub 组织名单同样版本化保存在 `research_watchlist.py`，复用现有 `GITHUB_TOKEN`，不新增 Secret/Variable。系统按仓库 `created_at` 发现发布事件，不依赖项目名关键词：若仓库链接可打开的一手论文/官方技术页，以外部材料为原点；若技术首先通过结构化 README 与代码接口定义，可形成 `original_implementation` 机制假说。普通 SDK、demo、awesome list、论文聚合和信息不足的 README 会被确定性排除；任何仓库仍须通过 Rubric 与外部承接闸门，stars/forks 不算独立复现。
+
 入口与名单分为四层：Priority pages 负责主动召回；`ESTABLISHED_RESEARCH_ORGANIZATIONS` 用于身份可核验、持续产出前沿研究的公司研究组织与具名实验室；`MONITORED_RESEARCH_ORGANIZATIONS` 保证模型厂商、机器人公司等被观察，但不会仅凭品牌自动放行；`PRIORITY_RESEARCHERS` 只在姓名精确匹配且已有主页、ORCID/OpenAlex 等公开身份后，提供人物轨迹线索。不要加入整所大学或 `AI Lab`、`Seed`、`GLM`、`ARC Lab` 等歧义裸词。完整名单与选择依据见 [前沿机构与研究者 Watchlist](FRONTIER_RESEARCH_WATCHLIST.md)。
 
 KOL、播客与技术博客二次传播候选：
@@ -128,9 +144,10 @@ FOLLOW_BUILDERS_FEED_URL=https://raw.githubusercontent.com/zarazhangrui/follow-b
 
 ```env
 TWITTER_BEARER_TOKEN=你的X-API-Bearer-Token
+TWITTER_WATCH_ACCOUNTS=
 ```
 
-不配置时自动跳过，不影响论文、GitHub 与 Hacker News。配置后系统会按工作标题搜索最近帖子，并读取公开账号简介与粉丝规模。作者本人发帖只用于身份核验；非作者的高关注账号解读、互动和讨论内容才进入外部势能判断。小红书目前没有稳定的官方公开搜索 API，因此本项目不做不可靠的页面抓取。
+`TWITTER_WATCH_ACCOUNTS` 留空时使用内置 KOL handle；X API 没有配置时自动跳过，个人主页/RSS 仍会工作。配置后有两条互补车道：按工作标题核验作者/二次讨论，以及按已知 handle 读取最近 7 天、同时包含 AI 对象和技术 intervention 的具名短文。后者只能先生成机制假说，短口号、转推、回复和普通动态会在模型前过滤；X Recent Search 的计划权限与覆盖边界必须以实际 Smoke 为准。小红书目前没有稳定的官方公开搜索 API，因此本项目不做不可靠的页面抓取。
 
 推荐先配置 Tavily 免费层，作为 X、Reddit、小红书和独立技术博客的公开网页发现兜底：
 
@@ -240,7 +257,7 @@ PARADIGM_DEEP_BATCH_SIZE=1
 
 五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版主观分数/固定数量变量（例如 `PARADIGM_MIN_NOVELTY`、`PARADIGM_MAX_ANALYSIS_ITEMS`）已停用。当前仍使用的 `PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS` 与 `PARADIGM_MIN_SECONDARY_ENGAGEMENT` 只把可核验讨论条数或互动量转成客观 Rubric 选项，不是模型主观评分门槛。
 
-`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后，剩余项保留为 backlog。`PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=600` 约束单个并行发现源，某个分页器卡死时只取消该来源，并在审计/报告中写成覆盖未闭合，绝不能伪装成零命中。研究完成后候选快照先进入持久化 outbox；多路线报告按路线生成、每条通过即写入 checkpoint，最终总编只处理有界摘要并由程序装配正文。`PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS` 是单次路线/框架请求上限，`PARADIGM_REPORT_TIMEOUT_SECONDS` 是整次渲染上限；前者超时可业务重试，后者中断后由下一轮续跑。GitHub job 的硬超时为 90 分钟，默认研究预算 `3600` 秒、报告上限 `1200` 秒，两者合计 80 分钟，为安装、离线测试、邮件和 artifact 保留约 10 分钟；不要把两者同时继续调高，也不要在 Actions 中设为 `0`，静态体检会阻断云端禁用软预算。发现源完成后，系统才按实际剩余时间应用 `PARADIGM_STAGE_RESERVE_SECONDS`，从而避免长冷启动提前吃空机制抽取窗口；`PARADIGM_ANALYSIS_BATCH_SIZE`、`PARADIGM_DEEP_BATCH_SIZE` 与 `PARADIGM_REPORT_ROUTE_CONCURRENCY` 都只是执行粒度，不是 Top-K。
+`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后，剩余项保留为 backlog。`PARADIGM_DISCOVERY_SAFETY_LIMIT` 只允许 arXiv 等尚未执行的传输车道提前收尾，不会再截掉已经从其他来源取得的材料；`PARADIGM_REFRESH_SAFETY_LIMIT` 非零时，历史路线按最久未尝试顺序跨周轮转，而不是每次刷新同一批。`PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=600` 约束单个并行发现源，某个分页器卡死或返回错误结构时只取消该来源，并在审计/报告中写成覆盖未闭合，绝不能伪装成零命中。研究完成后候选快照先进入持久化 outbox；多路线报告按路线生成、每条通过即写入 checkpoint，最终总编只处理有界摘要并由程序装配正文。`PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS` 是单次路线/框架请求上限，`PARADIGM_REPORT_TIMEOUT_SECONDS` 是整次渲染上限；前者超时可业务重试，后者中断后由下一轮续跑。GitHub job 的硬超时为 90 分钟，默认研究预算 `3600` 秒、报告上限 `1200` 秒，两者合计 80 分钟，为安装、离线测试、邮件和 artifact 保留约 10 分钟；不要把两者同时继续调高，也不要在 Actions 中设为 `0`，静态体检会阻断云端禁用软预算。发现源完成后，系统才按实际剩余时间应用 `PARADIGM_STAGE_RESERVE_SECONDS`，从而避免长冷启动提前吃空机制抽取窗口；`PARADIGM_ANALYSIS_BATCH_SIZE`、`PARADIGM_DEEP_BATCH_SIZE` 与 `PARADIGM_REPORT_ROUTE_CONCURRENCY` 都只是执行粒度，不是 Top-K。模型漏回输入或返回外来对象时，程序会按身份/基数契约隔离到单条并保留待重试，不需要通过减小 batch size 掩盖问题。
 
 静态体检直接读取环境变量原文，因此错误拼写不会再被配置解析器的默认值掩盖。布尔值请只用 `true/false`（也兼容 `1/0`、`yes/no`、`on/off`），整数变量不能写单位或中文；越出文档范围的并发、超时和端口同样会阻断云端生产运行。
 
@@ -260,7 +277,7 @@ SCHEDULE_TIMEZONE=Asia/Shanghai
 ```
 
 - [ ] 周报使用 7 天窗口；月度专题才改成 30 天
-- [ ] `PARADIGM_RECALL_OVERLAP_DAYS=30`：只给 Technical Report、重点研究者和官方入口做一个月回补；普通 arXiv/OpenAlex/OpenReview/HF 仍使用 `SOURCING_LOOKBACK_DAYS`
+- [ ] `PARADIGM_RECALL_OVERLAP_DAYS=30`：只给 Technical Report、重点研究者、官方页面和官方仓库发布事件做一个月回补；普通 arXiv/OpenAlex/OpenReview/HF 仍使用 `SOURCING_LOOKBACK_DAYS`
 - [ ] `PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED=true`：让重点研究者近期论文通过独立于术语的 arXiv 车道进入视野；姓名不替代技术与身份核验
 - [ ] `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60`：数据库为空或覆盖地图升级时，只扩大高信号回补车道
 - [ ] 常规运行保持 `PARADIGM_SEED_ARXIV_IDS` 为空；只在精确回补/审计漏项时临时填写。它只负责召回，不会提高 Rubric、发布者或编辑复核资格
@@ -319,4 +336,4 @@ python main.py --smoke-test --smoke-skip-llm --smoke-skip-smtp --smoke-skip-tavi
 
 ## G. GitHub Actions 配置位置
 
-API Key、OAuth Client Secret、QQ 邮箱与 SMTP 授权码放在 **Repository secrets**；非敏感的 Reddit 批准开关、User-Agent、OpenReview venue、研究 Feed、高优先级官方页面与前沿组织名单放在 **Repository variables**。不要使用 Environment secrets，除非工作流同时显式绑定对应 environment。详见 [`CLOUD_AUTOMATION.md`](CLOUD_AUTOMATION.md)。
+API Key、OAuth Client Secret、QQ 邮箱与 SMTP 授权码放在 **Repository secrets**；非敏感的 Reddit 批准开关、User-Agent、OpenReview venue、研究 Feed、高优先级官方页面、前沿组织名单以及 LessWrong/KOL 开关可放在 **Repository variables**。这次新增信源使用公开 RSS，保持代码默认值即可，线上无需新增配置。不要使用 Environment secrets，除非工作流同时显式绑定对应 environment。详见 [`CLOUD_AUTOMATION.md`](CLOUD_AUTOMATION.md)。

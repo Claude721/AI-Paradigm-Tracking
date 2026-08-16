@@ -10,10 +10,12 @@ import logging
 import re
 from collections import OrderedDict
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import config
 from agents.llm_utils import build_client
 from paradigms.models import (
+    ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
     ParadigmCandidate,
     ResearcherProfile,
@@ -447,6 +449,7 @@ class ParadigmReportGenerator:
                 f"{stats.get('planned_analysis_count', 0)} 条；"
                 f"待抽取 {stats.get('analysis_deferred_count', 0)} 条，"
                 f"待深挖 {stats.get('candidate_deferred_count', 0)} 条，"
+                f"综合/Rubric 待重试 {stats.get('candidate_research_incomplete_count', 0)} 条，"
                 f"待刷新 {stats.get('refresh_deferred_count', 0)} 条，"
                 f"待补全人物交付信息 {stats.get('delivery_profile_deferred_count', 0)} 条，"
                 f"待补全一手链接 {stats.get('delivery_source_deferred_count', 0)} 条，"
@@ -459,8 +462,8 @@ class ParadigmReportGenerator:
         if run_incomplete:
             memo_heading = "## 本期运行状态 Memo"
             memo = (
-                f"本轮已发现 {stats.get('origin_count', 0)} 篇论文、Technical Report "
-                "与官方技术博客，但研究链路**尚未完成**，因此当前 0 条交付"
+                f"本轮已发现 {stats.get('origin_count', 0)} 份一手机制材料（含论文、"
+                "Technical Report、原创思想文章与原生实现），但研究链路**尚未完成**，因此当前 0 条交付"
                 "不是技术判断，也不能解释为本周没有值得关注的新工作。系统"
                 "不会用未完成样本冒充完整周报；已发现材料与已完成研究检查点"
                 "均已保留，后续运行会从 backlog 继续。"
@@ -472,8 +475,8 @@ class ParadigmReportGenerator:
         else:
             memo_heading = "## 本期研究 Memo"
             memo = (
-                f"本期共扫描 {stats.get('origin_count', 0)} 篇论文、Technical Report "
-                "与官方技术博客；在覆盖完整且已经完成研究判断的材料中，没有"
+                f"本期共扫描 {stats.get('origin_count', 0)} 份一手机制材料（含论文、"
+                "Technical Report、原创思想文章与原生实现）；在覆盖完整且已经完成研究判断的材料中，没有"
                 "内容同时跨过**技术外延、发布者可信度和外部承接**三道门槛。"
                 "技术范式不会按周出现，这一期不为了维持篇幅把局部 benchmark "
                 "改进或作者的宏大叙事包装成趋势。"
@@ -510,6 +513,7 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         "name": item.name,
         "route_family": item.route_family,
         "report_kind": item.report_kind,
+        "freshness_assessment": item.freshness_assessment,
         "thesis": item.thesis,
         "background": item.background,
         "problem_shift": item.problem_shift,
@@ -603,6 +607,7 @@ def _compact_route_dossier(item: ParadigmCandidate) -> dict:
         "name": item.name,
         "route_family": item.route_family,
         "report_kind": item.report_kind,
+        "freshness_assessment": item.freshness_assessment,
         "thesis": item.thesis,
         "background": item.background,
         "problem_shift": item.problem_shift,
@@ -718,7 +723,8 @@ def _editorial_frame_payload(
             "why_now": candidate.why_now[:400],
             "trend_interpretation": candidate.trend_interpretation[:500],
             "primary_source_urls": [
-                source.url for source in _primary_sources(candidate)[:4]
+                primary_material_url(source)
+                for source in _primary_sources(candidate)[:4]
             ],
             "key_people": [
                 profile.name
@@ -823,7 +829,7 @@ def _route_draft_violations(
         violations.append("出现英文原文长句或成段摘录")
     linked_urls = _markdown_link_targets(value)
     if not any(
-        _normalized_url(source.url) in linked_urls
+        _normalized_url(primary_material_url(source)) in linked_urls
         for source in _primary_sources(candidate)
     ):
         violations.append("路线正文没有原样附上一手材料 Markdown 链接")
@@ -841,15 +847,21 @@ def _route_draft_violations(
         attributable.append(organization["name"])
     if attributable and not any(value in content for value in attributable):
         violations.append("路线正文没有交代已核验的关键推动者或发布组织")
+    violations.extend(_ungrounded_url_violations(value, [candidate]))
     return violations
 
 
 def _evidence_dossier(item: TechnicalEvidence) -> dict:
+    durable_url = (
+        primary_material_url(item)
+        if item.evidence_type in ORIGIN_EVIDENCE_TYPES
+        else item.url
+    )
     return {
         "type": item.evidence_type.value,
         "source": item.source,
         "title": item.title,
-        "url": item.url,
+        "url": durable_url,
         "summary": item.summary[:1000],
         "published_at": item.published_at,
         "authors": item.authors,
@@ -888,6 +900,7 @@ def _public_stats(stats: dict) -> dict:
         "analysis_completed_count",
         "analysis_deferred_count",
         "candidate_deferred_count",
+        "candidate_research_incomplete_count",
         "refresh_deferred_count",
         "delivery_profile_deferred_count",
         "delivery_source_deferred_count",
@@ -973,6 +986,7 @@ def _editorial_violations(
             violations.append("缺少确定性的关键人物与公开联系入口")
     if require_primary_sources:
         violations.extend(_primary_source_violations(content, candidates or []))
+    violations.extend(_ungrounded_url_violations(content, candidates or []))
     return violations
 
 
@@ -999,7 +1013,7 @@ def _editorial_advisories(content: str) -> list[str]:
 
 def _primary_sources(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
     """返回本期路线可直接追溯的一手材料，优先本周新增而非历史证据。"""
-    primary_types = {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG}
+    primary_types = ORIGIN_EVIDENCE_TYPES
     sources = [
         value
         for value in candidate.evidence
@@ -1014,7 +1028,7 @@ def _primary_sources(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
     deduplicated: list[TechnicalEvidence] = []
     seen: set[str] = set()
     for value in selected:
-        normalized = value.url.strip().rstrip("/").casefold()
+        normalized = primary_material_url(value).strip().rstrip("/").casefold()
         if normalized in seen:
             continue
         seen.add(normalized)
@@ -1090,7 +1104,10 @@ def _primary_source_violations(
         if not sources:
             violations.append(f"路线「{route}」没有可验证的一手材料 URL")
             continue
-        if not any(_normalized_url(value.url) in linked_urls for value in sources):
+        if not any(
+            _normalized_url(primary_material_url(value)) in linked_urls
+            for value in sources
+        ):
             violations.append(f"路线「{route}」没有附上可点击的一手材料链接")
     return violations
 
@@ -1107,9 +1124,12 @@ def _attach_primary_source_index(
     for candidate in candidates:
         route = candidate.route_family or candidate.lineage_parent or candidate.name
         bucket = grouped.setdefault(route, [])
-        existing = {item.url.strip().rstrip("/").casefold() for item in bucket}
+        existing = {
+            primary_material_url(item).strip().rstrip("/").casefold()
+            for item in bucket
+        }
         for source in _primary_sources(candidate):
-            normalized = source.url.strip().rstrip("/").casefold()
+            normalized = primary_material_url(source).strip().rstrip("/").casefold()
             if normalized not in existing:
                 bucket.append(source)
                 existing.add(normalized)
@@ -1117,13 +1137,14 @@ def _attach_primary_source_index(
     lines = [
         "## 原文与一手资料",
         "",
-        "以下链接由系统直接从入选路线的一手证据生成，便于回到论文或官方技术材料核验。",
+        "以下链接由系统直接从入选路线的一手证据生成，便于回到论文、原创文章、官方技术材料或原生实现核验。",
         "",
     ]
     for route, sources in grouped.items():
         safe_route = _markdown_label(route)
         links = "；".join(
-            f"[{_markdown_label(source.title or source.url)}](<{source.url.strip()}>)"
+            f"[{_markdown_label(source.title or primary_material_url(source))}]"
+            f"(<{primary_material_url(source)}>)"
             for source in sources
         )
         lines.append(f"- **{safe_route}**：{links or '缺少可验证的一手材料链接'}")
@@ -1397,7 +1418,21 @@ def _editorial_body(content: str) -> str:
 
 
 def _normalized_url(value: str) -> str:
-    return value.strip().rstrip("/").casefold()
+    raw = value.strip()
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return raw
+    path = parsed.path.rstrip("/")
+    return urlunsplit(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            path,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
 
 
 def _markdown_link_targets(content: str) -> set[str]:
@@ -1412,6 +1447,76 @@ def _markdown_link_targets(content: str) -> set[str]:
         target = match.group("angle") or match.group("plain") or ""
         targets.add(_normalized_url(target))
     return targets
+
+
+def _ungrounded_url_violations(
+    content: str,
+    candidates: list[ParadigmCandidate],
+) -> list[str]:
+    """Reject every model-written HTTP URL that is absent from evidence.
+
+    Deterministic source/contact sections use the same allow-list. This closes
+    the failure mode where a draft contains one valid required paper link plus
+    an additional plausible-looking but nonexistent company/blog URL.
+    """
+
+    if not candidates:
+        return []
+    allowed = _grounded_http_urls(candidates)
+    observed = _all_http_urls(content)
+    unknown = sorted(observed - allowed)
+    if not unknown:
+        return []
+    return [
+        "出现未由证据或人物档案提供的链接："
+        + "、".join(unknown[:5])
+    ]
+
+
+def _grounded_http_urls(candidates: list[ParadigmCandidate]) -> set[str]:
+    urls: set[str] = set()
+    for candidate in candidates:
+        for evidence in candidate.evidence:
+            for value in (evidence.url, primary_material_url(evidence)):
+                safe = safe_public_contact_target("source", str(value))
+                if safe:
+                    urls.add(_normalized_url(safe))
+        organization = verified_organization_attribution(candidate)
+        source_url = safe_public_contact_target(
+            "source", str(organization.get("source_url", ""))
+        )
+        if source_url:
+            urls.add(_normalized_url(source_url))
+        for profile in candidate.researchers:
+            for label, target in profile.public_contacts.items():
+                safe = safe_public_contact_target(str(label), str(target))
+                if safe.startswith(("http://", "https://")):
+                    urls.add(_normalized_url(safe))
+            for work in profile.representative_works:
+                if not isinstance(work, dict):
+                    continue
+                safe = safe_public_contact_target(
+                    "source", str(work.get("url", ""))
+                )
+                if safe:
+                    urls.add(_normalized_url(safe))
+    return urls
+
+
+def _all_http_urls(content: str) -> set[str]:
+    urls = set(_markdown_link_targets(content))
+    # Markdown closers and Chinese prose punctuation are not part of a URL.
+    # A broad ``\S+`` pattern would swallow ``)，并可[下一链接](`` and then
+    # falsely reject an otherwise evidence-grounded report.
+    for match in re.finditer(
+        r"https?://[^\s<>()\[\]\"'，。；：！？]+",
+        content,
+        re.IGNORECASE,
+    ):
+        value = match.group(0).rstrip(".,;:!?)]}，。；：！？")
+        if value:
+            urls.add(_normalized_url(value))
+    return urls
 
 
 def _quality_event_detail(
@@ -1431,7 +1536,7 @@ def _quality_event_detail(
     linked_routes = sum(
         bool(_primary_sources(value))
         and any(
-            _normalized_url(source.url) in linked_urls
+            _normalized_url(primary_material_url(source)) in linked_urls
             for source in _primary_sources(value)
         )
         for value in candidates
