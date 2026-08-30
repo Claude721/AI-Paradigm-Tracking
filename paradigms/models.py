@@ -312,6 +312,35 @@ class TechnicalEvidence:
     keywords: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """Normalize nullable external fields before they reach persistence.
+
+        Several upstream JSON APIs use ``null`` for an unknown publication
+        date even when the field itself is present.  Dataclass annotations do
+        not enforce runtime types, so without this boundary ``None`` can be
+        serialized into SQLite and only fail when the pending queue is read
+        back.  Missing optional values are losslessly represented by the
+        domain defaults; non-null structural type errors remain visible to the
+        persistence validator.
+        """
+
+        for name in (
+            "source",
+            "title",
+            "url",
+            "summary",
+            "published_at",
+            "organization",
+        ):
+            if getattr(self, name) is None:
+                setattr(self, name, "")
+        for name in ("authors", "keywords"):
+            if getattr(self, name) is None:
+                setattr(self, name, [])
+        for name in ("metrics", "identifiers", "raw"):
+            if getattr(self, name) is None:
+                setattr(self, name, {})
+
     @property
     def fingerprint(self) -> str:
         """跨周稳定去重键：优先学术标识，最后才使用 URL。"""

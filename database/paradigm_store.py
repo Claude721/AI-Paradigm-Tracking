@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from paradigms.models import (
     candidate_from_dict,
     technical_evidence_from_dict,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -35,6 +38,19 @@ class ReportOutboxJob:
     last_error: str = ""
     failure_kind: str = ""
     quarantined_at: str = ""
+
+
+@dataclass
+class EvidenceCheckpointResult:
+    """Result of a loss-contained evidence persistence checkpoint."""
+
+    accepted: list[TechnicalEvidence]
+    rejected_count: int = 0
+    rejection_sources: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def written_count(self) -> int:
+        return len(self.accepted)
 
 
 class ParadigmStore:
@@ -256,11 +272,47 @@ class ParadigmStore:
 
     def mark_evidence(
         self, evidence: list[TechnicalEvidence], analyzed: bool = False
-    ) -> None:
+    ) -> EvidenceCheckpointResult:
+        """Validate every evidence object before opening the write transaction.
+
+        One malformed external record must not poison the SQLite state or roll
+        back healthy peers.  Nullable optional values are normalized by the
+        domain model; remaining structural violations are excluded from this
+        checkpoint and reported by source without logging external content.
+        """
+
+        accepted: list[TechnicalEvidence] = []
+        prepared: list[tuple[TechnicalEvidence, str, str]] = []
+        rejection_sources: dict[str, int] = {}
+        for item in evidence:
+            raw_source = getattr(item, "source", "")
+            source = raw_source.strip() if isinstance(raw_source, str) else ""
+            source = re.sub(r"[^A-Za-z0-9_.:-]+", "_", source)[:64] or "unknown"
+            try:
+                canonical = technical_evidence_from_dict(item.to_dict())
+                payload = json.dumps(
+                    canonical.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                signature = _content_signature(canonical)
+                # Compute the fingerprint before the transaction as well; a
+                # malformed required scalar must not leave a partial batch.
+                canonical.fingerprint
+            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                rejection_sources[source] = rejection_sources.get(source, 0) + 1
+                logger.error(
+                    "证据持久化契约拒绝一条记录 source=%s error=%s",
+                    source,
+                    type(exc).__name__,
+                )
+                continue
+            accepted.append(canonical)
+            prepared.append((canonical, payload, signature))
+
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
-            for item in evidence:
-                payload = json.dumps(item.to_dict(), ensure_ascii=False, sort_keys=True)
+            for item, payload, signature in prepared:
                 analyzed_at = now if analyzed else None
                 conn.execute(
                     """
@@ -285,7 +337,7 @@ class ParadigmStore:
                     """,
                     (
                         item.fingerprint,
-                        _content_signature(item),
+                        signature,
                         item.source,
                         item.evidence_type.value,
                         item.url,
@@ -295,6 +347,11 @@ class ParadigmStore:
                         analyzed_at,
                     ),
                 )
+        return EvidenceCheckpointResult(
+            accepted=accepted,
+            rejected_count=len(evidence) - len(accepted),
+            rejection_sources=rejection_sources,
+        )
 
     def load_pending_origins(
         self,

@@ -263,6 +263,36 @@ class ExecutionReliabilityTests(unittest.TestCase):
                     source_version=config.PARADIGM_STATE_SCHEMA_VERSION,
                 )
 
+    def test_evidence_checkpoint_isolates_malformed_peer_before_sqlite_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "radar.db"
+            store = ParadigmStore(database)
+            healthy = _origin("2608.00034")
+            malformed = _origin("2608.00035")
+            malformed.published_at = {"unexpected": "object"}
+
+            checkpoint = store.mark_evidence(
+                [healthy, malformed],
+                analyzed=False,
+            )
+
+            self.assertEqual(checkpoint.written_count, 1)
+            self.assertEqual(checkpoint.rejected_count, 1)
+            self.assertEqual(checkpoint.rejection_sources, {"arxiv": 1})
+            self.assertEqual(
+                [item.fingerprint for item in store.load_pending_origins()],
+                [healthy.fingerprint],
+            )
+            self.assertEqual(
+                migrate_state(
+                    database,
+                    source_version=config.PARADIGM_STATE_SCHEMA_VERSION,
+                ),
+                config.PARADIGM_STATE_SCHEMA_VERSION,
+            )
+
     def test_origin_batches_checkpoint_and_leave_remainder_pending(self) -> None:
         first, second = _origin("2608.00001"), _origin("2608.00002")
         orchestrator = object.__new__(ParadigmOrchestrator)

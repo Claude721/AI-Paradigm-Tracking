@@ -167,7 +167,7 @@ class CommunityEvidenceClient:
                     title=full_name,
                     url=repo.get("html_url", ""),
                     summary=repo.get("description") or "",
-                    published_at=updated_at or repo.get("created_at", ""),
+                    published_at=str(updated_at or repo.get("created_at") or ""),
                     authors=[(repo.get("owner") or {}).get("login", "")],
                     metrics={
                         "stars": repo.get("stargazers_count", 0) or 0,
@@ -224,7 +224,7 @@ class CommunityEvidenceClient:
                     title=hit.get("title") or query,
                     url=f"https://news.ycombinator.com/item?id={quote(str(object_id))}",
                     summary=hit.get("story_text") or "",
-                    published_at=hit.get("created_at", ""),
+                    published_at=str(hit.get("created_at") or ""),
                     authors=[hit.get("author", "")],
                     metrics={
                         "score": hit.get("points", 0) or 0,
@@ -300,7 +300,7 @@ class CommunityEvidenceClient:
                     title=f"{social_name} 讨论 {lead_title}",
                     url=url,
                     summary=str(post.get("text", "")),
-                    published_at=str(post.get("created_at", "")),
+                    published_at=str(post.get("created_at") or ""),
                     authors=[str(user.get("name") or username)],
                     metrics={
                         "likes": metrics.get("like_count", 0) or 0,

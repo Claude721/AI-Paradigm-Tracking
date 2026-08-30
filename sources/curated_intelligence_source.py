@@ -430,7 +430,7 @@ class CuratedKOLXSource:
                         title=text[:180],
                         url=post_url,
                         summary=text,
-                        published_at=str(post.get("created_at", "")),
+                        published_at=str(post.get("created_at") or ""),
                         authors=[author],
                         organization=str(record.get("name", "")),
                         metrics={

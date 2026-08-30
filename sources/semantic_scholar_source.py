@@ -63,7 +63,7 @@ class SemanticScholarClient:
             title=paper.get("title", evidence.title),
             url=paper.get("url", ""),
             summary=f"{paper.get('venue', '')} 学术图谱引用与作者信号",
-            published_at=paper.get("publicationDate", ""),
+            published_at=str(paper.get("publicationDate") or ""),
             authors=[item.get("name", "") for item in paper.get("authors", [])],
             organization=paper.get("venue", ""),
             metrics={

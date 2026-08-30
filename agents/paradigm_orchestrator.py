@@ -260,7 +260,24 @@ class ParadigmOrchestrator:
         stats.update({f"origin_{key}": value for key, value in incremental.items()})
         # 发现和分析必须是两个独立检查点。先把本轮所有新原点写成 pending，
         # 即使后续只处理其中一部分，也不会把运行预算误写成研究淘汰。
-        self.store.mark_evidence(origins, analyzed=False)
+        origin_checkpoint = self.store.mark_evidence(origins, analyzed=False)
+        origins = origin_checkpoint.accepted
+        stats["evidence_checkpoint_rejected_count"] = (
+            origin_checkpoint.rejected_count
+        )
+        checkpoint_rejection_sources = dict(
+            origin_checkpoint.rejection_sources
+        )
+        if origin_checkpoint.rejected_count:
+            # 核心学术原点未能形成可恢复检查点时，本轮覆盖地图也不闭合；
+            # 否则可能在实际漏掉原点的情况下错误推进 bootstrap 基线。
+            stats["landscape_coverage_incomplete"] = True
+            run_audit.event(
+                "evidence_checkpoint_contract",
+                "warning",
+                f"发现阶段有 {origin_checkpoint.rejected_count} 条记录未满足持久化"
+                f"契约；按来源隔离 {checkpoint_rejection_sources}，健康记录继续处理",
+            )
         pending_origins = self.store.load_pending_origins(
             exclude_fingerprints={item.fingerprint for item in origins}
         )
@@ -545,11 +562,30 @@ class ParadigmOrchestrator:
             )
 
         # 支持证据单独去重入库，但绝不独立生成范式。
-        self.store.mark_evidence(batch.supporting, analyzed=False)
-        self.store.mark_evidence(
+        supporting_checkpoint = self.store.mark_evidence(
+            batch.supporting,
+            analyzed=False,
+        )
+        candidate_evidence_checkpoint = self.store.mark_evidence(
             [evidence for candidate in candidates for evidence in candidate.evidence],
             analyzed=False,
         )
+        for result in (supporting_checkpoint, candidate_evidence_checkpoint):
+            stats["evidence_checkpoint_rejected_count"] += result.rejected_count
+            for source, count in result.rejection_sources.items():
+                checkpoint_rejection_sources[source] = (
+                    checkpoint_rejection_sources.get(source, 0) + count
+                )
+        if stats["evidence_checkpoint_rejected_count"]:
+            stats["evidence_checkpoint_rejection_sources"] = (
+                checkpoint_rejection_sources
+            )
+            run_audit.event(
+                "evidence_checkpoint_contract",
+                "warning",
+                f"本轮共隔离 {stats['evidence_checkpoint_rejected_count']} 条不满足"
+                f"持久化契约的记录；来源 {checkpoint_rejection_sources}",
+            )
         reportable = [candidate for candidate in candidates if is_reportable(candidate)]
         delivery_profile_deferred = [
             candidate
@@ -665,6 +701,7 @@ class ParadigmOrchestrator:
 
         stats["run_incomplete"] = bool(
             stats["recall_coverage_incomplete"]
+            or stats["evidence_checkpoint_rejected_count"]
             or stats["analysis_deferred_count"]
             or stats["candidate_deferred_count"]
             or stats["candidate_research_incomplete_count"]
@@ -674,7 +711,8 @@ class ParadigmOrchestrator:
             or stats["report_safety_deferred_count"]
         )
         stats["pending_work_count"] = (
-            stats["analysis_deferred_count"]
+            stats["evidence_checkpoint_rejected_count"]
+            + stats["analysis_deferred_count"]
             + stats["candidate_deferred_count"]
             + stats["candidate_research_incomplete_count"]
             + stats["refresh_deferred_count"]

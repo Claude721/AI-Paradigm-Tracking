@@ -3016,6 +3016,27 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertEqual(source.coverage()["requests"], 3)
         self.assertEqual(source.coverage()["status"], "completed")
 
+    def test_openalex_null_publication_date_is_normalized_before_storage(self) -> None:
+        work = {
+            "id": "https://openalex.org/W-null-date",
+            "display_name": "A World Model with an Unknown Publication Date",
+            "publication_date": None,
+            "primary_topic": {"display_name": "World Models"},
+            "abstract_inverted_index": {"world": [0], "model": [1]},
+        }
+        evidence = OpenAlexSource(searches=['"world model"'])._parse([work])
+
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0].published_at, "")
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            checkpoint = store.mark_evidence(evidence, analyzed=False)
+            restored = store.load_pending_origins()
+
+        self.assertEqual(checkpoint.rejected_count, 0)
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(restored[0].published_at, "")
+
     def test_openreview_uses_public_search_endpoint_instead_of_challenged_notes(self) -> None:
         response = httpx.Response(
             200,

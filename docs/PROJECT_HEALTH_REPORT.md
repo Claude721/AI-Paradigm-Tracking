@@ -1,7 +1,7 @@
 # AI 技术范式雷达｜V0 工程体检
 
-> 更新日期：2026-08-29
-> 结论：三次 GitHub Actions 失败暴露的 outbox 队首阻塞已经修复，代码与离线发布门达到 **V0 候选基线**；仍需一次 GitHub Smoke 和一次保留历史状态的正常周窗运行完成线上验收，当前不能把离线通过写成生产已稳定。
+> 更新日期：2026-08-30
+> 结论：三次 GitHub Actions 失败暴露的 outbox 队首阻塞，以及首次正式 V0 验收暴露的证据持久化契约缺口均已修复；代码与离线发布门达到 **V0 候选基线**。GitHub Smoke 已通过，仍需一次保留历史状态的正常周窗运行完成线上验收，当前不能把离线通过写成生产已稳定。
 
 ## 当前架构结论
 
@@ -15,7 +15,15 @@
 
 仅修这一行仍不足以达到可运维 V0，因此同时加入 poison-message 处置：schema v6 持久化渲染尝试次数与失败类型；确定性输入缺陷、以及内置修订后仍失败的最终质量契约立即隔离，网络/超时等其他渲染失败默认 3 次后隔离；候选与证据在同一事务中退回 `pending_deep`，隔离记录保留审计但不再占住活动队首。状态恢复会主动检查旧 outbox 的当前输入契约，工作流恢复后执行只读 `--inspect-state`。SMTP 失败仍保留已验证报告并遵守 `EMAIL_PUSH_REQUIRED`，没有被隔离机制弱化。
 
-这版 V0 重点收口了此前完整运行、思想源扩展、三次 Actions 日志与逐分支故障注入暴露出的十三类系统性问题：
+## 2026-08-30 正式运行失败复盘
+
+`logs_90220369395.zip` 对应的 Smoke 已成功，随后正式运行恢复 schema v6 健康状态：160 条路线、5324 条证据、8 次交付，活动 outbox、隔离任务和待处理项均为 0。生产发现取得 2785 个原点和 333 条支持证据，但在发现检查点之后、进入模型分析之前失败：`load_pending_origins()` 反序列化一条证据时抛出 `ValueError: 证据状态字段 published_at 必须是字符串`。状态准备使用相同的领域校验再次拒绝该数据库，因此损坏状态没有覆盖上一份健康 artifact；旧 outbox 修复并未回归，Secrets 也不是本次根因。
+
+最高概率输入是 OpenAlex 响应中的 `publication_date: null`。适配器过去使用 `get("publication_date", "")`，字段存在但值为 JSON null 时仍会得到 Python `None`；Hugging Face、Follow Builders 等其他可空日期入口也有相同形态。领域对象在首次写库时没有做完整回环校验，导致本应在来源边界消化的可空值先进入 SQLite，再在恢复边界被更严格的校验拒绝。Smoke 使用独立最小请求，只验证连通性、鉴权和少量响应字段，不运行生产适配器、发现合并、SQLite 检查点或序列化回环，因此 Smoke 成功与这次正式失败并不矛盾。
+
+修复后，上游可空标量在领域边界统一规范化；证据写库前逐条执行与恢复路径相同的 canonical round-trip 校验。结构仍不合法的单条记录按来源计数并隔离，健康同批记录继续落库；拒绝计数进入 `run_incomplete` 和 pending 账本，核心原点拒绝还会阻止覆盖地图版本推进，避免形成“成功空报告”或漏扫基线。下一次线上验收应保持 `reset_state=false`，继续恢复上一份健康 artifact，不需要清库。
+
+这版 V0 重点收口了此前完整运行、思想源扩展、四次 Actions 日志与逐分支故障注入暴露出的十四类系统性问题：
 
 1. **旧材料被误写成本周新技术。** 清空数据库只改变 `first_seen`，不再改变发布时间语义。报告前新增独立时效闸门：窗口内有可核验一手发布日期才是 `recent_primary`；旧路线只有本期新增承接、采用或指标量级变化时才作为 `historical_reactivated/update`。官方页面的 `dateModified` 与 `datePublished` 分栏，不能互相替代。
 2. **报告带入会过期或猜测的链接。** 高优先级页面始终保存索引发现的 canonical URL，不保存重定向后的签名 CDN 地址；Hugging Face `resolve` 被规范为稳定 `blob` 页面，带 `Expires`、`Signature` 或 `X-Amz-*` 的对象 URL 直接拒绝。报告正文、写作 dossier、质量闸门和确定性原文索引统一使用同一 URL 规范。现在不仅要求“至少一个原文”，还逐一核对全文所有 URL 与证据/人物档案，额外猜测链接和擅自改变路径大小写都会阻断交付；中文标点相邻的 Markdown 链接有专门解析回归。持久化报告续投前也会重新执行当前质量契约，旧制品不能绕过修复。
@@ -30,6 +38,7 @@
 11. **报告坏快照永久占住 outbox。** 活动状态与 `quarantined` 分离，渲染次数跨进程持久化；确定性输入缺陷与耗尽重试的制品不再阻塞新研究，候选退回深挖而不是被删除或误写成技术淘汰。
 12. **路线归因规则前后不一致。** 路线草稿和全文都接受“已核验关键人物或已核验发布组织”，确定性人物/原文索引在最终质量检查前装配。新增回归直接模拟三次 Actions 的“正文只有组织、候选已有核验人物”形态。
 13. **arXiv 项目链接保留 TeX 转义。** `paper\_files` 过去会变成 `%5C` 后请求不存在的 NeurIPS 页面；现在只解开已知安全的 TeX 标点转义，仍含未知反斜杠的链接拒绝请求。Arc Institute 与 Isomorphic Labs 的长期 404 聚合根入口也已更新为当前官方 News 索引。
+14. **外部可空字段先写后验造成 SQLite 自污染。** OpenAlex 等接口可能显式返回 JSON null；现在日期及其他可空领域标量在来源边界规范化，写库前逐条执行和恢复路径相同的结构校验。坏记录只隔离自身并计入未完成账本，健康同批记录继续提交；核心原点被拒绝时覆盖地图基线不会推进。
 
 ## 召回与报告边界
 
@@ -42,6 +51,7 @@
 ## 工程可靠性
 
 - 发现结果、候选、路线草稿、渲染报告和交付确认分层检查点化。报告或 SMTP 失败不会回滚研究；只有交付确认后才更新 `last_reported_signature`。
+- 证据检查点先在事务外逐条完成 canonical round-trip；任何结构错误只拒绝对应记录并记录来源计数，不会把同批健康对象一并回滚，也不会把带坏 payload 的数据库上传为新状态。
 - 状态 artifact 使用不可变 `run_id` 名称，恢复时从新到旧执行 schema v6 的 SQLite、领域 payload 与活动 outbox 输入契约校验并迁移；找不到健康状态时 fail closed，只有显式 `reset_state=true` 才冷启动。
 - 单个发现源超时、部分失败、429、运行预算耗尽与 Rubric 淘汰分开审计。存在 backlog 或覆盖缺口时，0 条交付只能称为研究未完成，不能写成本周没有新技术。
 - 多路线写作按路线保存 fragment；Skill 或证据变化会改变 fragment key。已渲染报告在发送前重新验证，避免历史制品携带旧链接或旧编辑规则。
@@ -50,9 +60,9 @@
 
 ## 本地发布门
 
-2026-08-29 使用 `venv/bin/python scripts/offline_checks.py` 完成 hermetic 发布门：
+2026-08-30 使用 `venv/bin/python scripts/offline_checks.py` 完成 hermetic 发布门：
 
-- **251 项单元测试通过**；
+- **253 项单元测试通过**；
 - 测试子进程清空生产密钥和可变研究配置，并把 HTTP 代理指向拒绝端口，确认测试不依赖真实网络、邮箱或 `.env`；
 - stdlib 模式下失败提醒可导入；手工探针模块只导入不发请求；
 - `compileall` 通过；
@@ -61,7 +71,7 @@
 
 本轮随后执行本地 `python main.py --doctor` 静态体检；它只检查配置契约，不请求真实服务。项目内 5 个研究 Skill 另行通过 `skill-creator` 的 `quick_validate.py` 格式校验。上一轮在 2026-08-15 对公开思想源做过只读端点验收：LessWrong 两个官方 Feed 与 Alignment Forum Feed **3/3 成功**，19 个手工核验 KOL Feed **19/19 成功**；这只是当时的网络快照，不替代每次 GitHub Smoke 的实时健康检查。本轮没有重复调用真实信源。
 
-新增回归覆盖：三次日志对应的组织归因/人物终检不一致、旧状态输入契约迁移、渲染尝试耗尽后无损隔离、隔离恢复后继续新研究、本轮新报告被隔离时保持 Workflow 失败、TeX 转义项目 URL、当前 Arc/Isomorphic 官方入口、工作流状态可观测性，以及此前的模型基数、批次隔离、日期、来源权威性、思想源、人物、URL 与续投契约。
+新增回归覆盖：三次日志对应的组织归因/人物终检不一致、旧状态输入契约迁移、渲染尝试耗尽后无损隔离、隔离恢复后继续新研究、本轮新报告被隔离时保持 Workflow 失败、TeX 转义项目 URL、当前 Arc/Isomorphic 官方入口、工作流状态可观测性、OpenAlex null 发布日期的来源到 SQLite 回环，以及同一证据检查点中坏记录与健康记录的事务前隔离；同时保留此前的模型基数、批次隔离、日期、来源权威性、思想源、人物、URL 与续投契约。
 
 ## 上线验收与剩余边界
 
@@ -69,8 +79,8 @@
 
 提交默认分支后按以下顺序验收：
 
-1. `smoke_only=true`：确认 Qwen、arXiv、HF、OpenAlex、GitHub、官方页面、LessWrong/KOL Feed、Tavily 与 SMTP 登录符合当前配置；Reddit/X/Semantic Scholar 未配置时应明确跳过。
-2. `smoke_only=false`、`reset_state=false`：保留三次失败形成的 artifact，验证 schema v6 迁移与旧 outbox 恢复。若旧快照能按新终检通过，预期先收到续投邮件，随后 Actions 自动排队完整研究 run；若它被判为不兼容或耗尽重试，预期日志出现 `quarantined`，同一进程继续新研究，而不是第四次卡死。若随后生成的新报告仍被隔离，本轮应保持失败但状态 artifact 可恢复；这代表报告质量仍未达标，不是状态队列再次卡死。
-3. 下载审计 artifact，检查 `official_repository_release_coverage`、`report_freshness`、`pipeline_result.json`、逐官方页面健康度和最终原文索引。报告中的链接应全部是稳定 landing/blob/论文页，不得出现带签名 CDN 查询参数。
+1. 已完成的 `smoke_only=true` 只证明 Qwen、arXiv、HF、OpenAlex、GitHub、官方页面、LessWrong/KOL Feed、Tavily 与 SMTP 的最小能力符合当前配置；它不证明生产解析器或 SQLite 回环正确。
+2. 直接运行 `smoke_only=false`、`reset_state=false`：恢复上一份健康 schema v6 artifact，并验证发现、来源规范化、证据检查点与后续分析能越过本次失败位置。不得为了绕过该错误使用 `reset_state=true`。
+3. 下载审计 artifact，确认 `evidence_checkpoint_rejected_count` 为 0；若非 0，任务必须显示研究未完成并给出按来源计数，而健康记录仍应存在于状态。继续检查 `official_repository_release_coverage`、`report_freshness`、`pipeline_result.json`、逐官方页面健康度和最终原文索引。报告链接应全部是稳定 landing/blob/论文页，不得出现带签名 CDN 查询参数。
 
 这次不需要新增 Secrets 或 Variables：LessWrong、Alignment Forum 与 KOL Feed 均为公开 RSS，工作流已有默认值。若未来希望读取已整理的 KOL X 账号，才需要保留已有的可选 `TWITTER_BEARER_TOKEN`，并由实际 Smoke 验证 X Recent Search 计划权限。官方仓库发现复用工作流内置 `GITHUB_TOKEN`；自动 continuation 使用同一临时 token 的 `actions:write`，仓库内容权限仍为只读。

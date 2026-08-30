@@ -150,7 +150,7 @@ def _parse_results(
                 title=title,
                 url=url,
                 summary=summary[:3000],
-                published_at=str(item.get("published_date", "")),
+                published_at=str(item.get("published_date") or ""),
                 metrics={"search_relevance": nonnegative_number(item.get("score", 0))},
                 raw={
                     "relationship": (

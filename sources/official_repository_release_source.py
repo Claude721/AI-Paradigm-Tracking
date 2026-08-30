@@ -299,7 +299,7 @@ class OfficialRepositoryReleaseSource:
             repository_url = str(repository.get("html_url", ""))
             full_name = str(repository.get("full_name", repository.get("name", "")))
             title = str(repository.get("name", full_name))
-            created_at = str(repository.get("created_at", ""))
+            created_at = str(repository.get("created_at") or "")
             metrics = {
                 "stars": int(nonnegative_number(repository.get("stargazers_count", 0))),
                 "forks": int(nonnegative_number(repository.get("forks_count", 0))),
@@ -421,7 +421,9 @@ class OfficialRepositoryReleaseSource:
                     summary=material_summary,
                     # 仓库创建时间是发布事件时间，不是它所链接论文/博客的
                     # 发布时间。只有从外部材料本身解析到的日期才能填这里。
-                    published_at=primary_publication_dates.get(primary_url, ""),
+                    published_at=str(
+                        primary_publication_dates.get(primary_url) or ""
+                    ),
                     organization=organization,
                     identifiers=identifiers,
                     keywords=list(repository.get("topics") or []),
@@ -542,7 +544,7 @@ def _repository_native_origin(
 ) -> TechnicalEvidence:
     repository_url = str(repository.get("html_url", ""))
     full_name = str(repository.get("full_name", repository.get("name", "")))
-    created_at = str(repository.get("created_at", ""))
+    created_at = str(repository.get("created_at") or "")
     return TechnicalEvidence(
         source="official-repository-release",
         evidence_type=EvidenceType.ORIGINAL_IMPLEMENTATION,

@@ -266,7 +266,9 @@ class OpenAlexSource:
                     or (work.get("primary_location") or {}).get("landing_page_url")
                     or work.get("id", ""),
                     summary=abstract,
-                    published_at=work.get("publication_date", ""),
+                    # OpenAlex may include publication_date with JSON null;
+                    # dict.get(..., "") does not replace an explicit null.
+                    published_at=str(work.get("publication_date") or ""),
                     authors=authors,
                     organization=_first_institution(authorships),
                     metrics={

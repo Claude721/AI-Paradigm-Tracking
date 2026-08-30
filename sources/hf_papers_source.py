@@ -40,7 +40,7 @@ class HuggingFacePapersSource(BaseSource):
             author_names = [a.get("name", "") for a in authors if a.get("name")]
             first_author = author_names[0] if author_names else ""
 
-            published = item.get("publishedAt", "")
+            published = str(item.get("publishedAt") or "")
             if published:
                 try:
                     published_dt = datetime.fromisoformat(

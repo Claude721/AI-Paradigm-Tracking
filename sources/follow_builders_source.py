@@ -191,7 +191,7 @@ class FollowBuildersSource(BaseSource):
                         language="",
                         topics=["twitter", "ai-builder", handle],
                         author=f"{name} (@{handle})",
-                        created_at=tweet.get("createdAt", ""),
+                        created_at=str(tweet.get("createdAt") or ""),
                         extra={
                             "likes": likes,
                             "retweets": retweets,
@@ -226,7 +226,7 @@ class FollowBuildersSource(BaseSource):
                     language="",
                     topics=["podcast", "ai-podcast", podcast_name.lower().replace(" ", "-")],
                     author=podcast_name,
-                    created_at=episode.get("publishedAt", ""),
+                    created_at=str(episode.get("publishedAt") or ""),
                     extra={
                         "video_id": episode.get("videoId", ""),
                         "podcast_name": podcast_name,
@@ -260,7 +260,7 @@ class FollowBuildersSource(BaseSource):
                     language="",
                     topics=["blog", "ai-blog", blog_name.lower().replace(" ", "-")],
                     author=author or blog_name,
-                    created_at=article.get("publishedAt", ""),
+                    created_at=str(article.get("publishedAt") or ""),
                     extra={
                         "blog_name": blog_name,
                     },
