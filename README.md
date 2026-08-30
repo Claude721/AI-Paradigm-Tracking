@@ -21,7 +21,7 @@
           ↓
  从低分辨率运行图递进构建技术心智模型
           ↓
- 研究结果持久化 → 研究总编辑生成 Memo → 邮件 outbox 交付
+ 研究结果持久化 → 研究总编辑生成 Memo → durable outbox → 邮件交付
 ```
 
 信源被分成三类，职责不能混用：
@@ -60,7 +60,9 @@ Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，�
 
 系统使用独立的 `database/paradigm_radar.db`。同一证据按 DOI、arXiv ID 或稳定 URL 去重；观察池和已报告路线会在每周重新检索近期讨论。有界刷新按“最久未尝试”轮转，成功但无变化也会清除旧执行错误，避免同一批历史路线永久占据队首或尾部路线饿死。同一范式只有在证据签名发生实质变化时才会以“进展更新”再次出现，因此相邻周不会原样重复。报告前还会独立做时效核验：**首次进入本地数据库不等于本周新发布**；只有窗口内有可核验发布日期的一手材料，才能标为新路线。旧材料只有出现窗口内独立讨论、复现、采用或可核验指标增量时才作为进展更新；网页 `dateModified` 不能冒充发布日期。
 
-研究检查点与报告交付是两个状态：研究完成后先把候选快照写入持久化 outbox；多路线报告再逐路线写作并逐条保存 checkpoint，最后只生成轻量的全局 Memo 框架，程序确定性装配全部路线。每个模型阶段都核对输入/输出身份与基数；漏回、外来对象或最终 Rubric 未闭合只会让对应对象回到 `pending`/`pending_deep`，批次异常会二分隔离，健康同批对象继续提交。任一路线、总编或 SMTP 失败都不会撤销已经完成的研究/草稿；下一次进程只复用快照、路线草稿或已验证报告完成最老的待交付任务，然后退出，避免恢复耗时与一整轮新研究叠加触发 GitHub 硬超时。GitHub Actions 会在恢复交付的状态快照上传成功后，自动排队第二个完整研究 run，因此周五任务不会被历史续投静默吞掉；本地手动运行若返回 `recovered_delivery_only`，仍需再运行一次 `python main.py`。SMTP 接受邮件后若进程在数据库确认前硬退出，系统按同一 `Message-ID` 至少一次重试，无法承诺所有邮箱服务商上的绝对 exactly-once。所有计划材料均完成判断后，如果没有候选跨过联合门槛，会正常发送一份空雷达；若仍有执行 backlog，邮件会标注“覆盖进行中”，不能把尚未分析误写成零创新。
+研究检查点与报告交付是两个状态：研究完成后先把候选快照写入持久化 outbox；多路线报告再逐路线写作并逐条保存 checkpoint，最后只生成轻量的全局 Memo 框架，程序确定性装配全部路线。每个模型阶段都核对输入/输出身份与基数；漏回、外来对象或最终 Rubric 未闭合只会让对应对象回到 `pending`/`pending_deep`，批次异常会二分隔离，健康同批对象继续提交。
+
+报告渲染采用有界重试：冻结快照缺少当前人物/一手来源输入契约，或完整制品在内置修订后仍违反确定性交付契约时，立即 `quarantined`；网络、超时等其他渲染失败默认累计 3 次后隔离。隔离记录保留在数据库供审计，其候选与证据在同一事务中退回 `pending_deep`，不再永久占住 outbox 队首。SMTP 故障与渲染故障分账：已验证报告继续留在 outbox，开启 `EMAIL_PUSH_REQUIRED` 时本轮仍明确失败，绝不提前登记已投递。成功恢复历史交付后，当前进程退出并由 GitHub Actions 在状态上传后排队完整研究 run；若恢复任务被隔离，则当前进程直接继续新研究。若本轮新生成的报告被隔离，状态会先安全保存，但当前 Workflow 仍失败，因为本轮没有完成报告/邮件交付；下次运行不会再被该坏任务卡住。SMTP 接受邮件后若进程在数据库确认前硬退出，系统按同一 `Message-ID` 至少一次重试，无法承诺所有邮箱服务商上的绝对 exactly-once。所有计划材料均完成判断后，如果没有候选跨过联合门槛，会正常发送一份空雷达；若仍有执行 backlog，邮件会标注“覆盖进行中”，不能把尚未分析误写成零创新。
 
 ## 配置与运行
 
@@ -82,6 +84,7 @@ python main.py             # 立即执行一次
 python main.py --schedule  # 每周五按配置持续运行
 python main.py --report    # 优先续投 outbox；否则不重新抓取，调用总编辑重建最近报告并发信
 python main.py --status    # 查看模型配置
+python main.py --inspect-state # 只读查看数据库与 outbox 健康度
 python main.py --doctor    # 零网络检查配置是否齐全
 python main.py --smoke-test # 小成本真实检查接口；SMTP 只登录、不发邮件
 ```
@@ -105,6 +108,7 @@ PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=600
 PARADIGM_REPORT_TIMEOUT_SECONDS=1200
 PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS=360
 PARADIGM_REPORT_ROUTE_CONCURRENCY=2
+PARADIGM_REPORT_MAX_RENDER_ATTEMPTS=3
 SCHEDULE_DAY_OF_WEEK=fri
 SCHEDULE_HOUR=9
 SCHEDULE_MINUTE=15

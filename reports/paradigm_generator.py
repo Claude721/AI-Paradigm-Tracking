@@ -34,6 +34,25 @@ logger = logging.getLogger(__name__)
 MOMENTUM_BRIEF_LABEL = "讨论势能判断"
 
 
+class ReportInputContractError(RuntimeError):
+    """A frozen outbox snapshot cannot satisfy the current delivery contract."""
+
+    def __init__(self, violations: list[str]):
+        self.violations = list(violations)
+        super().__init__(
+            "报告输入未满足人物/原文交付契约，候选应留在待补全状态："
+            + "；".join(self.violations)
+        )
+
+
+class ReportQualityContractError(RuntimeError):
+    """The fully assembled artifact still fails deterministic delivery gates."""
+
+    def __init__(self, violations: list[str]):
+        self.violations = list(violations)
+        super().__init__("报告最终制品未通过交付契约：" + "；".join(self.violations))
+
+
 class ParadigmReportGenerator:
     def __init__(
         self,
@@ -70,8 +89,6 @@ class ParadigmReportGenerator:
         ordered = sorted(candidates, key=lambda item: item.total_score, reverse=True)
         if not ordered:
             content = self._empty_report(date, stats)
-        elif self.client is False:
-            raise RuntimeError("无网络测试客户端不能生成正式研究报告")
         else:
             preflight = _report_input_violations(ordered)
             if preflight:
@@ -80,10 +97,9 @@ class ParadigmReportGenerator:
                     "input_incomplete",
                     "；".join(preflight),
                 )
-                raise RuntimeError(
-                    "报告输入未满足人物/原文交付契约，候选应留在待补全状态："
-                    + "；".join(preflight)
-                )
+                raise ReportInputContractError(preflight)
+            if self.client is False:
+                raise RuntimeError("无网络测试客户端不能生成正式研究报告")
             try:
                 route_drafts = await self._draft_routes(
                     date,
@@ -97,12 +113,12 @@ class ParadigmReportGenerator:
                     route_drafts,
                     stats,
                 )
-                revision_requests = _editorial_violations(
+                content = _attach_deterministic_sections(
                     content,
+                    stats,
                     ordered,
-                    require_primary_sources=False,
-                    require_researcher_index=False,
                 )
+                revision_requests = _editorial_violations(content, ordered)
                 draft_advisories = _editorial_advisories(content)
                 run_audit.event(
                     "weekly_memo_quality",
@@ -125,12 +141,11 @@ class ParadigmReportGenerator:
                         stats,
                         repair_violations=revision_requests,
                     )
-                # 原文 URL 来自已经核验并持久化的证据对象，不再依赖模型抄写。
-                # 总编辑仍应在正文自然链接论文；此处的确定性索引确保即使模型
-                # 漏写，最终邮件里的每条路线也一定能追溯到一手材料。
-                content = _attach_coverage_boundary(content, stats)
-                content = _attach_researcher_index(content, ordered)
-                content = _attach_primary_source_index(content, ordered)
+                    content = _attach_deterministic_sections(
+                        content,
+                        stats,
+                        ordered,
+                    )
                 violations = _editorial_violations(content, ordered)
                 if violations:
                     run_audit.event(
@@ -138,13 +153,16 @@ class ParadigmReportGenerator:
                         "failed",
                         _quality_event_detail(content, ordered, violations),
                     )
-                    raise ValueError("；".join(violations))
+                    raise ReportQualityContractError(violations)
                 advisories = _editorial_advisories(content)
                 run_audit.event(
                     "weekly_memo_quality",
                     "passed_with_advisory" if advisories else "passed",
                     _quality_event_detail(content, ordered, advisories),
                 )
+            except ReportQualityContractError:
+                logger.exception("研究总编辑最终制品未通过确定性交付契约")
+                raise
             except Exception as exc:
                 logger.exception("研究总编辑生成失败；拒绝发送字段拼装降级报告")
                 raise RuntimeError("报告未通过编辑质量门槛，任务已停止并可安全重试") from exc
@@ -1334,6 +1352,29 @@ def _attach_researcher_index(
     return value + "\n\n" + researcher_index
 
 
+def _attach_deterministic_sections(
+    content: str,
+    stats: dict,
+    candidates: list[ParadigmCandidate],
+) -> str:
+    """Attach grounded sections before evaluating the complete report.
+
+    Route drafts may correctly attribute an established organization instead of
+    spelling out one selected researcher's name.  The former implementation ran
+    the full-report person-coverage gate before adding the deterministic person
+    index, so a valid report could fail forever even though the frozen snapshot
+    already contained verified profiles.  These sections are part of the final
+    artifact and must therefore participate in the quality decision itself.
+    """
+
+    value = _attach_coverage_boundary(content, stats)
+    value = _attach_researcher_index(value, candidates)
+    # Primary URLs come directly from verified evidence objects.  Attaching the
+    # index before validation also means the URL allow-list checks the artifact
+    # that will actually be sent, not an intermediate model-only frame.
+    return _attach_primary_source_index(value, candidates)
+
+
 def _without_researcher_index(content: str) -> str:
     return re.sub(
         r"(?ms)\n*^## 关键人物与公开联系入口\s*$.*?(?=^##\s|\Z)",
@@ -1583,7 +1624,11 @@ def _covers_researchers(
             if profile.name
         )
         organization = verified_organization_attribution(candidate)
-        if not by_route[route] and organization:
+        # Route-level drafting accepts either a selected person or the verified
+        # publishing organization.  The full-report gate must use the same
+        # attribution contract; the deterministic person index below still
+        # lists every verified key profile and its completed contact lookup.
+        if organization:
             by_route[route].add(organization["name"])
     if not candidates:
         return True

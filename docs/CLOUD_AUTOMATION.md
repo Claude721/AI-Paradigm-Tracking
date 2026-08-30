@@ -7,10 +7,10 @@
 - 手动运行还可以勾选 `reset_state`，强制忽略旧数据库。
 - `smoke_only=true` 时只做小成本真实能力验证：Qwen 必须按契约回复 `OK`；arXiv、Hugging Face、OpenAlex、GitHub 等单端点能力只发一个最小请求，Follow Builders、OpenReview、官方研究页、LessWrong/KOL RSS 最多按配置顺序 failover 5 个入口并在首个成功后停止；Tavily 只消耗一个 basic request，SMTP 只登录不发信。每项默认 30 秒总时限，不会调用生产召回器、生成报告或改动去重数据库。
 - 自动与手动触发都执行 `python main.py`，报告生成后都会发送邮件。
-- 研究检查点、报告渲染和邮件投递已经解耦。研究完成后先写入持久化 outbox；报告或 SMTP 失败会让任务失败，但不会撤销已完成研究，也不会把该报告登记成已成功交付。下一次进程只续投旧 outbox 并安全退出；云端在新状态 artifact 上传成功后会自动排队第二个完整研究 run，避免同一 90 分钟 job 叠加两类长任务，也避免周五研究被历史续投吞掉。
+- 研究检查点、报告渲染和邮件投递已经解耦。研究完成后先写入持久化 outbox；报告或 SMTP 失败不会撤销已完成研究，也不会把该报告登记成已成功交付。缺少当前输入契约的冻结快照，或完成内置修订后仍违反确定性交付质量契约的制品会立即隔离；网络、超时等其他渲染失败默认累计 3 次后隔离，并把候选原子退回 `pending_deep`。隔离记录不再阻塞后续研究。SMTP 失败仍保留已验证报告并让必需邮件任务失败。成功续投旧 outbox 后当前进程安全退出，云端在新状态 artifact 上传成功后自动排队第二个完整研究 run；若旧任务被隔离，当前进程直接继续新研究。若本轮新生成的报告被隔离，状态 artifact 仍会保存，但当前 Workflow 必须失败，不能把未完成交付显示为绿色；下一次运行也不会再被该坏任务阻塞。
 - 报告若包含英文长段、评分表、字段拼装、缺少关键人物/公开检索记录或缺少任一路线的一手链接，会先自动重写一次；仍不合格则任务失败且不发送邮件。人物与原文索引由结构化证据确定性生成，不依赖模型抄写；全文每一个 HTTP(S) URL 都必须原样来自证据或人物档案，一个有效原文不能掩盖另一个猜测链接。
 - 成功邮件除研究 Memo 外，还会附带本轮结构化筛选审计和运行日志；审计记录信源返回量、筛选理由及各阶段 token 用量，不保存 prompt、模型正文或私有推理。
-- 去重数据库会在生产运行结束后以 `always()` 语义保存为私有 Actions artifact，包括报告/SMTP 失败后留下的研究检查点与 outbox。当前 schema v5 除 SQLite `quick_check`、表/字段迁移外，还会逐行反序列化证据、候选、outbox 与历史交付 JSON，并核对 fingerprint/key；最新 artifact 即使数据库页完整、但领域 payload 已损坏，也会被拒绝并继续尝试更早的不可变快照。除非手动勾选 `reset_state=true`，所有快照均缺失、损坏或不兼容都会 fail closed，不会静默冷启动。
+- 去重数据库会在生产运行结束后以 `always()` 语义保存为私有 Actions artifact，包括报告/SMTP 失败后留下的研究检查点与 outbox。当前 schema v6 除 SQLite `quick_check`、表/字段迁移、领域 JSON 与 fingerprint/key 核验外，还会检查活动 outbox 是否满足当前人物/一手来源输入契约；不可再交付的旧任务在迁移时隔离并把候选退回深挖。最新 artifact 即使数据库页完整、但领域 payload 已损坏，也会被拒绝并继续尝试更早的不可变快照。恢复成功后会执行 `python main.py --inspect-state`，在日志中输出不含候选正文和 Secret 的队列计数、截断 key、失败类型及尝试次数。除非手动勾选 `reset_state=true`，所有快照均缺失、损坏或不兼容都会 fail closed，不会静默冷启动。
 - 工作流先在清空生产配置、拒绝网络和忽略 `.env` 的子进程中运行完整离线单元测试、无第三方包的失败提醒导入检查与静态编译，再接触生产状态和真实接口。任一普通生产步骤失败时，最后的 `always() && failure()` 步骤会尝试发送独立失败提醒，并指出首个失败步骤、运行 commit 与离线失败用例；不会再把回归测试失败误报成研究主流程失败。GitHub 直接取消整个 job、Runner 宕机或达到 90 分钟硬超时时，任何后置步骤都无法保证执行，因此必须依靠软预算主动收尾。若运行成功但召回、研究或交付仍未闭合，邮件主题会明确标注 `[研究未完成]`，审计会区分 Rubric 淘汰与运行延后；它不能被理解为“本期无新信号”。
 
 ## 1. 私有 GitHub 仓库
@@ -80,6 +80,7 @@
 | `PARADIGM_REPORT_TIMEOUT_SECONDS` | 推荐 `1200`；研究快照入 outbox 后，研究总编辑渲染的独立上限 |
 | `PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS` | 推荐 `360`；单条路线或轻量总编框架的一次模型请求上限，不再沿用分析请求的 180 秒 |
 | `PARADIGM_REPORT_ROUTE_CONCURRENCY` | 推荐 `2`；路线级写作并发，每条通过后立即写入状态 artifact 可恢复的 checkpoint |
+| `PARADIGM_REPORT_MAX_RENDER_ATTEMPTS` | 推荐 `3`；持久化渲染重试上限，达到后隔离任务并把候选退回深挖，不影响 SMTP 重试 |
 | `PARADIGM_ANALYSIS_BATCH_SIZE` | 推荐 `6`；机制抽取检查点粒度，不是候选上限 |
 | `PARADIGM_DEEP_BATCH_SIZE` | 推荐 `1`；深挖检查点粒度，避免半完成档案入库 |
 | `EMAIL_MAX_ATTACHMENT_BYTES` | 推荐 `10000000`；报告异常膨胀时阻断发送并保留 outbox |
@@ -90,7 +91,7 @@
 
 GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留空时同时发现社区和普通技术网页，结果仍只算索引线索。LessWrong/KOL RSS、Rubric、前沿覆盖地图和个人目录都随代码提交，无需创建 Secret 或 Variable。旧版 `PARADIGM_MAX_ANALYSIS_ITEMS`、`PARADIGM_MAX_DEEP_CANDIDATES` 等 Variable 可以删除；即使保留，新代码也不会读取。Reddit 的 Client ID/Secret 必须和“已批准”开关一起配置；只填密钥但不开启批准开关时，代码不会请求 Reddit API。Semantic Scholar 同理：Secret 留空、Variable 为 `false` 时，代码不会匿名请求。
 
-跨提交恢复状态会从新到旧校验不可变快照，跳过下载失败、压缩包损坏、缺少数据库或无法迁移的快照；找到最近一份健康 SQLite 后再迁移到当前 schema 并读取前沿覆盖地图版本。它不再因为 commit SHA 或一个可迁移的版本号变化就重置。普通 Prompt、Skill 或报告样式更新会延续跨周历史；覆盖地图升级时仍恢复旧数据库用于证据去重，但程序会用 60 天窗口补扫新加入的技术面。已经分析过且正文未变化的材料不会再次调用 LLM。报告中每条已通过闸门的路线草稿也会按候选证据与写作 Skill 签名保存；总编超时后，下次只补未完成路线并重做轻量开篇，不重烧完整路线写作。存在待交付 outbox 时，本次进程完成它后即退出，不在同一 90 分钟 Job 中叠加新研究；工作流会先上传包含“已交付”确认的新状态，再自动 dispatch 一个 `reset_state=false`、`smoke_only=false` 的后续 run。自动 dispatch 失败会让当前任务失败并触发告警，不能静默把续投当成本周研究。若找不到任何健康 artifact，工作流会明确失败并要求人工判断；只有确定要建立新基线时才以 `reset_state=true` 运行。
+跨提交恢复状态会从新到旧校验不可变快照，跳过下载失败、压缩包损坏、缺少数据库或无法迁移的快照；找到最近一份健康 SQLite 后再迁移到当前 schema 并读取前沿覆盖地图版本。它不再因为 commit SHA 或一个可迁移的版本号变化就重置。普通 Prompt、Skill 或报告样式更新会延续跨周历史；覆盖地图升级时仍恢复旧数据库用于证据去重，但程序会用 60 天窗口补扫新加入的技术面。已经分析过且正文未变化的材料不会再次调用 LLM。报告中每条已通过闸门的路线草稿也会按候选证据与写作 Skill 签名保存；总编超时后，下次只补未完成路线并重做轻量开篇，不重烧完整路线写作。存在活动 outbox 时先恢复它：成功交付后当前进程退出，工作流上传确认状态并自动 dispatch 一个 `reset_state=false`、`smoke_only=false` 的后续 run；确定性输入缺陷或耗尽渲染重试时隔离旧任务，并在当前进程继续新研究。自动 dispatch 失败会让当前任务失败并触发告警，不能静默把续投当成本周研究。若找不到任何健康 artifact，工作流会明确失败并要求人工判断；只有确定要建立新基线时才以 `reset_state=true` 运行。
 
 ## 4. 首次手动验收
 
@@ -98,7 +99,7 @@ GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留�
 2. 选择 `AI 技术范式雷达`。
 3. 点击 `Run workflow`，第一次选择 `7` 天，保持 `smoke_only=true`。精确 arXiv ID 留空，此时 `reset_state` 不影响结果。
 4. 确认“配置体检”和“小成本真实接口冒烟”完成，并下载 `paradigm-radar-audit-*` 查看 `smoke_test_latest.json`。文件中的 `contract_version` 可确认线上使用的是哪版探针；`failure_kind=transient_availability` 表示第三方临时限流/超时，显示为 `degraded` 且 Workflow 可通过，但风险不会被隐藏；`multi_endpoint_unavailable` 表示某个多入口能力的有界样本全部失败；配置、真实鉴权或响应契约失败才显示为 `failed`。
-5. 再次点击 `Run workflow`，把 `smoke_only` 改成 `false`，把 `reset_state` 改成 `true`，执行新版本第一次完整运行。
+5. 再次点击 `Run workflow`，把 `smoke_only` 改成 `false`。已有历史状态或正在修复失败任务时保持 `reset_state=false`，让 schema v6 迁移和 outbox 恢复接管；只有新仓库完全没有可用 artifact、或人工确认要建立全新基线时才使用 `reset_state=true`。
 6. 确认“运行离线回归测试”“抓取、分析并发送邮件”“保存跨周去重状态”全部为绿色。
 7. 确认收件箱收到邮件及运行审计附件，并在该次运行的 Artifacts 中看到报告、`paradigm-radar-state-<run_id>` 与 `paradigm-radar-audit-*`。状态按运行保存为不可变快照；下一次任务恢复最近一份未过期快照，同时兼容旧的 `paradigm-radar-state` 名称。
 

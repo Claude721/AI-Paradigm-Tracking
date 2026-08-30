@@ -1,12 +1,13 @@
 """
-AI Deal Sourcing Agent - 一键运行入口
-AI 技术范式捕捉与关键人物追踪系统
+AI 技术范式雷达 - 一键运行入口
+技术范式捕捉、关键人物追踪与 durable delivery 系统
 
 Usage:
-    python main.py              # 立即执行一次完整的 sourcing pipeline
+    python main.py              # 立即执行一次完整的范式研究流水线
     python main.py --setup      # 交互式配置环境变量（首次使用推荐）
     python main.py --status     # 查看当前配置状态
-    python main.py --schedule   # 启动定时任务模式（默认每周五 09:00）
+    python main.py --inspect-state # 只读查看研究/交付队列健康度
+    python main.py --schedule   # 启动定时任务模式（默认每周五 09:15）
     python main.py --report     # 仅重新生成今日报告（不重新拉取数据）
     python main.py --doctor     # 零网络静态配置检查
     python main.py --smoke-test # 小成本真实接口检查，不发送邮件
@@ -243,6 +244,8 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
         )
     else:
         try:
+            render_attempt = store.begin_render_attempt(job.delivery_key)
+            stats["delivery_render_attempt"] = render_attempt
             route_fragments = store.load_report_fragments(job.delivery_key)
             if route_fragments:
                 run_audit.event(
@@ -272,13 +275,70 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
             )
             rendered = True
         except Exception as exc:
+            from reports.paradigm_generator import (
+                ReportInputContractError,
+                ReportQualityContractError,
+            )
+
+            permanent_contract_failure = isinstance(
+                exc,
+                (ReportInputContractError, ReportQualityContractError),
+            )
+            retry_exhausted = (
+                not permanent_contract_failure
+                and stats.get("delivery_render_attempt", 0)
+                >= config.PARADIGM_REPORT_MAX_RENDER_ATTEMPTS
+            )
+            if permanent_contract_failure or retry_exhausted:
+                failure_kind = (
+                    "report_input_contract"
+                    if isinstance(exc, ReportInputContractError)
+                    else "report_quality_contract"
+                    if isinstance(exc, ReportQualityContractError)
+                    else "render_retry_exhausted"
+                )
+                store.quarantine_report_job(
+                    job.delivery_key,
+                    exc,
+                    failure_kind=failure_kind,
+                )
+                stats.update(
+                    {
+                        "delivery_quarantined": True,
+                        "delivery_failure_kind": failure_kind,
+                        "delivery_last_error": str(exc)[:500],
+                        "result_kind": "delivery_quarantined",
+                        "email_sent": False,
+                    }
+                )
+                run_audit.event(
+                    "report_outbox",
+                    "quarantined",
+                    f"报告任务 {job.delivery_key[:12]} 已隔离（{failure_kind}）；"
+                    "冻结候选已原子退回 pending_deep，不再阻塞后续研究",
+                )
+                audit_summary = run_audit.write(
+                    stats,
+                    status="delivery_quarantined",
+                )
+                stats.update(audit_summary)
+                stats["audit_attachments"] = [
+                    audit_summary["audit_markdown_path"],
+                    "logs/current_run.log",
+                ]
+                return stats
             store.record_delivery_failure(
-                job.delivery_key, exc, rendered=False
+                job.delivery_key,
+                exc,
+                rendered=False,
+                failure_kind="render_transient",
             )
             run_audit.event(
                 "report_outbox",
                 "render_failed",
-                f"报告任务 {job.delivery_key[:12]} 渲染失败，已保留候选快照",
+                f"报告任务 {job.delivery_key[:12]} 第 "
+                f"{stats.get('delivery_render_attempt', 0)} 次渲染失败；"
+                "已保留候选快照和通过闸门的路线草稿",
             )
             raise
 
@@ -312,7 +372,12 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
             delivery_key=job.delivery_key,
         )
     except Exception as exc:
-        store.record_delivery_failure(job.delivery_key, exc, rendered=rendered)
+        store.record_delivery_failure(
+            job.delivery_key,
+            exc,
+            rendered=rendered,
+            failure_kind="smtp_transient",
+        )
         run_audit.event(
             "report_outbox",
             "send_failed",
@@ -327,6 +392,7 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
             job.delivery_key,
             "SMTP 未确认发送，保留为待交付",
             rendered=rendered,
+            failure_kind="smtp_unconfirmed",
         )
     return stats
 
@@ -349,6 +415,7 @@ async def _run_pipeline_once() -> dict:
 
         orchestrator = ParadigmOrchestrator()
         generator = ParadigmReportGenerator()
+        quarantined_recovery: dict = {}
         pending_job = orchestrator.store.load_pending_report_job()
         if pending_job is not None:
             logger.warning(
@@ -362,16 +429,30 @@ async def _run_pipeline_once() -> dict:
                 pending_job,
                 recovered=True,
             )
-            result["recovered_delivery_only"] = True
-            run_audit.event(
-                "report_outbox",
-                "recovered",
-                f"已完成历史待交付任务 {pending_job.delivery_key[:12]}；"
-                "为避免恢复耗时与新研究叠加触发云端硬超时，本次不再启动新研究",
+            if not result.get("delivery_quarantined"):
+                result["recovered_delivery_only"] = True
+                run_audit.event(
+                    "report_outbox",
+                    "recovered",
+                    f"已完成历史待交付任务 {pending_job.delivery_key[:12]}；"
+                    "为避免恢复耗时与新研究叠加触发云端硬超时，本次不再启动新研究",
+                )
+                return result
+            quarantined_recovery = {
+                "recovered_delivery_quarantined": True,
+                "recovered_delivery_key": pending_job.delivery_key,
+                "recovered_delivery_failure_kind": result.get(
+                    "delivery_failure_kind", ""
+                ),
+            }
+            logger.warning(
+                "历史交付 %s 已隔离并退回深挖队列；本轮继续执行新研究",
+                pending_job.delivery_key[:12],
             )
-            return result
 
     stats = await orchestrator.run()
+    if config.PIPELINE_MODE != "legacy" and quarantined_recovery:
+        stats.update(quarantined_recovery)
     if config.PIPELINE_MODE != "legacy":
         report_date = scheduled_date()
         job = orchestrator.store.enqueue_report(
@@ -379,12 +460,18 @@ async def _run_pipeline_once() -> dict:
             stats,
             report_date=report_date,
         )
-        return await _deliver_paradigm_job(
+        delivery_result = await _deliver_paradigm_job(
             orchestrator.store,
             generator,
             job,
             recovered=False,
         )
+        if delivery_result.get("delivery_quarantined"):
+            raise RuntimeError(
+                "本轮新报告未通过交付契约，任务已隔离并把候选退回 "
+                "pending_deep；状态已保存，但本轮没有完成报告/邮件交付"
+            )
+        return delivery_result
 
     report_path = stats.get("report_path")
     if not report_path:
@@ -443,6 +530,11 @@ def _write_pipeline_result(result: dict) -> Path:
     payload = {
         "recovered_delivery_only": recovered_only,
         "fresh_research_completed": not recovered_only,
+        "delivery_quarantined": bool(result.get("delivery_quarantined")),
+        "delivery_failure_kind": str(result.get("delivery_failure_kind", "")),
+        "recovered_delivery_quarantined": bool(
+            result.get("recovered_delivery_quarantined")
+        ),
         "result_kind": str(result.get("result_kind", "")),
         "email_sent": bool(result.get("email_sent")),
         "report_path": str(result.get("report_path", "")),
@@ -567,7 +659,12 @@ def main() -> None:
     parser.add_argument(
         "--schedule",
         action="store_true",
-        help="启动定时任务模式（默认每周五 09:00 自动执行）",
+        help="启动定时任务模式（默认每周五 09:15 自动执行）",
+    )
+    parser.add_argument(
+        "--inspect-state",
+        action="store_true",
+        help="只读输出范式数据库和报告 outbox 健康度；不请求网络",
     )
     parser.add_argument(
         "--report",
@@ -612,6 +709,25 @@ def main() -> None:
     elif args.status:
         from setup_env import _print_status
         _print_status()
+    elif args.inspect_state:
+        if config.PIPELINE_MODE != "paradigm":
+            raise SystemExit("--inspect-state 仅适用于 PIPELINE_MODE=paradigm")
+        from database.paradigm_store import ParadigmStore
+
+        if not config.PARADIGM_DB_PATH.is_file():
+            raise SystemExit(f"状态数据库不存在: {config.PARADIGM_DB_PATH}")
+        store = ParadigmStore(config.PARADIGM_DB_PATH)
+        print(
+            json.dumps(
+                {
+                    "database": str(config.PARADIGM_DB_PATH),
+                    "stats": store.stats(),
+                    "outbox": store.delivery_queue_snapshot(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     elif args.schedule:
         setup_logging()
         run_scheduler()

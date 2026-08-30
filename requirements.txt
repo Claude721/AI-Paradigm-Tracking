@@ -1,4 +1,4 @@
-# AI Deal Sourcing Agent - 依赖清单
+# AI 技术范式雷达 - 依赖清单
 # 安装: pip install -r requirements.txt
 # 生产工作流使用精确版本；升级依赖时先运行全部离线回归与 smoke test。
 

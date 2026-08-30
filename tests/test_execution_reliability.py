@@ -48,7 +48,10 @@ from paradigms.models import (
     candidate_from_dict,
 )
 from paradigms.discovery import ParadigmDiscovery
-from reports.paradigm_generator import ParadigmReportGenerator
+from reports.paradigm_generator import (
+    ParadigmReportGenerator,
+    ReportQualityContractError,
+)
 from run_audit import run_audit
 from sources.research_feed_source import ResearchFeedSource
 from sources.follow_builders_source import FollowBuildersSource
@@ -881,6 +884,148 @@ class ExecutionReliabilityTests(unittest.TestCase):
             self.assertIsNone(store.load_pending_report_job())
             self.assertEqual(store.load_report_fragments(job.delivery_key), {})
 
+    def test_state_migration_quarantines_incompatible_outbox_and_requeues_route(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "radar.db"
+            store = ParadigmStore(database)
+            candidate = ParadigmCandidate(
+                key="missing-person-contract",
+                name="Missing person contract",
+                thesis="改变能力边界",
+                problem_shift="从旧问题转向新问题",
+                mechanism="新的训练接口",
+                status="new",
+                evidence=[_origin("2608.00031")],
+            )
+            store.save_candidates([candidate])
+            job = store.enqueue_report(
+                [candidate], {"new_paradigms": 1}, report_date="2026-08-16"
+            )
+
+            migrate_state(
+                database,
+                source_version=config.PARADIGM_STATE_SCHEMA_VERSION,
+            )
+
+            self.assertIsNone(store.load_pending_report_job())
+            quarantined = store.get_report_job(job.delivery_key)
+            self.assertIsNotNone(quarantined)
+            self.assertEqual(quarantined.status, "quarantined")
+            self.assertEqual(
+                quarantined.failure_kind, "state_contract_migration"
+            )
+            self.assertIn("缺少可核验关键人物", quarantined.last_error)
+            pending = store.load_pending_deep_candidates()
+            self.assertEqual([value.key for value in pending], [candidate.key])
+            snapshot = store.delivery_queue_snapshot()
+            self.assertEqual(snapshot["status_counts"]["quarantined"], 1)
+            self.assertEqual(snapshot["jobs"][0]["status"], "quarantined")
+            self.assertEqual(
+                snapshot["jobs"][0]["delivery_key"], job.delivery_key[:12]
+            )
+
+    def test_render_retry_exhaustion_quarantines_without_losing_research(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            candidate = ParadigmCandidate(
+                key="renderer-poison-route",
+                name="Renderer poison route",
+                thesis="改变能力边界",
+                problem_shift="从旧问题转向新问题",
+                mechanism="新的训练接口",
+                status="new",
+                evidence=[_origin("2608.00032")],
+            )
+            store.save_candidates([candidate])
+            job = store.enqueue_report(
+                [candidate], {"new_paradigms": 1}, report_date="2026-08-16"
+            )
+            store.begin_render_attempt(job.delivery_key)
+            store.begin_render_attempt(job.delivery_key)
+            generator = SimpleNamespace(
+                output_dir=Path(directory),
+                generate=AsyncMock(side_effect=RuntimeError("renderer drift")),
+            )
+            with (
+                patch.object(config, "PARADIGM_REPORT_MAX_RENDER_ATTEMPTS", 3),
+                patch.object(config, "PARADIGM_REPORT_TIMEOUT_SECONDS", 30),
+                patch.object(run_audit, "write", return_value={
+                    "audit_markdown_path": str(Path(directory) / "audit.md"),
+                    "audit_json_path": str(Path(directory) / "audit.json"),
+                }),
+            ):
+                result = asyncio.run(
+                    app_main._deliver_paradigm_job(
+                        store, generator, job, recovered=True
+                    )
+                )
+
+            self.assertTrue(result["delivery_quarantined"])
+            self.assertEqual(
+                result["delivery_failure_kind"], "render_retry_exhausted"
+            )
+            self.assertIsNone(store.load_pending_report_job())
+            self.assertEqual(
+                store.get_report_job(job.delivery_key).status, "quarantined"
+            )
+            self.assertEqual(
+                [value.key for value in store.load_pending_deep_candidates()],
+                [candidate.key],
+            )
+
+    def test_terminal_report_quality_failure_is_quarantined_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            candidate = ParadigmCandidate(
+                key="quality-contract-route",
+                name="Quality contract route",
+                thesis="改变能力边界",
+                problem_shift="从旧问题转向新问题",
+                mechanism="新的训练接口",
+                status="new",
+                evidence=[_origin("2608.00033")],
+            )
+            store.save_candidates([candidate])
+            job = store.enqueue_report(
+                [candidate], {"new_paradigms": 1}, report_date="2026-08-16"
+            )
+            generator = SimpleNamespace(
+                output_dir=Path(directory),
+                generate=AsyncMock(
+                    side_effect=ReportQualityContractError(
+                        ["关键人物覆盖不足"]
+                    )
+                ),
+            )
+            with (
+                patch.object(config, "PARADIGM_REPORT_MAX_RENDER_ATTEMPTS", 3),
+                patch.object(config, "PARADIGM_REPORT_TIMEOUT_SECONDS", 30),
+                patch.object(
+                    run_audit,
+                    "write",
+                    return_value={
+                        "audit_markdown_path": str(Path(directory) / "audit.md"),
+                        "audit_json_path": str(Path(directory) / "audit.json"),
+                    },
+                ),
+            ):
+                result = asyncio.run(
+                    app_main._deliver_paradigm_job(
+                        store, generator, job, recovered=True
+                    )
+                )
+
+            self.assertEqual(result["delivery_render_attempt"], 1)
+            self.assertEqual(
+                result["delivery_failure_kind"], "report_quality_contract"
+            )
+            self.assertIsNone(store.load_pending_report_job())
+            self.assertEqual(
+                store.get_report_job(job.delivery_key).status, "quarantined"
+            )
+
     def test_recovered_outbox_delivery_does_not_start_fresh_research(self) -> None:
         pending = SimpleNamespace(
             delivery_key="a" * 64,
@@ -912,6 +1057,107 @@ class ExecutionReliabilityTests(unittest.TestCase):
             store, generator, pending, recovered=True
         )
         orchestrator.run.assert_not_awaited()
+
+    def test_quarantined_recovered_outbox_continues_fresh_research(self) -> None:
+        pending = SimpleNamespace(
+            delivery_key="a" * 64,
+            status="pending_render",
+        )
+        fresh_job = SimpleNamespace(
+            delivery_key="b" * 64,
+            status="pending_render",
+        )
+        store = SimpleNamespace(
+            load_pending_report_job=Mock(return_value=pending),
+            enqueue_report=Mock(return_value=fresh_job),
+        )
+        orchestrator = SimpleNamespace(
+            store=store,
+            pending_delivery=[],
+            run=AsyncMock(return_value={"result_kind": "complete_no_signal"}),
+        )
+        generator = SimpleNamespace()
+        delivery = AsyncMock(
+            side_effect=[
+                {
+                    "delivery_quarantined": True,
+                    "delivery_failure_kind": "report_input_contract",
+                },
+                {"result_kind": "complete_no_signal", "email_sent": False},
+            ]
+        )
+
+        with (
+            patch.object(config, "PIPELINE_MODE", "paradigm"),
+            patch("main._check_env"),
+            patch("main._print_model_banner"),
+            patch(
+                "agents.paradigm_orchestrator.ParadigmOrchestrator",
+                return_value=orchestrator,
+            ),
+            patch(
+                "reports.paradigm_generator.ParadigmReportGenerator",
+                return_value=generator,
+            ),
+            patch("main._deliver_paradigm_job", delivery),
+        ):
+            result = asyncio.run(app_main._run_pipeline_once())
+
+        orchestrator.run.assert_awaited_once()
+        self.assertEqual(delivery.await_count, 2)
+        self.assertFalse(result.get("recovered_delivery_only", False))
+        fresh_stats = store.enqueue_report.call_args.args[1]
+        self.assertTrue(fresh_stats["recovered_delivery_quarantined"])
+
+    def test_fresh_quarantined_report_fails_current_pipeline(self) -> None:
+        fresh_job = SimpleNamespace(
+            delivery_key="b" * 64,
+            status="pending_render",
+        )
+        store = SimpleNamespace(
+            load_pending_report_job=Mock(return_value=None),
+            enqueue_report=Mock(return_value=fresh_job),
+        )
+        orchestrator = SimpleNamespace(
+            store=store,
+            pending_delivery=[],
+            run=AsyncMock(return_value={"result_kind": "complete_no_signal"}),
+        )
+        generator = SimpleNamespace()
+        delivery = AsyncMock(
+            return_value={
+                "delivery_quarantined": True,
+                "delivery_failure_kind": "report_quality_contract",
+            }
+        )
+
+        with (
+            patch.object(config, "PIPELINE_MODE", "paradigm"),
+            patch("main._check_env"),
+            patch("main._print_model_banner"),
+            patch(
+                "agents.paradigm_orchestrator.ParadigmOrchestrator",
+                return_value=orchestrator,
+            ),
+            patch(
+                "reports.paradigm_generator.ParadigmReportGenerator",
+                return_value=generator,
+            ),
+            patch("main._deliver_paradigm_job", delivery),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "本轮没有完成报告/邮件交付",
+            ):
+                asyncio.run(app_main._run_pipeline_once())
+
+        orchestrator.run.assert_awaited_once()
+        delivery.assert_awaited_once_with(
+            store,
+            generator,
+            fresh_job,
+            recovered=False,
+        )
 
     def test_pipeline_result_marker_requests_fresh_continuation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1291,6 +1537,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 "PARADIGM_RUN_BUDGET_SECONDS": "three-thousand",
                 "SMTP_USE_SSL": "flase",
                 "PARADIGM_REPORT_ROUTE_CONCURRENCY": "99",
+                "PARADIGM_REPORT_MAX_RENDER_ATTEMPTS": "0",
                 "RESEARCH_WATCHLIST_MODE": "overwrite",
             },
             clear=False,
@@ -1300,6 +1547,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("PARADIGM_RUN_BUDGET_SECONDS", check.note)
         self.assertIn("SMTP_USE_SSL", check.note)
         self.assertIn("PARADIGM_REPORT_ROUTE_CONCURRENCY", check.note)
+        self.assertIn("PARADIGM_REPORT_MAX_RENDER_ATTEMPTS", check.note)
         self.assertIn("RESEARCH_WATCHLIST_MODE", check.note)
 
     def test_doctor_rejects_malformed_source_endpoints(self) -> None:
@@ -1649,6 +1897,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("PARADIGM_KEY_RESEARCHER_LIMIT", workflow)
         self.assertIn("PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS", workflow)
         self.assertIn("PARADIGM_REPORT_ROUTE_CONCURRENCY", workflow)
+        self.assertIn("PARADIGM_REPORT_MAX_RENDER_ATTEMPTS", workflow)
         self.assertIn("运行离线回归测试", workflow)
         self.assertIn("python scripts/offline_checks.py", workflow)
         self.assertIn("logs/offline_checks.json", workflow)
@@ -1670,6 +1919,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("submodules: false", workflow)
         self.assertIn("尝试上一份快照", workflow)
         self.assertIn("所有未过期状态快照均不可用", workflow)
+        self.assertIn("python main.py --inspect-state", workflow)
         self.assertIn("actions: write", workflow)
         self.assertIn("logs/pipeline_result.json", workflow)
         self.assertIn("续投完成后排队本周新研究", workflow)

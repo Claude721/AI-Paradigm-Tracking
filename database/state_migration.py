@@ -65,10 +65,13 @@ _REQUIRED_COLUMNS = {
         "stats_json",
         "report_content",
         "attempt_count",
+        "render_attempt_count",
         "last_error",
+        "failure_kind",
         "created_at",
         "updated_at",
         "delivered_at",
+        "quarantined_at",
     },
     "report_render_fragments": {
         "delivery_key",
@@ -94,7 +97,8 @@ def migrate_state(
 
     Version 2 added ``radar_meta``; version 3 added the durable report outbox and
     a delivery identifier; version 4 added resumable route-level report fragments;
-    version 5 adds fair refresh scheduling plus domain-payload validation.
+    version 5 adds fair refresh scheduling plus domain-payload validation;
+    version 6 adds render-attempt accounting and quarantined delivery recovery.
     All additions are backwards-compatible, so opening
     the database with :class:`ParadigmStore` performs the migration.  Future
     versions must extend this function before raising the schema version.
@@ -126,6 +130,7 @@ def migrate_state(
     ParadigmStore(path)
     _validate_sqlite(path, require_current=True)
     _validate_domain_payloads(path)
+    _quarantine_incompatible_outbox(path)
     return config.PARADIGM_STATE_SCHEMA_VERSION
 
 
@@ -230,6 +235,7 @@ def _validate_domain_payloads(path: Path) -> None:
                     "rendered",
                     "sending",
                     "delivered",
+                    "quarantined",
                 }:
                     raise ValueError(
                         f"交付任务状态不可识别: {delivery_key}={status}"
@@ -255,6 +261,45 @@ def _validate_domain_payloads(path: Path) -> None:
                     )
     except (json.JSONDecodeError, TypeError, KeyError) as exc:
         raise ValueError(f"状态数据库包含不可恢复的领域 JSON: {exc}") from exc
+
+
+def _quarantine_incompatible_outbox(path: Path) -> None:
+    """Move old, structurally valid but no-longer-deliverable jobs aside.
+
+    Report contracts evolve more quickly than the SQLite schema.  A frozen
+    snapshot that lacks today's verified-person or primary-source fields cannot
+    be repaired by rerunning the renderer, so restoring it as the active head of
+    queue would block every weekly run.  Keep the row for audit and atomically
+    return its candidates to ``pending_deep`` instead.
+    """
+
+    from database.paradigm_store import ParadigmStore
+    from reports.paradigm_generator import _report_input_violations
+
+    store = ParadigmStore(path)
+    with sqlite3.connect(path) as connection:
+        keys = [
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT delivery_key FROM report_outbox
+                WHERE status IN ('pending_render', 'rendered', 'sending')
+                ORDER BY created_at ASC
+                """
+            )
+        ]
+    for delivery_key in keys:
+        job = store.get_report_job(delivery_key)
+        if job is None:
+            continue
+        violations = _report_input_violations(job.candidates)
+        if not violations:
+            continue
+        store.quarantine_report_job(
+            delivery_key,
+            "状态升级后交付输入不再满足当前契约：" + "；".join(violations),
+            failure_kind="state_contract_migration",
+        )
 
 
 def main() -> None:

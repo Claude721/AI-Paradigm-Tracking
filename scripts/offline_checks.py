@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -216,20 +217,25 @@ def main() -> int:
         "configuration_policy": "hermetic-offline-fixture",
     }
     exit_code = 0
-    with LOG_PATH.open("w", encoding="utf-8") as log:
-        for name, command in stages:
-            exit_code, output = _run_stage(name, command, env=env, log=log)
-            if exit_code:
-                summary.update(
-                    {
-                        "status": "failed",
-                        "failed_stage": name,
-                        "failure_summary": _summarize_failure(
-                            output, name, exit_code
-                        ),
-                    }
-                )
-                break
+    # Unit fixtures intentionally exercise failed pipelines.  Their synthetic
+    # run_audit payloads belong in a temporary directory; otherwise a green
+    # release gate overwrites the most recent real production diagnosis.
+    with tempfile.TemporaryDirectory(prefix="ai-radar-offline-audit-") as audit_dir:
+        env["AI_RADAR_AUDIT_DIR"] = audit_dir
+        with LOG_PATH.open("w", encoding="utf-8") as log:
+            for name, command in stages:
+                exit_code, output = _run_stage(name, command, env=env, log=log)
+                if exit_code:
+                    summary.update(
+                        {
+                            "status": "failed",
+                            "failed_stage": name,
+                            "failure_summary": _summarize_failure(
+                                output, name, exit_code
+                            ),
+                        }
+                    )
+                    break
     summary["finished_at"] = datetime.now(timezone.utc).isoformat()
     SUMMARY_PATH.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",

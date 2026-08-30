@@ -112,6 +112,7 @@ jobs:
       PARADIGM_REPORT_TIMEOUT_SECONDS: ${{ vars.PARADIGM_REPORT_TIMEOUT_SECONDS || '1200' }}
       PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS: ${{ vars.PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS || '360' }}
       PARADIGM_REPORT_ROUTE_CONCURRENCY: ${{ vars.PARADIGM_REPORT_ROUTE_CONCURRENCY || '2' }}
+      PARADIGM_REPORT_MAX_RENDER_ATTEMPTS: ${{ vars.PARADIGM_REPORT_MAX_RENDER_ATTEMPTS || '3' }}
       PARADIGM_ANALYSIS_BATCH_SIZE: ${{ vars.PARADIGM_ANALYSIS_BATCH_SIZE || '6' }}
       PARADIGM_DEEP_BATCH_SIZE: ${{ vars.PARADIGM_DEEP_BATCH_SIZE || '1' }}
       EMAIL_PUSH_ENABLED: "true"
@@ -214,6 +215,7 @@ jobs:
             mkdir -p database
             cp "$candidate_dir/paradigm_radar.db" database/paradigm_radar.db
             echo "已从 $artifact_name 恢复并迁移跨周路线与去重状态"
+            python main.py --inspect-state
             restored=true
             break
           done <<< "$artifact_rows"

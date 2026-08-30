@@ -401,7 +401,8 @@ class _ArxivHTMLParser(HTMLParser):
         if tag == "meta":
             self._handle_meta(values)
         if tag == "a" and values.get("href"):
-            self._current_href = urljoin(self.base_url, values["href"])
+            href = _normalize_external_href(values["href"])
+            self._current_href = urljoin(self.base_url, href) if href else ""
             self._current_anchor = []
             self._in_author_anchor = self._capture_author > 0
 
@@ -511,6 +512,9 @@ class _ProjectPageParser(HTMLParser):
         href = values.get("href", "")
         if not href:
             return
+        href = _normalize_external_href(href)
+        if not href:
+            return
         self._href = (
             href
             if href.startswith("mailto:")
@@ -555,6 +559,20 @@ def _looks_like_project_link(label: str, url: str) -> bool:
     text = f"{label} {url}".casefold()
     markers = ("project", "code", "github", "demo", "dataset", "model")
     return any(marker in text for marker in markers)
+
+
+def _normalize_external_href(value: str) -> str:
+    """Repair TeX-escaped punctuation without requesting malformed URLs.
+
+    Some arXiv conversions preserve source-level links such as
+    ``paper\\_files``.  Passing them to ``urljoin`` produces a durable-looking
+    ``%5C`` URL that redirects and then 404s.  Only known TeX punctuation is
+    unescaped; any remaining backslash makes the link unsafe to request.
+    """
+
+    href = re.sub(r"\\([_&%#])", r"\1", str(value).strip())
+    href = href.replace("\\/", "/")
+    return "" if "\\" in href else href
 
 
 def _public_external_url(url: str) -> bool:

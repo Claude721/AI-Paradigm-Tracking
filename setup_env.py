@@ -60,6 +60,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str, str, str, bool]]]] = [
             ("PARADIGM_REPORT_TIMEOUT_SECONDS", "整份报告上限", "outbox 渲染总秒数", "1200", False),
             ("PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS", "报告单请求上限", "路线或开篇单次模型请求", "360", False),
             ("PARADIGM_REPORT_ROUTE_CONCURRENCY", "路线写作并发", "推荐 2，不改变路线数量", "2", False),
+            ("PARADIGM_REPORT_MAX_RENDER_ATTEMPTS", "报告渲染重试上限", "网络/超时等可重试失败的跨进程上限", "3", False),
             ("PARADIGM_ANALYSIS_BATCH_SIZE", "机制抽取批次", "检查点粒度，不是 Top-K", "6", False),
             ("PARADIGM_DEEP_BATCH_SIZE", "深挖批次", "检查点粒度，推荐 1", "1", False),
         ],

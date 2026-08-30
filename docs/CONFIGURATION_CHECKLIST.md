@@ -249,6 +249,7 @@ PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=600
 PARADIGM_REPORT_TIMEOUT_SECONDS=1200
 PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS=360
 PARADIGM_REPORT_ROUTE_CONCURRENCY=2
+PARADIGM_REPORT_MAX_RENDER_ATTEMPTS=3
 PARADIGM_ANALYSIS_BATCH_SIZE=6
 PARADIGM_DEEP_BATCH_SIZE=1
 ```
@@ -257,7 +258,9 @@ PARADIGM_DEEP_BATCH_SIZE=1
 
 五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版主观分数/固定数量变量（例如 `PARADIGM_MIN_NOVELTY`、`PARADIGM_MAX_ANALYSIS_ITEMS`）已停用。当前仍使用的 `PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS` 与 `PARADIGM_MIN_SECONDARY_ENGAGEMENT` 只把可核验讨论条数或互动量转成客观 Rubric 选项，不是模型主观评分门槛。
 
-`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后，剩余项保留为 backlog。`PARADIGM_DISCOVERY_SAFETY_LIMIT` 只允许 arXiv 等尚未执行的传输车道提前收尾，不会再截掉已经从其他来源取得的材料；`PARADIGM_REFRESH_SAFETY_LIMIT` 非零时，历史路线按最久未尝试顺序跨周轮转，而不是每次刷新同一批。`PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=600` 约束单个并行发现源，某个分页器卡死或返回错误结构时只取消该来源，并在审计/报告中写成覆盖未闭合，绝不能伪装成零命中。研究完成后候选快照先进入持久化 outbox；多路线报告按路线生成、每条通过即写入 checkpoint，最终总编只处理有界摘要并由程序装配正文。`PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS` 是单次路线/框架请求上限，`PARADIGM_REPORT_TIMEOUT_SECONDS` 是整次渲染上限；前者超时可业务重试，后者中断后由下一轮续跑。GitHub job 的硬超时为 90 分钟，默认研究预算 `3600` 秒、报告上限 `1200` 秒，两者合计 80 分钟，为安装、离线测试、邮件和 artifact 保留约 10 分钟；不要把两者同时继续调高，也不要在 Actions 中设为 `0`，静态体检会阻断云端禁用软预算。发现源完成后，系统才按实际剩余时间应用 `PARADIGM_STAGE_RESERVE_SECONDS`，从而避免长冷启动提前吃空机制抽取窗口；`PARADIGM_ANALYSIS_BATCH_SIZE`、`PARADIGM_DEEP_BATCH_SIZE` 与 `PARADIGM_REPORT_ROUTE_CONCURRENCY` 都只是执行粒度，不是 Top-K。模型漏回输入或返回外来对象时，程序会按身份/基数契约隔离到单条并保留待重试，不需要通过减小 batch size 掩盖问题。
+`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；显式补录、正式报告和官方/重点研究者优先，普通材料在本周新增与旧 backlog 之间轮转；到达软预算后，剩余项保留为 backlog。`PARADIGM_DISCOVERY_SAFETY_LIMIT` 只允许 arXiv 等尚未执行的传输车道提前收尾，不会再截掉已经从其他来源取得的材料；`PARADIGM_REFRESH_SAFETY_LIMIT` 非零时，历史路线按最久未尝试顺序跨周轮转，而不是每次刷新同一批。`PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=600` 约束单个并行发现源，某个分页器卡死或返回错误结构时只取消该来源，并在审计/报告中写成覆盖未闭合，绝不能伪装成零命中。研究完成后候选快照先进入持久化 outbox；多路线报告按路线生成、每条通过即写入 checkpoint，最终总编只处理有界摘要并由程序装配正文。`PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS` 是单次路线/框架请求上限，`PARADIGM_REPORT_TIMEOUT_SECONDS` 是整次渲染上限；前者超时可业务重试，后者中断后由下一轮续跑。`PARADIGM_REPORT_MAX_RENDER_ATTEMPTS=3` 是跨进程持久化的渲染尝试上限：缺少人物/一手来源等输入契约，或内置修订后仍不满足确定性交付质量契约时立即隔离；网络、超时等其他渲染错误达到上限后隔离。候选会原子退回 `pending_deep`，隔离任务只保留审计记录，不再阻塞后续报告。这个变量不限制 SMTP 重试，也不能用来绕过报告质量闸门。
+
+GitHub job 的硬超时为 90 分钟，默认研究预算 `3600` 秒、报告上限 `1200` 秒，两者合计 80 分钟，为安装、离线测试、邮件和 artifact 保留约 10 分钟；不要把两者同时继续调高，也不要在 Actions 中设为 `0`，静态体检会阻断云端禁用软预算。发现源完成后，系统才按实际剩余时间应用 `PARADIGM_STAGE_RESERVE_SECONDS`，从而避免长冷启动提前吃空机制抽取窗口；`PARADIGM_ANALYSIS_BATCH_SIZE`、`PARADIGM_DEEP_BATCH_SIZE` 与 `PARADIGM_REPORT_ROUTE_CONCURRENCY` 都只是执行粒度，不是 Top-K。模型漏回输入或返回外来对象时，程序会按身份/基数契约隔离到单条并保留待重试，不需要通过减小 batch size 掩盖问题。
 
 静态体检直接读取环境变量原文，因此错误拼写不会再被配置解析器的默认值掩盖。布尔值请只用 `true/false`（也兼容 `1/0`、`yes/no`、`on/off`），整数变量不能写单位或中文；越出文档范围的并发、超时和端口同样会阻断云端生产运行。
 

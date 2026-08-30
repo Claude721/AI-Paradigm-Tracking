@@ -50,6 +50,7 @@ from reports.paradigm_generator import (
     _route_fragment_key,
     _valid_editorial_report,
 )
+from research_watchlist import RESEARCH_SOURCES
 from skills.loader import SkillLoader
 from sources.paradigm_evidence_source import (
     CommunityEvidenceClient,
@@ -59,6 +60,7 @@ from sources.base import RawProject
 from sources.arxiv_document_source import (
     ArxivDocumentClient,
     _distributed_text_excerpt,
+    _normalize_external_href,
 )
 from sources.arxiv_source import ArxivSource
 from sources.openalex_source import OpenAlexSource
@@ -205,6 +207,26 @@ def verified_researcher(name: str = "A. Researcher") -> ResearcherProfile:
 
 
 class ParadigmPipelineTests(unittest.TestCase):
+    def test_priority_watchlist_uses_current_arc_and_isomorphic_indexes(self) -> None:
+        urls = {record["url"] for record in RESEARCH_SOURCES}
+        self.assertIn("https://arcinstitute.org/news", urls)
+        self.assertIn("https://www.isomorphiclabs.com/news", urls)
+        self.assertNotIn("https://arcinstitute.org/publications", urls)
+        self.assertNotIn("https://www.isomorphiclabs.com/articles", urls)
+
+    def test_arxiv_project_link_repairs_tex_escaped_punctuation(self) -> None:
+        value = (
+            "http://papers.nips.cc/paper\\_files/paper/2023/hash/"
+            "abc-Abstract-Datasets\\_and\\_Benchmarks.html"
+        )
+        normalized = _normalize_external_href(value)
+        self.assertEqual(
+            normalized,
+            "http://papers.nips.cc/paper_files/paper/2023/hash/"
+            "abc-Abstract-Datasets_and_Benchmarks.html",
+        )
+        self.assertEqual(_normalize_external_href("https://example.com/a\\q"), "")
+
     def test_zero_safety_limit_never_truncates_dynamic_volume(self) -> None:
         items = list(range(275))
         selected, deferred = _apply_safety_limit(items, 0)
@@ -1253,6 +1275,77 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertIn("## 本期研究 Memo", content)
         self.assertNotIn("评分拆解", content)
         self.assertNotIn("| 新颖性 |", content)
+
+    def test_deterministic_person_index_prevents_organization_only_retry_loop(
+        self,
+    ) -> None:
+        """Regression for Actions runs 31943920436/32440480145/33172597536."""
+
+        item = candidate()
+        item.researchers = [verified_researcher("A. Researcher")]
+        item.publisher_tier = "established"
+        item.is_formal_technical_report = True
+        item.evidence[0].organization = "Example Research Lab"
+        body = (
+            "旧系统把所有变化混在同一个表示里，新方法只改写决定状态转移的接口。"
+            "训练时预测误差沿这个接口更新参数，运行时当前状态先形成中间表示，"
+            "再决定下一状态；拿掉这一接口后，系统会退回平均预测。"
+        ) * 8
+        route = (
+            "### 世界模型开始把变化压成可行动状态\n\n"
+            f"{body} 该路线由 Example Research Lab 发布，"
+            "[查看原文](https://arxiv.org/abs/2607.00001)。\n\n"
+            "**讨论势能判断：** 当前仍是单点提出，尚未看到独立复现；"
+            "本轮社区覆盖有限，因此暂不判断为扩散。"
+        )
+        self.assertEqual(_route_draft_violations(route, item), [])
+        memo = (
+            "本期工作把状态转移接口从像素生成中拆出，使训练信号和运行时信息流"
+            "围绕可行动变化重新组织。现有证据仍主要来自发布团队，外部复现不足，"
+            "因此应把它视为需要继续验证的技术路线，而不是成熟共识。"
+        ) * 4
+        frame = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
+            f"{memo}\n\n## 接下来真正值得盯的信号\n\n"
+            "观察独立复现能否确认状态接口跨任务迁移。"
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(
+                        side_effect=[
+                            SimpleNamespace(
+                                choices=[
+                                    SimpleNamespace(
+                                        message=SimpleNamespace(content=route)
+                                    )
+                                ]
+                            ),
+                            SimpleNamespace(
+                                choices=[
+                                    SimpleNamespace(
+                                        message=SimpleNamespace(content=frame)
+                                    )
+                                ]
+                            ),
+                        ]
+                    )
+                )
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = asyncio.run(
+                ParadigmReportGenerator(
+                    directory, client=client, model="test"
+                ).generate([item], {"origin_count": 1})
+            )
+            content = path.read_text(encoding="utf-8")
+
+        self.assertIn("Example Research Lab", content)
+        self.assertIn("A. Researcher", content)
+        self.assertIn("## 关键人物与公开联系入口", content)
+        self.assertEqual(client.chat.completions.create.await_count, 2)
 
     def test_multi_route_report_is_bounded_and_persists_each_route(self) -> None:
         first = candidate([paper("1")])

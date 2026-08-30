@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,9 +92,13 @@ class RunAudit:
         stats: dict[str, Any] | None = None,
         *,
         status: str = "completed",
-        output_dir: Path | str = "logs",
+        output_dir: Path | str | None = None,
     ) -> dict[str, Any]:
-        directory = Path(output_dir)
+        directory = Path(
+            output_dir
+            if output_dir is not None
+            else os.getenv("AI_RADAR_AUDIT_DIR", "logs")
+        )
         directory.mkdir(parents=True, exist_ok=True)
         totals = self.token_totals()
         self.last_stats = _safe_payload(stats or {})

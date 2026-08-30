@@ -283,6 +283,9 @@ def _local_failure_context() -> dict[str, object]:
                     {
                         "outbox_status": job.status,
                         "candidate_count": len(job.candidates),
+                        "render_attempt_count": job.render_attempt_count,
+                        "delivery_attempt_count": job.attempt_count,
+                        "failure_kind": job.failure_kind,
                         "fragment_count": len(
                             store.load_report_fragments(job.delivery_key)
                         ),

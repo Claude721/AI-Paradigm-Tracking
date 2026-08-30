@@ -31,7 +31,10 @@ class ReportOutboxJob:
     stats: dict
     report_content: str = ""
     attempt_count: int = 0
+    render_attempt_count: int = 0
     last_error: str = ""
+    failure_kind: str = ""
+    quarantined_at: str = ""
 
 
 class ParadigmStore:
@@ -97,10 +100,13 @@ class ParadigmStore:
                     stats_json TEXT NOT NULL,
                     report_content TEXT NOT NULL DEFAULT '',
                     attempt_count INTEGER NOT NULL DEFAULT 0,
+                    render_attempt_count INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT NOT NULL DEFAULT '',
+                    failure_kind TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    delivered_at TEXT
+                    delivered_at TEXT,
+                    quarantined_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS report_render_fragments (
                     delivery_key TEXT NOT NULL,
@@ -149,6 +155,24 @@ class ParadigmStore:
             if "last_refresh_attempt_at" not in paradigm_columns:
                 conn.execute(
                     "ALTER TABLE paradigms ADD COLUMN last_refresh_attempt_at TEXT"
+                )
+            outbox_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(report_outbox)")
+            }
+            if "render_attempt_count" not in outbox_columns:
+                conn.execute(
+                    "ALTER TABLE report_outbox ADD COLUMN "
+                    "render_attempt_count INTEGER NOT NULL DEFAULT 0"
+                )
+            if "failure_kind" not in outbox_columns:
+                conn.execute(
+                    "ALTER TABLE report_outbox ADD COLUMN "
+                    "failure_kind TEXT NOT NULL DEFAULT ''"
+                )
+            if "quarantined_at" not in outbox_columns:
+                conn.execute(
+                    "ALTER TABLE report_outbox ADD COLUMN quarantined_at TEXT"
                 )
 
     def is_bootstrap_required(self) -> bool:
@@ -401,6 +425,27 @@ class ParadigmStore:
                             THEN report_outbox.stats_json
                         ELSE excluded.stats_json
                     END,
+                    status=CASE
+                        WHEN report_outbox.status = 'delivered'
+                            THEN report_outbox.status
+                        ELSE 'pending_render'
+                    END,
+                    render_attempt_count=CASE
+                        WHEN report_outbox.status = 'quarantined' THEN 0
+                        ELSE report_outbox.render_attempt_count
+                    END,
+                    last_error=CASE
+                        WHEN report_outbox.status = 'quarantined' THEN ''
+                        ELSE report_outbox.last_error
+                    END,
+                    failure_kind=CASE
+                        WHEN report_outbox.status = 'quarantined' THEN ''
+                        ELSE report_outbox.failure_kind
+                    END,
+                    quarantined_at=CASE
+                        WHEN report_outbox.status = 'quarantined' THEN NULL
+                        ELSE report_outbox.quarantined_at
+                    END,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -423,7 +468,8 @@ class ParadigmStore:
                 """
                 SELECT delivery_key, report_date, report_name, status,
                        candidate_payload_json, stats_json, report_content,
-                       attempt_count, last_error
+                       attempt_count, render_attempt_count, last_error,
+                       failure_kind, quarantined_at
                 FROM report_outbox WHERE delivery_key=?
                 """,
                 (delivery_key,),
@@ -438,9 +484,10 @@ class ParadigmStore:
                 """
                 SELECT delivery_key, report_date, report_name, status,
                        candidate_payload_json, stats_json, report_content,
-                       attempt_count, last_error
+                       attempt_count, render_attempt_count, last_error,
+                       failure_kind, quarantined_at
                 FROM report_outbox
-                WHERE status != 'delivered'
+                WHERE status IN ('pending_render', 'rendered', 'sending')
                 ORDER BY created_at ASC
                 LIMIT 1
                 """
@@ -453,8 +500,10 @@ class ParadigmStore:
             conn.execute(
                 """
                 UPDATE report_outbox
-                SET report_content=?, status='rendered', last_error='', updated_at=?
-                WHERE delivery_key=? AND status != 'delivered'
+                SET report_content=?, status='rendered', last_error='',
+                    failure_kind='', updated_at=?
+                WHERE delivery_key=?
+                  AND status IN ('pending_render', 'rendered', 'sending')
                 """,
                 (content, now, delivery_key),
             )
@@ -467,8 +516,10 @@ class ParadigmStore:
             conn.execute(
                 """
                 UPDATE report_outbox
-                SET report_content='', status='pending_render', last_error=?, updated_at=?
-                WHERE delivery_key=? AND status != 'delivered'
+                SET report_content='', status='pending_render', last_error=?,
+                    failure_kind='stale_render_contract', updated_at=?
+                WHERE delivery_key=?
+                  AND status IN ('pending_render', 'rendered', 'sending')
                 """,
                 (_safe_error_text(reason), now, delivery_key),
             )
@@ -515,14 +566,44 @@ class ParadigmStore:
                 """
                 UPDATE report_outbox
                 SET status='sending', attempt_count=attempt_count + 1,
-                    last_error='', updated_at=?
-                WHERE delivery_key=? AND status != 'delivered'
+                    last_error='', failure_kind='', updated_at=?
+                WHERE delivery_key=?
+                  AND status IN ('pending_render', 'rendered', 'sending')
                 """,
                 (now, delivery_key),
             )
 
+    def begin_render_attempt(self, delivery_key: str) -> int:
+        """Increment and return the durable renderer attempt counter."""
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE report_outbox
+                SET render_attempt_count=render_attempt_count + 1,
+                    last_error='', failure_kind='', updated_at=?
+                WHERE delivery_key=?
+                  AND status IN ('pending_render', 'rendered', 'sending')
+                """,
+                (now, delivery_key),
+            )
+            row = conn.execute(
+                "SELECT render_attempt_count FROM report_outbox "
+                "WHERE delivery_key=?",
+                (delivery_key,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"不存在交付任务: {delivery_key}")
+        return int(row[0] or 0)
+
     def record_delivery_failure(
-        self, delivery_key: str, error: Exception | str, *, rendered: bool
+        self,
+        delivery_key: str,
+        error: Exception | str,
+        *,
+        rendered: bool,
+        failure_kind: str = "delivery_transient",
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         retry_status = "rendered" if rendered else "pending_render"
@@ -531,10 +612,95 @@ class ParadigmStore:
             conn.execute(
                 """
                 UPDATE report_outbox
-                SET status=?, last_error=?, updated_at=?
+                SET status=?, last_error=?, failure_kind=?, updated_at=?
+                WHERE delivery_key=?
+                  AND status IN ('pending_render', 'rendered', 'sending')
+                """,
+                (retry_status, safe_error, failure_kind, now, delivery_key),
+            )
+
+    def quarantine_report_job(
+        self,
+        delivery_key: str,
+        error: Exception | str,
+        *,
+        failure_kind: str,
+    ) -> None:
+        """Isolate an unrecoverable snapshot and atomically requeue its research.
+
+        A quarantined outbox item remains available for audit, but no longer
+        blocks newer delivery work.  Its candidates return to ``pending_deep``
+        in the same SQLite transaction, so a later research run can rebuild the
+        missing person/source contract instead of silently dropping the route.
+        """
+
+        now = datetime.now(timezone.utc).isoformat()
+        safe_error = _safe_error_text(error)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT candidate_payload_json FROM report_outbox "
+                "WHERE delivery_key=?",
+                (delivery_key,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"不存在交付任务: {delivery_key}")
+            candidates = [
+                candidate_from_dict(value) for value in json.loads(row[0])
+            ]
+            for candidate in candidates:
+                candidate.status = "pending_deep"
+                payload = json.dumps(
+                    candidate.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO paradigms (
+                        paradigm_key, name, status, total_score, payload_json,
+                        first_seen_at, last_seen_at
+                    ) VALUES (?, ?, 'pending_deep', ?, ?, ?, ?)
+                    ON CONFLICT(paradigm_key) DO UPDATE SET
+                        name=excluded.name,
+                        status='pending_deep',
+                        total_score=excluded.total_score,
+                        payload_json=excluded.payload_json,
+                        last_seen_at=excluded.last_seen_at
+                    """,
+                    (
+                        candidate.key,
+                        candidate.name,
+                        candidate.total_score,
+                        payload,
+                        now,
+                        now,
+                    ),
+                )
+                for evidence in candidate.evidence:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO paradigm_evidence (
+                            paradigm_key, fingerprint, first_linked_at
+                        ) VALUES (?, ?, ?)
+                        """,
+                        (
+                            candidate.key,
+                            evidence.fingerprint,
+                            now,
+                        ),
+                    )
+            conn.execute(
+                """
+                UPDATE report_outbox
+                SET status='quarantined', last_error=?, failure_kind=?,
+                    quarantined_at=?, updated_at=?
                 WHERE delivery_key=? AND status != 'delivered'
                 """,
-                (retry_status, safe_error, now, delivery_key),
+                (safe_error, failure_kind, now, now, delivery_key),
+            )
+            conn.execute(
+                "DELETE FROM report_render_fragments WHERE delivery_key=?",
+                (delivery_key,),
             )
 
     def mark_delivery_delivered(
@@ -568,7 +734,8 @@ class ParadigmStore:
                 """
                 UPDATE report_outbox
                 SET status='delivered', delivered_at=?, updated_at=?,
-                    last_error='', report_content=''
+                    last_error='', failure_kind='', report_content='',
+                    quarantined_at=NULL
                 WHERE delivery_key=?
                 """,
                 (now, now, delivery_key),
@@ -819,14 +986,66 @@ class ParadigmStore:
             evidence = conn.execute("SELECT COUNT(*) FROM evidence_state").fetchone()[0]
             deliveries = conn.execute("SELECT COUNT(*) FROM report_deliveries").fetchone()[0]
             pending_deliveries = conn.execute(
-                "SELECT COUNT(*) FROM report_outbox WHERE status != 'delivered'"
+                "SELECT COUNT(*) FROM report_outbox "
+                "WHERE status IN ('pending_render', 'rendered', 'sending')"
+            ).fetchone()[0]
+            quarantined_deliveries = conn.execute(
+                "SELECT COUNT(*) FROM report_outbox WHERE status = 'quarantined'"
             ).fetchone()[0]
         return {
             "paradigms": paradigms,
             "evidence": evidence,
             "deliveries": deliveries,
             "pending_deliveries": pending_deliveries,
+            "quarantined_deliveries": quarantined_deliveries,
         }
+
+    def delivery_queue_snapshot(self, limit: int = 10) -> dict:
+        """Return a redacted, read-only operational view of the outbox."""
+
+        target = max(1, min(int(limit or 10), 50))
+        with self._connect() as conn:
+            status_counts = {
+                str(status): int(count)
+                for status, count in conn.execute(
+                    "SELECT status, COUNT(*) FROM report_outbox GROUP BY status"
+                )
+            }
+            rows = conn.execute(
+                """
+                SELECT delivery_key, report_date, status,
+                       candidate_payload_json, attempt_count,
+                       render_attempt_count, failure_kind, last_error,
+                       created_at, updated_at, quarantined_at
+                FROM report_outbox
+                WHERE status != 'delivered'
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (target,),
+            ).fetchall()
+        jobs = []
+        for row in rows:
+            try:
+                candidate_count = len(json.loads(row[3]))
+            except (json.JSONDecodeError, TypeError):
+                candidate_count = -1
+            jobs.append(
+                {
+                    "delivery_key": str(row[0])[:12],
+                    "report_date": str(row[1]),
+                    "status": str(row[2]),
+                    "candidate_count": candidate_count,
+                    "delivery_attempt_count": int(row[4] or 0),
+                    "render_attempt_count": int(row[5] or 0),
+                    "failure_kind": str(row[6] or ""),
+                    "last_error": str(row[7] or "")[:500],
+                    "created_at": str(row[8] or ""),
+                    "updated_at": str(row[9] or ""),
+                    "quarantined_at": str(row[10] or ""),
+                }
+            )
+        return {"status_counts": status_counts, "jobs": jobs}
 
     def latest_reported_candidates(self, limit: int = 20) -> list[ParadigmCandidate]:
         with self._connect() as conn:
@@ -870,7 +1089,10 @@ def _report_job_from_row(row: tuple) -> ReportOutboxJob:
         stats=dict(json.loads(row[5]) or {}),
         report_content=str(row[6] or ""),
         attempt_count=int(row[7] or 0),
-        last_error=str(row[8] or ""),
+        render_attempt_count=int(row[8] or 0),
+        last_error=str(row[9] or ""),
+        failure_kind=str(row[10] or ""),
+        quarantined_at=str(row[11] or ""),
     )
 
 

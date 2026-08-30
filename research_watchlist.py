@@ -395,8 +395,8 @@ RESEARCH_SOURCES: tuple[dict, ...] = (
     {"url": "https://runwayml.com/research/publications", "owner": "runway", "tier": "established"},
     {"url": "https://pub.sakana.ai/", "owner": "sakana", "tier": "established"},
     {"url": "https://www.futurehouse.org/research", "owner": "futurehouse", "tier": "established"},
-    {"url": "https://arcinstitute.org/publications", "owner": "arc-institute", "tier": "established", "allowed_domains": ("arcinstitute.org",)},
-    {"url": "https://www.isomorphiclabs.com/articles", "owner": "isomorphic-labs", "tier": "verified"},
+    {"url": "https://arcinstitute.org/news", "owner": "arc-institute", "tier": "established", "allowed_domains": ("arcinstitute.org",)},
+    {"url": "https://www.isomorphiclabs.com/news", "owner": "isomorphic-labs", "tier": "verified"},
     {"url": "https://www.lila.ai/tech", "owner": "lila-sciences", "tier": "verified"},
     {"url": "https://www.microsoft.com/en-us/research/lab/microsoft-research-ai-for-science/", "owner": "microsoft-ai4science", "tier": "established", "allowed_domains": ("microsoft.com",)},
     # 大型综合研究页：主动召回，但不能仅凭入口直接晋级。
