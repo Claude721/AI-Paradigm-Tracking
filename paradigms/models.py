@@ -407,6 +407,7 @@ class ResearcherProfile:
             "已检查公开个人主页",
             "个人主页返回",
             "个人主页读取失败",
+            "交叉核验通过",
         )
         return any(
             any(marker in note for marker in completed_markers)
@@ -414,6 +415,34 @@ class ResearcherProfile:
             and "未执行" not in note
             for note in self.contact_search_notes
         )
+
+
+def plausible_researcher_name(name: str) -> bool:
+    """Reject layout fragments, URLs and joined contacts before identity work.
+
+    Author metadata is assembled from HTML, PDF text and third-party indexes.  A
+    malformed author token must never become a person merely because a later
+    lookup happened to return something.  This is deliberately a syntax gate,
+    not an ethnicity-specific name dictionary.
+    """
+
+    value = re.sub(r"\s+", " ", str(name or "")).strip()
+    if not 2 <= len(value) <= 100 or not any(char.isalpha() for char in value):
+        return False
+    if any(char.isdigit() or ord(char) < 32 for char in value):
+        return False
+    if any(token in value.casefold() for token in ("http://", "https://", "mailto:")):
+        return False
+    if any(char in value for char in "@{}[]<>\\/|=_:;\n\r\t"):
+        return False
+    if len(value.split()) > 10:
+        return False
+    return all(
+        char.isalpha()
+        or char.isspace()
+        or char in "-.'’,·"
+        for char in value
+    )
 
 
 def key_researcher_profiles(
@@ -427,7 +456,9 @@ def key_researcher_profiles(
     这只影响人物核验与报告篇幅，不会改变完整作者名单或技术 Rubric。
     """
 
-    named = [profile for profile in profiles if profile.name.strip()]
+    named = [
+        profile for profile in profiles if plausible_researcher_name(profile.name)
+    ]
     if not named:
         return []
     target = max(int(limit or 0), 1)
@@ -484,6 +515,62 @@ def key_researcher_profiles(
     if not selected:
         add(named[0])
     return selected
+
+
+def delivery_researcher_profiles(
+    profiles: list[ResearcherProfile],
+    limit: int = 3,
+) -> list[ResearcherProfile]:
+    """Return only people safe enough to attribute in a public report.
+
+    An OpenAlex name hit by itself is not identity proof.  Delivery requires a
+    usable background, a completed public-contact search, and either a direct
+    professional identity anchor or an explicit current-work alignment note.
+    Unready profiles remain in the candidate for future enrichment.
+    """
+
+    direct_labels = {
+        "homepage",
+        "orcid",
+        "google_scholar",
+        "semantic_scholar",
+        "linkedin",
+        "github",
+    }
+    ready: list[ResearcherProfile] = []
+    for profile in key_researcher_profiles(profiles, limit):
+        has_background = bool(
+            profile.current_affiliation
+            or profile.background_summary
+            or profile.prior_affiliations
+            or profile.research_trajectory
+            or profile.key_person_reason
+        )
+        direct_identity = bool(
+            direct_labels.intersection(profile.public_contacts)
+            or (
+                profile.public_email
+                and profile.public_email_source
+                and "email" in profile.public_contacts
+            )
+        )
+        current_work_aligned = any(
+            ("当前论文" in note or "当前工作" in note)
+            and (
+                "交叉核验通过" in note
+                or "身份对齐通过" in note
+                or ("已与当前" in note and "对齐" in note)
+            )
+            for note in profile.contact_search_notes
+        )
+        if (
+            plausible_researcher_name(profile.name)
+            and has_background
+            and profile.contact_lookup_completed
+            and (direct_identity or current_work_aligned)
+        ):
+            ready.append(profile)
+    return ready
 
 
 @dataclass

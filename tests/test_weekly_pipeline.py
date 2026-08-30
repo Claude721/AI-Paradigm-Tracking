@@ -147,8 +147,40 @@ class WeeklyPipelineTests(unittest.TestCase):
             message = (
                 smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
             )
-            self.assertIn("[研究未完成]", message["Subject"])
+            self.assertIn("[阶段性研究]", message["Subject"])
             self.assertIn("不能把 0 条交付理解", message.get_body().get_content())
+
+    def test_coverage_limited_email_is_not_labeled_as_research_backlog(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "paradigm_radar_2026-08-09.md"
+            report.write_text("# 覆盖受限报告", encoding="utf-8")
+            with (
+                patch.object(config, "SMTP_HOST", "smtp.example.com"),
+                patch.object(config, "SMTP_PORT", 465),
+                patch.object(config, "SMTP_USERNAME", "sender@example.com"),
+                patch.object(config, "SMTP_PASSWORD", "app-password"),
+                patch.object(config, "SMTP_FROM", "sender@example.com"),
+                patch.object(config, "SMTP_TO", ["receiver@example.com"]),
+                patch.object(config, "SMTP_USE_SSL", True),
+                patch("notifications.email_notifier.smtplib.SMTP_SSL") as smtp,
+            ):
+                _send_sync(
+                    report,
+                    {
+                        "research_incomplete": False,
+                        "coverage_incomplete": True,
+                        "pending_work_count": 0,
+                        "new_paradigms": 0,
+                        "updated_paradigms": 0,
+                    },
+                )
+
+            message = (
+                smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+            )
+            self.assertIn("[覆盖受限]", message["Subject"])
+            self.assertNotIn("[阶段性研究]", message["Subject"])
+            self.assertIn("研究判断已完成", message.get_body().get_content())
 
     def test_run_audit_records_usage_and_decisions_without_model_content(self) -> None:
         response = SimpleNamespace(

@@ -109,11 +109,24 @@ def _send_sync(
 
     message = EmailMessage()
     if is_paradigm:
-        if stats.get("run_incomplete"):
+        research_incomplete = bool(
+            stats.get("research_incomplete", stats.get("run_incomplete"))
+        )
+        coverage_incomplete = bool(
+            stats.get("coverage_incomplete")
+            or stats.get("recall_coverage_incomplete")
+        )
+        if research_incomplete:
             message["Subject"] = (
-                f"[研究未完成] AI 技术范式雷达｜{report_date}｜"
+                f"[阶段性研究] AI 技术范式雷达｜{report_date}｜"
                 f"已交付 {stats.get('high_value_count', 0)} 条，"
                 f"待续研 {stats.get('pending_work_count', 0)} 项"
+            )
+        elif coverage_incomplete:
+            message["Subject"] = (
+                f"[覆盖受限] AI 技术范式雷达｜{report_date}｜"
+                f"{stats.get('new_paradigms', 0)} 个新信号 + "
+                f"{stats.get('updated_paradigms', 0)} 个进展"
             )
         else:
             message["Subject"] = (
@@ -136,9 +149,12 @@ def _send_sync(
         message["X-AI-Radar-Delivery-Key"] = delivery_key
     if is_paradigm:
         status_line = (
-            "本轮研究链路尚未完成；附件是进度状态/阶段性 memo，"
-            "不能把 0 条交付理解为本周没有重要技术。"
-            if stats.get("run_incomplete")
+            "本轮仍有研究事务待续跑；附件是阶段性 memo，结论只覆盖已完成"
+            "判断的样本，不能把 0 条交付理解为本周没有重要技术。"
+            if research_incomplete
+            else "本轮研究判断已完成，但部分召回入口覆盖受限；附件已明确"
+            "列出边界，空结果不能外推到未覆盖领域。"
+            if coverage_incomplete
             else "AI 技术范式雷达本期研究与交付已完成。"
         )
         body = (

@@ -20,7 +20,7 @@ from paradigms.models import (
     ParadigmCandidate,
     ResearcherProfile,
     TechnicalEvidence,
-    key_researcher_profiles,
+    delivery_researcher_profiles,
     primary_material_url,
     safe_public_contact_target,
     verified_organization_attribution,
@@ -450,8 +450,12 @@ class ParadigmReportGenerator:
                 f"详情失败 {official.get('detail_failures', 0)}"
             )
         pending_work = int(stats.get("pending_work_count", 0) or 0)
-        run_incomplete = bool(
-            stats.get("run_incomplete") or pending_work or incomplete_parts
+        research_incomplete = bool(
+            stats.get("research_incomplete", stats.get("run_incomplete"))
+            or pending_work
+        )
+        coverage_incomplete = bool(
+            stats.get("coverage_incomplete") or incomplete_parts
         )
         coverage_note = (
             "\n\n本轮存在**召回覆盖未闭合**："
@@ -477,7 +481,7 @@ class ParadigmReportGenerator:
             )
         else:
             progress_note = ""
-        if run_incomplete:
+        if research_incomplete:
             memo_heading = "## 本期运行状态 Memo"
             memo = (
                 f"本轮已发现 {stats.get('origin_count', 0)} 份一手机制材料（含论文、"
@@ -489,6 +493,20 @@ class ParadigmReportGenerator:
             closing = (
                 "优先恢复未闭合的召回车道、机制抽取、深挖与人物/原文交付"
                 "契约；在这些步骤完成前，不对近期技术演变做负面结论。"
+            )
+        elif coverage_incomplete:
+            memo_heading = "## 本期研究 Memo"
+            memo = (
+                f"本期研究判断已经执行完成，但召回覆盖仍有明确边界。本轮扫描了 "
+                f"{stats.get('origin_count', 0)} 份一手机制材料；在当前已覆盖材料中，"
+                "没有路线同时跨过技术外延、发布者可信度与外部承接门槛。这个"
+                "结果只能解释为**覆盖受限条件下没有可交付信号**，不能外推为"
+                "近期所有领域都没有新进展。相关失败车道、限流与官方入口异常"
+                "会保留在审计中，待后续运行补齐。"
+            )
+            closing = (
+                "优先补齐本轮退化的学术索引、召回车道与官方入口；只有覆盖"
+                "恢复后，才把空结果视为完整的周期判断。"
             )
         else:
             memo_heading = "## 本期研究 Memo"
@@ -571,7 +589,7 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         "evidence": [_evidence_dossier(value) for value in item.evidence[:20]],
         "researchers": [
             _researcher_dossier(value)
-            for value in key_researcher_profiles(
+            for value in delivery_researcher_profiles(
                 item.researchers,
                 config.PARADIGM_KEY_RESEARCHER_LIMIT,
             )
@@ -659,7 +677,7 @@ def _compact_route_dossier(item: ParadigmCandidate) -> dict:
         },
         "researchers": [
             _researcher_dossier(value)
-            for value in key_researcher_profiles(
+            for value in delivery_researcher_profiles(
                 item.researchers,
                 config.PARADIGM_KEY_RESEARCHER_LIMIT,
             )
@@ -746,7 +764,7 @@ def _editorial_frame_payload(
             ],
             "key_people": [
                 profile.name
-                for profile in key_researcher_profiles(
+                for profile in delivery_researcher_profiles(
                     candidate.researchers,
                     config.PARADIGM_KEY_RESEARCHER_LIMIT,
                 )
@@ -845,6 +863,8 @@ def _route_draft_violations(
         violations.append("出现内部评分")
     if _has_long_english_excerpt(value):
         violations.append("出现英文原文长句或成段摘录")
+    if _contains_absolute_paradigm_claim(value):
+        violations.append("路线正文使用了无边界的新范式绝对表述")
     linked_urls = _markdown_link_targets(value)
     if not any(
         _normalized_url(primary_material_url(source)) in linked_urls
@@ -853,7 +873,7 @@ def _route_draft_violations(
         violations.append("路线正文没有原样附上一手材料 Markdown 链接")
     people = [
         profile.name
-        for profile in key_researcher_profiles(
+        for profile in delivery_researcher_profiles(
             candidate.researchers,
             config.PARADIGM_KEY_RESEARCHER_LIMIT,
         )
@@ -923,7 +943,10 @@ def _public_stats(stats: dict) -> dict:
         "delivery_profile_deferred_count",
         "delivery_source_deferred_count",
         "report_safety_deferred_count",
+        "pending_work_count",
         "recall_coverage_incomplete",
+        "coverage_incomplete",
+        "research_incomplete",
         "run_incomplete",
         "result_kind",
         "candidate_extractions",
@@ -995,6 +1018,8 @@ def _editorial_violations(
         violations.append("出现表格")
     if has_numeric_score or any(value in content for value in forbidden):
         violations.append("出现内部评分")
+    if _contains_absolute_paradigm_claim(content):
+        violations.append("把早期技术路线写成无边界的确定新范式结论")
     if _has_long_english_excerpt(content):
         violations.append("出现英文原文长句或成段摘录")
     violations.extend(_momentum_brief_violations(content, candidates or []))
@@ -1205,7 +1230,7 @@ def _researcher_profile_violations(
     for candidate in candidates:
         route = candidate.route_family or candidate.lineage_parent or candidate.name
         grouped.setdefault(route, []).extend(
-            key_researcher_profiles(
+            delivery_researcher_profiles(
                 candidate.researchers,
                 config.PARADIGM_KEY_RESEARCHER_LIMIT,
             )
@@ -1263,7 +1288,7 @@ def _attach_researcher_index(
         route = candidate.route_family or candidate.lineage_parent or candidate.name
         bucket = grouped.setdefault(route, [])
         seen = {profile.name.casefold() for profile in bucket if profile.name}
-        for profile in key_researcher_profiles(
+        for profile in delivery_researcher_profiles(
             candidate.researchers,
             config.PARADIGM_KEY_RESEARCHER_LIMIT,
         ):
@@ -1367,7 +1392,8 @@ def _attach_deterministic_sections(
     artifact and must therefore participate in the quality decision itself.
     """
 
-    value = _attach_coverage_boundary(content, stats)
+    value = _attach_research_scope_boundary(content, stats)
+    value = _attach_coverage_boundary(value, stats)
     value = _attach_researcher_index(value, candidates)
     # Primary URLs come directly from verified evidence objects.  Attaching the
     # index before validation also means the URL allow-list checks the artifact
@@ -1381,6 +1407,37 @@ def _without_researcher_index(content: str) -> str:
         "\n",
         content,
     )
+
+
+def _attach_research_scope_boundary(content: str, stats: dict) -> str:
+    """Place unfinished-sample scope beside the opening editorial claim."""
+
+    pending = int(stats.get("pending_work_count", 0) or 0)
+    research_incomplete = bool(
+        stats.get("research_incomplete", stats.get("run_incomplete")) or pending
+    )
+    value = re.sub(
+        r"(?ms)\n*> \*\*阶段性研究范围：\*\*.*?(?=\n\n|\Z)",
+        "",
+        content,
+    ).strip()
+    if not research_incomplete:
+        return value
+    planned = int(stats.get("planned_analysis_count", 0) or 0)
+    completed = int(
+        stats.get("analysis_completed_count", stats.get("analysis_count", 0)) or 0
+    )
+    note = (
+        "> **阶段性研究范围：** 本期仍有 "
+        f"{pending} 项研究事务待续跑，机制抽取已完成 {completed}/{planned} 条。"
+        "以下路线只代表当前已完成判断样本中的候选信号，不代表对本期全部"
+        "召回材料的完整结论，也不能表述为已经形成确定的新范式。"
+    )
+    heading = re.search(r"(?m)^## 本期研究 Memo\s*$", value)
+    if not heading:
+        return value
+    insertion = heading.end()
+    return value[:insertion] + "\n\n" + note + value[insertion:]
 
 
 def _attach_coverage_boundary(content: str, stats: dict) -> str:
@@ -1528,7 +1585,10 @@ def _grounded_http_urls(candidates: list[ParadigmCandidate]) -> set[str]:
         )
         if source_url:
             urls.add(_normalized_url(source_url))
-        for profile in candidate.researchers:
+        for profile in delivery_researcher_profiles(
+            candidate.researchers,
+            config.PARADIGM_KEY_RESEARCHER_LIMIT,
+        ):
             for label, target in profile.public_contacts.items():
                 safe = safe_public_contact_target(str(label), str(target))
                 if safe.startswith(("http://", "https://")):
@@ -1608,6 +1668,18 @@ def _has_long_english_excerpt(content: str) -> bool:
     return False
 
 
+def _contains_absolute_paradigm_claim(content: str) -> bool:
+    """Catch a narrow set of phrases that overstate route maturity."""
+
+    return bool(
+        re.search(
+            r"真正意义上的新范式|真正的新范式|全新的技术范式|"
+            r"标志着[^。！？\n]{0,50}(?:范式转移|新范式|范式已经形成)",
+            content,
+        )
+    )
+
+
 def _covers_researchers(
     content: str, candidates: list[ParadigmCandidate]
 ) -> bool:
@@ -1617,7 +1689,7 @@ def _covers_researchers(
         route = candidate.route_family or candidate.lineage_parent or candidate.name
         by_route.setdefault(route, set()).update(
             profile.name
-            for profile in key_researcher_profiles(
+            for profile in delivery_researcher_profiles(
                 candidate.researchers,
                 config.PARADIGM_KEY_RESEARCHER_LIMIT,
             )

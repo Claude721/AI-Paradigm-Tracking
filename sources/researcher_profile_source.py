@@ -13,7 +13,11 @@ from urllib.parse import urlparse
 import httpx
 
 import config
-from paradigms.models import ResearcherProfile, TechnicalEvidence
+from paradigms.models import (
+    ResearcherProfile,
+    TechnicalEvidence,
+    plausible_researcher_name,
+)
 from paradigms.reputation import resolve_organization
 
 logger = logging.getLogger(__name__)
@@ -76,7 +80,7 @@ class ResearcherProfileClient:
         profile: ResearcherProfile,
         evidence: TechnicalEvidence,
     ) -> None:
-        _note(profile, "已检索 OpenAlex Authors 并用当前论文题目核验身份")
+        _note(profile, "已检索 OpenAlex Authors，并尝试用当前论文题目对齐身份")
         known_id = profile.identifiers.get("openalex", "")
         best = None
         if known_id:
@@ -86,8 +90,19 @@ class ResearcherProfileClient:
                 params={"api_key": config.OPENALEX_API_KEY},
             )
             if response.status_code < 400:
-                best = response.json()
-                _note(profile, "沿当前论文返回的 OpenAlex 作者 ID 直接核验")
+                known_author = response.json()
+                if await self._has_current_work(
+                    client,
+                    known_author,
+                    evidence.title,
+                ):
+                    best = known_author
+                    _note(profile, "当前论文题目与 OpenAlex 作者实体交叉核验通过")
+                else:
+                    _note(
+                        profile,
+                        "当前论文返回的 OpenAlex 作者 ID 未能与当前论文题目对齐",
+                    )
         if best is None:
             response = await client.get(
                 OPENALEX_AUTHORS,
@@ -106,6 +121,8 @@ class ResearcherProfileClient:
                 if _name_similarity(profile.name, item.get("display_name", "")) >= 0.92
             ]
             best = await self._match_current_work(client, matches, evidence.title)
+            if best is not None:
+                _note(profile, "当前论文题目与 OpenAlex 作者实体交叉核验通过")
         if not best:
             _note(profile, "未找到能与当前论文可靠对齐的 OpenAlex 作者实体")
             return
@@ -180,31 +197,39 @@ class ResearcherProfileClient:
         title: str,
     ) -> dict | None:
         for author in authors[:3]:
-            short_id = str(author.get("id", "")).rsplit("/", 1)[-1]
-            if not short_id:
-                continue
-            response = await client.get(
-                OPENALEX_WORKS,
-                params={
-                    "api_key": config.OPENALEX_API_KEY,
-                    "filter": f"author.id:{short_id}",
-                    "search": title,
-                    "per-page": 3,
-                },
-            )
-            if response.status_code >= 400:
-                continue
-            if any(
-                SequenceMatcher(
-                    None,
-                    title.lower(),
-                    str(work.get("display_name", "")).lower(),
-                ).ratio()
-                >= 0.82
-                for work in response.json().get("results", [])
-            ):
+            if await self._has_current_work(client, author, title):
                 return author
         return None
+
+    async def _has_current_work(
+        self,
+        client: httpx.AsyncClient,
+        author: dict,
+        title: str,
+    ) -> bool:
+        short_id = str(author.get("id", "")).rsplit("/", 1)[-1]
+        if not short_id or not title.strip():
+            return False
+        response = await client.get(
+            OPENALEX_WORKS,
+            params={
+                "api_key": config.OPENALEX_API_KEY,
+                "filter": f"author.id:{short_id}",
+                "search": title,
+                "per-page": 3,
+            },
+        )
+        if response.status_code >= 400:
+            return False
+        return any(
+            SequenceMatcher(
+                None,
+                title.lower(),
+                str(work.get("display_name", "")).lower(),
+            ).ratio()
+            >= 0.82
+            for work in response.json().get("results", [])
+        )
 
     async def _orcid(
         self,
@@ -329,7 +354,11 @@ def _seed_profiles(
     existing: list[ResearcherProfile],
     limit: int,
 ) -> list[ResearcherProfile]:
-    by_name = {profile.name.casefold(): profile for profile in existing}
+    by_name = {
+        profile.name.casefold(): profile
+        for profile in existing
+        if plausible_researcher_name(profile.name)
+    }
     roles = {
         str(name): str(role)
         for name, role in (evidence.raw.get("author_roles") or {}).items()
@@ -369,7 +398,7 @@ def _seed_profiles(
     individual_authors = [
         name
         for name in evidence.authors
-        if name and not _is_collective_author(name)
+        if plausible_researcher_name(name) and not _is_collective_author(name)
     ]
     has_collective_signature = len(individual_authors) != len(evidence.authors)
     selected: list[str] = []
@@ -416,8 +445,14 @@ def _seed_profiles(
         )
     )
     selected.extend(individual_authors[1:3])
-    selected.extend(name for name in roles if not _is_collective_author(name))
-    selected = list(dict.fromkeys(name for name in selected if name))[:limit]
+    selected.extend(
+        name
+        for name in roles
+        if plausible_researcher_name(name) and not _is_collective_author(name)
+    )
+    selected = list(
+        dict.fromkeys(name for name in selected if plausible_researcher_name(name))
+    )[:limit]
 
     for name in selected:
         if not name:

@@ -161,7 +161,6 @@ def _assess_publisher(candidate: ParadigmCandidate) -> None:
     verified = []
     candidate.is_formal_technical_report = any(
         item.raw.get("origin_kind") == "technical_report"
-        or "technical report" in item.title.casefold()
         for item in candidate.evidence
         if item.evidence_type in ORIGIN_EVIDENCE_TYPES
     )

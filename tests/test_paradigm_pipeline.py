@@ -40,6 +40,7 @@ from paradigms.scoring import is_reportable, score_candidate
 from reports.paradigm_generator import (
     ParadigmReportGenerator,
     _attach_primary_source_index,
+    _attach_research_scope_boundary,
     _attach_researcher_index,
     _candidate_dossier,
     _compact_route_dossier,
@@ -202,7 +203,10 @@ def verified_researcher(name: str = "A. Researcher") -> ResearcherProfile:
         name=name,
         current_affiliation="Example Lab",
         background_summary="长期研究世界模型与机器人学习。",
-        contact_search_notes=["已检索公开主页，未发现额外职业联系方式"],
+        contact_search_notes=[
+            "当前论文题目与 OpenAlex 作者实体交叉核验通过",
+            "已检索公开主页，未发现额外职业联系方式",
+        ],
     )
 
 
@@ -326,6 +330,20 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertTrue(item.is_formal_technical_report)
         self.assertEqual(item.publisher_tier, "established")
         self.assertIn("优先解读", item.admission_reason)
+
+    def test_title_alone_cannot_upgrade_an_ordinary_paper_to_formal_report(self) -> None:
+        evidence = paper()
+        evidence.title = "A Technical Report on One Benchmark"
+        evidence.organization = "Moonshot AI"
+        evidence.raw = {
+            "origin_kind": "research_paper",
+            "publisher_tier": "established",
+            "publisher_evidence": "verified publication metadata",
+        }
+        item = candidate([evidence])
+        score_candidate(item)
+        self.assertFalse(item.is_formal_technical_report)
+        self.assertNotIn("正式 Technical Report", item.admission_reason)
 
     def test_unknown_work_needs_independent_secondary_validation(self) -> None:
         item = candidate()
@@ -1483,7 +1501,7 @@ class ParadigmPipelineTests(unittest.TestCase):
                 current_affiliation="Example Lab",
                 background_summary="长期研究世界模型。",
                 contact_search_notes=[
-                    "已检索 OpenAlex Authors 并用当前论文题目核验身份"
+                    "当前论文题目与 OpenAlex 作者实体交叉核验通过"
                 ],
             )
         ]
@@ -1493,7 +1511,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         self.assertIn("未找到可核验的公开联系入口", content)
         self.assertIn("检索记录", content)
-        self.assertIn("已检索 OpenAlex Authors", content)
+        self.assertIn("当前论文题目", content)
 
     def test_researcher_index_discloses_team_attribution_boundary(self) -> None:
         item = candidate()
@@ -1588,12 +1606,48 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertFalse(
             _valid_editorial_report(report + "\n\n| 项目 | 数据 |\n|---|---|", [item])
         )
+        self.assertFalse(
+            _valid_editorial_report(
+                report + "\n\n这是真正意义上的新范式。",
+                [item],
+            )
+        )
         english = (
             "The method treats optimization as a recursive process where every new task "
             "must preserve all previously acquired capabilities while adapting to a changing "
             "distribution through a carefully designed verification loop."
         )
         self.assertFalse(_valid_editorial_report(report + f"\n\n{english}", [item]))
+
+    def test_incomplete_memo_gets_opening_scope_and_rejects_absolute_claims(self) -> None:
+        memo = (
+            "本期完成样本显示一些研究正在改变状态更新接口，但外部承接仍然有限。"
+            * 10
+        )
+        content = (
+            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
+            f"{memo}\n\n## 接下来真正值得盯的信号\n\n观察独立复现。"
+        )
+        scoped = _attach_research_scope_boundary(
+            content,
+            {
+                "research_incomplete": True,
+                "pending_work_count": 88,
+                "planned_analysis_count": 100,
+                "analysis_completed_count": 12,
+            },
+        )
+        self.assertIn("阶段性研究范围", scoped)
+        self.assertIn("12/100", scoped)
+        self.assertIn("当前已完成判断样本中的候选信号", scoped)
+        overclaimed = scoped.replace(
+            "本期完成样本显示一些研究",
+            "这是真正意义上的新范式，研究",
+            1,
+        )
+        self.assertTrue(
+            any("确定新范式" in value for value in _editorial_violations(overclaimed, []))
+        )
 
     def test_report_gate_parses_memo_before_level_three_route_heading(self) -> None:
         item = candidate()
@@ -1814,8 +1868,8 @@ class ParadigmPipelineTests(unittest.TestCase):
                 },
             },
         )
-        self.assertIn("本期运行状态 Memo", content)
-        self.assertIn("不是技术判断", content)
+        self.assertIn("本期研究 Memo", content)
+        self.assertIn("覆盖受限条件下没有可交付信号", content)
         self.assertIn("priority_researchers_1", content)
         self.assertIn("openreview=partial", content)
         self.assertIn("官方入口", content)

@@ -27,10 +27,11 @@ from paradigms.models import (
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
     assess_candidate_freshness,
-    key_researcher_profiles,
+    delivery_researcher_profiles,
     primary_material_url,
     verified_organization_attribution,
 )
+from paradigms.publication import classify_publication
 from paradigms.scoring import is_reportable, score_candidate
 from run_audit import run_audit
 
@@ -245,16 +246,17 @@ class ParadigmOrchestrator:
             or official_warning
             or failed_sources
         )
-        # 覆盖地图基线只受地图/核心学术召回是否闭合影响。官方网页、Feed
-        # 等动态入口的局部失败仍会让本期报告标成 incomplete，但不能因为
-        # 一个长期失效页面让整个仓库永远停在 60 天 bootstrap 模式。
-        baseline_lane_failures = [
-            name for name in failed_lanes if name != "explicit_seeds"
-        ]
-        stats["landscape_coverage_incomplete"] = bool(
-            domain_coverage_incomplete
-            or baseline_lane_failures
-            or degraded_indexes
+        # 覆盖地图基线只受普通窗口内的 landscape 车道和 OpenAlex 核心
+        # 学术召回影响。Technical Report、重点研究者、OpenReview、官方网页
+        # 与 Feed 的局部失败仍会进入本期覆盖边界，但不能把 60 天 bootstrap
+        # 永久锁住；这些入口本来就是高信号回补或扩展覆盖，不是地图基线。
+        stats["landscape_coverage_incomplete"] = (
+            _landscape_baseline_incomplete(
+                domain_coverage_incomplete=domain_coverage_incomplete,
+                failed_lanes=failed_lanes,
+                degraded_indexes=degraded_indexes,
+                recall_lanes=recall_lanes,
+            )
         )
         origins, incremental = self.store.plan_origins(batch.origins)
         stats.update({f"origin_{key}": value for key, value in incremental.items()})
@@ -281,6 +283,8 @@ class ParadigmOrchestrator:
         pending_origins = self.store.load_pending_origins(
             exclude_fingerprints={item.fingerprint for item in origins}
         )
+        for origin in [*pending_origins, *origins]:
+            _revalidate_legacy_technical_report(origin)
         origins = _origin_execution_order(pending_origins, origins)
         stats["pending_origin_backlog_loaded"] = len(pending_origins)
         planned_count = len(origins)
@@ -643,7 +647,9 @@ class ParadigmOrchestrator:
         for candidate in reportable:
             assessment = assess_candidate_freshness(
                 candidate,
-                window_days=self.high_signal_discovery_lookback_days,
+                # 高信号窗口只负责索引晚到/历史漏召回；交付新鲜度必须使用
+                # 普通周报窗口，否则 60 天补扫会被误写成本期新发布。
+                window_days=self.ordinary_discovery_lookback_days,
             )
             candidate.freshness_assessment = assessment
             if assessment["decision"] == "defer":
@@ -699,9 +705,11 @@ class ParadigmOrchestrator:
             item.report_kind == "update" for item in reportable
         )
 
-        stats["run_incomplete"] = bool(
+        stats["coverage_incomplete"] = bool(
             stats["recall_coverage_incomplete"]
-            or stats["evidence_checkpoint_rejected_count"]
+        )
+        stats["research_incomplete"] = bool(
+            stats["evidence_checkpoint_rejected_count"]
             or stats["analysis_deferred_count"]
             or stats["candidate_deferred_count"]
             or stats["candidate_research_incomplete_count"]
@@ -710,6 +718,10 @@ class ParadigmOrchestrator:
             or stats["delivery_source_deferred_count"]
             or stats["report_safety_deferred_count"]
         )
+        # ``run_incomplete`` 保留给旧 outbox/邮件消费者，但只表达研究事务
+        # 尚未闭合。信源局部退化用 coverage_incomplete 单独交付，避免把
+        # “研究已完成但覆盖受限”误报成 backlog。
+        stats["run_incomplete"] = stats["research_incomplete"]
         stats["pending_work_count"] = (
             stats["evidence_checkpoint_rejected_count"]
             + stats["analysis_deferred_count"]
@@ -727,9 +739,13 @@ class ParadigmOrchestrator:
         )
         stats["result_kind"] = (
             "partial_memo"
-            if reportable and stats["run_incomplete"]
+            if reportable and stats["research_incomplete"]
             else "research_incomplete"
-            if stats["run_incomplete"]
+            if stats["research_incomplete"]
+            else "coverage_limited_memo"
+            if reportable and stats["coverage_incomplete"]
+            else "coverage_limited_no_signal"
+            if stats["coverage_incomplete"]
             else "complete_memo"
             if reportable
             else "complete_no_signal"
@@ -1211,6 +1227,64 @@ def _origin_analysis_priority(evidence) -> tuple[int, int, int, int, int, str]:
     )
 
 
+def _revalidate_legacy_technical_report(evidence) -> bool:
+    """Downgrade only legacy report flags that lack the current provenance.
+
+    Older state snapshots promoted every hit from the report query.  Current
+    sources persist one of three auditable classification reasons.  Re-running
+    the conservative classifier keeps real branded/arXiv reports while making
+    stale query-only rows use the ordinary one-call path.  The return value says
+    whether a downgrade occurred.
+    """
+
+    raw = evidence.raw
+    if raw.get("origin_kind") != "technical_report":
+        return False
+    reason = str(raw.get("origin_classification_reason", ""))
+    trusted_prefixes = (
+        "explicit_document_metadata:",
+        "official_document_with_system_scope",
+        "inferred_system_scope_report",
+    )
+    if reason.startswith(trusted_prefixes):
+        return False
+    metadata = " ".join(
+        str(raw.get(key, ""))
+        for key in (
+            "arxiv_comment",
+            "document_format",
+            "document_source_kind",
+        )
+    )
+    classification = classify_publication(
+        title=evidence.title,
+        url=evidence.url,
+        summary=evidence.summary,
+        metadata=metadata,
+        authors=evidence.authors,
+        official=bool(
+            raw.get("publisher_tier") == "established"
+            or str(evidence.source).startswith("official")
+        ),
+        discovered_by_report_query=bool(raw.get("query_group")),
+    )
+    raw["origin_classification_reason"] = classification.reason
+    raw["document_format"] = classification.document_format
+    raw["system_layer_count"] = classification.system_layer_count
+    if classification.origin_kind == "technical_report":
+        return False
+    raw["origin_kind"] = classification.origin_kind
+    if not raw.get("explicit_seed") and not raw.get("priority_researcher_match"):
+        raw["origin_priority"] = min(_safe_int(raw.get("origin_priority", 1)), 2)
+    run_audit.event(
+        "legacy_technical_report_reclassification",
+        "corrected",
+        f"{evidence.title[:80]}：旧 Technical Report 标记缺少当前分类依据，"
+        f"按 {classification.reason} 改走普通材料分析",
+    )
+    return True
+
+
 def _commit_landscape_checkpoint_if_complete(
     store,
     *,
@@ -1224,8 +1298,40 @@ def _commit_landscape_checkpoint_if_complete(
     return True
 
 
+def _landscape_baseline_incomplete(
+    *,
+    domain_coverage_incomplete: bool,
+    failed_lanes: list[str],
+    degraded_indexes: list[str],
+    recall_lanes: dict,
+) -> bool:
+    """Separate the weekly map baseline from optional high-signal coverage."""
+
+    baseline_lane_failures = [
+        name for name in failed_lanes if name.startswith("landscape:")
+    ]
+    baseline_index_failures = [
+        name
+        for name in degraded_indexes
+        if name == "openalex" or (name == "arxiv" and not recall_lanes)
+    ]
+    return bool(
+        domain_coverage_incomplete
+        or baseline_lane_failures
+        or baseline_index_failures
+    )
+
+
 def _origin_execution_order(pending: list, newly_discovered: list) -> list:
-    """高势能材料先行；普通材料在新发现与旧 backlog 间公平轮转。"""
+    """Prefer high-signal work without starving cheaper ordinary screening.
+
+    Technical reports can expand into many mechanism calls.  A strict
+    ``high + ordinary`` ordering therefore starves thousands of ordinary
+    papers whenever a cold-start report backlog exists.  Each class first
+    alternates new work with FIFO backlog, then execution uses a bounded
+    1-high/3-ordinary weighted round robin.  Priority remains operational and
+    every item stays in the queue.
+    """
     high_pending = sorted(
         (item for item in pending if _is_high_priority_origin(item)),
         key=_origin_analysis_priority,
@@ -1266,7 +1372,19 @@ def _origin_execution_order(pending: list, newly_discovered: list) -> list:
             ordinary.append(ordinary_new[index])
         if index < len(ordinary_pending):
             ordinary.append(ordinary_pending[index])
-    return [*high, *ordinary]
+    ordered = []
+    high_index = 0
+    ordinary_index = 0
+    while high_index < len(high) or ordinary_index < len(ordinary):
+        if high_index < len(high):
+            ordered.append(high[high_index])
+            high_index += 1
+        for _ in range(3):
+            if ordinary_index >= len(ordinary):
+                break
+            ordered.append(ordinary[ordinary_index])
+            ordinary_index += 1
+    return ordered
 
 
 def _is_high_priority_origin(evidence) -> bool:
@@ -1400,23 +1518,13 @@ def _record_deferred_candidate(candidate, reason: str) -> None:
 def _delivery_profile_ready(candidate) -> bool:
     """Operational completeness gate; it never changes the research Rubric."""
 
-    key_people = key_researcher_profiles(
+    key_people = delivery_researcher_profiles(
         candidate.researchers,
         config.PARADIGM_KEY_RESEARCHER_LIMIT,
     )
     if not key_people:
         return bool(verified_organization_attribution(candidate))
-    return all(
-        bool(
-            profile.current_affiliation
-            or profile.background_summary
-            or profile.prior_affiliations
-            or profile.research_trajectory
-            or profile.key_person_reason
-        )
-        and profile.contact_lookup_completed
-        for profile in key_people
-    )
+    return True
 
 
 def _delivery_primary_source_ready(candidate) -> bool:

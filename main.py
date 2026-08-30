@@ -349,7 +349,9 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
             "recovered_delivery"
             if recovered
             else "completed_with_backlog"
-            if stats.get("run_incomplete")
+            if stats.get("research_incomplete", stats.get("run_incomplete"))
+            else "completed_coverage_limited"
+            if stats.get("coverage_incomplete")
             else "completed"
         ),
     )

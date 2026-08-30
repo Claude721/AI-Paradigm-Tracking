@@ -20,8 +20,10 @@ from agents.paradigm_orchestrator import (
     _commit_origin_analysis_checkpoint,
     _commit_landscape_checkpoint_if_complete,
     _execution_deadlines,
+    _landscape_baseline_incomplete,
     _origin_analysis_priority,
     _origin_execution_order,
+    _revalidate_legacy_technical_report,
 )
 from database.paradigm_store import ParadigmStore
 from database.state_migration import migrate_state
@@ -46,6 +48,8 @@ from paradigms.models import (
     ResearcherProfile,
     TechnicalEvidence,
     candidate_from_dict,
+    delivery_researcher_profiles,
+    plausible_researcher_name,
 )
 from paradigms.discovery import ParadigmDiscovery
 from reports.paradigm_generator import (
@@ -97,6 +101,37 @@ class ExecutionReliabilityTests(unittest.TestCase):
         )
         self.assertTrue(advanced)
         store.mark_landscape_version.assert_called_once_with()
+
+    def test_optional_openreview_failure_does_not_lock_bootstrap_baseline(self) -> None:
+        self.assertFalse(
+            _landscape_baseline_incomplete(
+                domain_coverage_incomplete=False,
+                failed_lanes=["technical_documents", "priority_researchers:one"],
+                degraded_indexes=["arxiv", "openreview"],
+                recall_lanes={
+                    "landscape:core_models": {"status": "covered"},
+                    "technical_documents": {"status": "query_failed"},
+                },
+            )
+        )
+        self.assertTrue(
+            _landscape_baseline_incomplete(
+                domain_coverage_incomplete=False,
+                failed_lanes=["landscape:core_models"],
+                degraded_indexes=["arxiv", "openreview"],
+                recall_lanes={
+                    "landscape:core_models": {"status": "query_failed"}
+                },
+            )
+        )
+        self.assertTrue(
+            _landscape_baseline_incomplete(
+                domain_coverage_incomplete=False,
+                failed_lanes=[],
+                degraded_indexes=["openalex"],
+                recall_lanes={"landscape:core_models": {"status": "covered"}},
+            )
+        )
 
     def test_setup_writes_private_env_file_with_current_time_defaults(self) -> None:
         defaults = {
@@ -1373,9 +1408,33 @@ class ExecutionReliabilityTests(unittest.TestCase):
         )
         self.assertFalse(_delivery_profile_ready(item))
         item.researchers[0].contact_search_notes.append(
-            "已检索 OpenAlex Authors 并用当前论文题目核验身份"
+            "当前论文题目与 OpenAlex 作者实体交叉核验通过"
         )
         self.assertTrue(_delivery_profile_ready(item))
+
+    def test_malformed_or_unaligned_researcher_never_enters_delivery(self) -> None:
+        malformed = ResearcherProfile(
+            name="3pt mingyuzhang@rhos.aiyonglu li@rhos.ai",
+            current_affiliation="Example Lab",
+            background_summary="看似有背景的脏作者字段。",
+            contact_search_notes=[
+                "当前论文题目与 OpenAlex 作者实体交叉核验通过"
+            ],
+        )
+        legacy_unaligned = ResearcherProfile(
+            name="Tian-Xi Tan",
+            current_affiliation="Marine Ecology Institute",
+            background_summary="同名实体的无关研究背景。",
+            identifiers={"openalex": "https://openalex.org/A123"},
+            contact_search_notes=[
+                "已检索 OpenAlex Authors 并用当前论文题目核验身份"
+            ],
+        )
+        self.assertFalse(plausible_researcher_name(malformed.name))
+        self.assertEqual(
+            delivery_researcher_profiles([malformed, legacy_unaligned]),
+            [],
+        )
 
     def test_non_key_coauthor_does_not_block_person_delivery_contract(self) -> None:
         item = ParadigmCandidate(
@@ -1389,7 +1448,9 @@ class ExecutionReliabilityTests(unittest.TestCase):
                     name="Lead Researcher",
                     role="第一作者",
                     current_affiliation="Example Lab",
-                    contact_search_notes=["已检索 OpenAlex Authors 并核验身份"],
+                    contact_search_notes=[
+                        "当前论文题目与 OpenAlex 作者实体交叉核验通过"
+                    ],
                 ),
                 ResearcherProfile(
                     name="Contributing Researcher",
@@ -1399,7 +1460,9 @@ class ExecutionReliabilityTests(unittest.TestCase):
                     name="Senior Researcher",
                     role="末位作者/资深作者线索",
                     current_affiliation="Example University",
-                    contact_search_notes=["已检索 OpenAlex Authors 并核验身份"],
+                    contact_search_notes=[
+                        "当前论文题目与 OpenAlex 作者实体交叉核验通过"
+                    ],
                 ),
             ],
         )
@@ -1482,6 +1545,42 @@ class ExecutionReliabilityTests(unittest.TestCase):
             ordered,
             [new_one, pending_one, new_two, pending_two],
         )
+
+    def test_high_priority_backlog_cannot_starve_ordinary_origins(self) -> None:
+        reports = [_origin(f"report-{index}", priority=3) for index in range(5)]
+        for item in reports:
+            item.raw["origin_kind"] = "technical_report"
+        ordinary = [_origin(f"paper-{index}") for index in range(6)]
+        ordered = _origin_execution_order(reports, ordinary)
+        self.assertEqual(ordered[:4], [reports[0], *ordinary[:3]])
+        self.assertCountEqual(ordered, [*reports, *ordinary])
+
+    def test_legacy_query_only_report_is_reclassified_before_expensive_analysis(self) -> None:
+        stale = _origin("Publications from Example Lab", priority=3)
+        stale.url = "https://example.org/publications"
+        stale.summary = "A list of recent papers and announcements."
+        stale.raw.update(
+            {
+                "origin_kind": "technical_report",
+                "query_group": "technical_reports",
+                "origin_classification_reason": "report_query_forced",
+            }
+        )
+        self.assertTrue(_revalidate_legacy_technical_report(stale))
+        self.assertNotEqual(stale.raw["origin_kind"], "technical_report")
+        self.assertLessEqual(stale.raw["origin_priority"], 2)
+
+        genuine = _origin("Frontier Model Technical Report", priority=3)
+        genuine.raw.update(
+            {
+                "origin_kind": "technical_report",
+                "origin_classification_reason": (
+                    "explicit_document_metadata:technical report"
+                ),
+            }
+        )
+        self.assertFalse(_revalidate_legacy_technical_report(genuine))
+        self.assertEqual(genuine.raw["origin_kind"], "technical_report")
 
     def test_repeated_structural_failure_does_not_starve_peer_reports(self) -> None:
         failing = _origin("failing-report", priority=3)
