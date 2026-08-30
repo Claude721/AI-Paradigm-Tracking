@@ -871,6 +871,21 @@ def _route_draft_violations(
         for source in _primary_sources(candidate)
     ):
         violations.append("路线正文没有原样附上一手材料 Markdown 链接")
+    if (
+        candidate.freshness_assessment.get("classification")
+        == "historical_reactivated"
+    ):
+        uptake_urls = {
+            _normalized_url(value)
+            for value in candidate.freshness_assessment.get(
+                "current_uptake_urls", []
+            )
+            if value
+        }
+        if not uptake_urls or not uptake_urls.intersection(linked_urls):
+            violations.append(
+                "历史路线更新没有原样附上本期实质承接证据 Markdown 链接"
+            )
     people = [
         profile.name
         for profile in delivery_researcher_profiles(
@@ -907,6 +922,8 @@ def _evidence_dossier(item: TechnicalEvidence) -> dict:
         "metrics": item.metrics,
         "historical": bool(item.raw.get("historical")),
         "relationship": item.raw.get("relationship", ""),
+        "independence": item.raw.get("independence", ""),
+        "substantive_uptake": bool(item.raw.get("substantive_uptake")),
         "metric_delta": item.raw.get("metric_delta", {}),
     }
 

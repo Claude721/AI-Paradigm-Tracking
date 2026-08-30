@@ -62,6 +62,8 @@ SECTIONS: list[tuple[str, list[tuple[str, str, str, str, bool]]]] = [
             ("PARADIGM_REPORT_ROUTE_CONCURRENCY", "路线写作并发", "推荐 2，不改变路线数量", "2", False),
             ("PARADIGM_REPORT_MAX_RENDER_ATTEMPTS", "报告渲染重试上限", "网络/超时等可重试失败的跨进程上限", "3", False),
             ("PARADIGM_ANALYSIS_BATCH_SIZE", "机制抽取批次", "检查点粒度，不是 Top-K", "6", False),
+            ("PARADIGM_ORIGIN_PREFILTER_ENABLED", "普通论文资格预筛", "保守批量判断；不确定项仍跑完整 Rubric", "true", False),
+            ("PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE", "报告机制分片", "单次出队机制数；总数不封顶", "2", False),
             ("PARADIGM_DEEP_BATCH_SIZE", "深挖批次", "检查点粒度，推荐 1", "1", False),
         ],
     ),

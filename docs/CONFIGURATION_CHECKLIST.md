@@ -251,12 +251,16 @@ PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS=360
 PARADIGM_REPORT_ROUTE_CONCURRENCY=2
 PARADIGM_REPORT_MAX_RENDER_ATTEMPTS=3
 PARADIGM_ANALYSIS_BATCH_SIZE=6
+PARADIGM_ORIGIN_PREFILTER_ENABLED=true
+PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE=2
 PARADIGM_DEEP_BATCH_SIZE=1
 ```
 
 技术去留由仓库中的 `rubrics/paradigm_rubric.json` 决定；行业覆盖由 `taxonomy/frontier_landscape.json` 决定。前者维护判断问题，后者维护基础模型、推理与软件 Agent、多模态/语音/3D、具身/自动驾驶、World Model、AI4S、系统/端侧/硬件、安全等发现范围。通常两个路径都留空，直接维护仓库内版本并提交。覆盖地图的 `version` 改变后，高信号车道会回看 60 天，新增领域的普通术语车道仍从本次任务窗口建立基线，不在 reset 后引入数万条历史宽匹配。60 天只用于恢复召回，报告中的“本期新发布”仍按 `SOURCING_LOOKBACK_DAYS` 判断。
 
 五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版主观分数/固定数量变量（例如 `PARADIGM_MIN_NOVELTY`、`PARADIGM_MAX_ANALYSIS_ITEMS`）已停用。当前仍使用的 `PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS` 与 `PARADIGM_MIN_SECONDARY_ENGAGEMENT` 只把可核验讨论条数或互动量转成客观 Rubric 选项，不是模型主观评分门槛。
+
+普通论文和正式报告使用两种不同的成本控制，但都不按数量淘汰材料。`PARADIGM_ORIGIN_PREFILTER_ENABLED=true` 时，普通论文以批量、逐 fingerprint、基数守恒的方式先判断是否具有进入完整 Rubric 的最低资格；只有明确非机制原点会终止，不确定、漏回或结构失败项仍保留。`PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE=2` 只限制单份报告一次出队评估多少机制，机制索引和完成结果跨轮恢复，总机制数不封顶；父报告进度在候选快照之后提交，异常最多重算而不漏项。
 
 `PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；机制执行队列在高信号与普通材料之间按 1:3 加权轮转，两类内部再交错本周新增与 FIFO backlog。旧状态中缺少可靠分类来源、仅由宽查询或标题误标的 Technical Report 会先按当前文档元数据和系统结构规则重新核验。到达软预算后，剩余项保留为 backlog。`PARADIGM_DISCOVERY_SAFETY_LIMIT` 只允许 arXiv 等尚未执行的传输车道提前收尾，不会再截掉已经从其他来源取得的材料；`PARADIGM_REFRESH_SAFETY_LIMIT` 非零时，历史路线按最久未尝试顺序跨周轮转，而不是每次刷新同一批。`PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=600` 约束单个并行发现源，某个分页器卡死或返回错误结构时只取消该来源，并在审计/报告中写成覆盖未闭合，绝不能伪装成零命中。研究进度与外部覆盖独立记账：存在待分析、待深挖或执行失败时是 `[阶段性研究]`；研究已闭合、仅可选信源或动态页面失败时是 `[覆盖受限]`。研究完成后候选快照先进入持久化 outbox；多路线报告按路线生成、每条通过即写入 checkpoint，最终总编只处理有界摘要并由程序装配正文。`PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS` 是单次路线/框架请求上限，`PARADIGM_REPORT_TIMEOUT_SECONDS` 是整次渲染上限；前者超时可业务重试，后者中断后由下一轮续跑。`PARADIGM_REPORT_MAX_RENDER_ATTEMPTS=3` 是跨进程持久化的渲染尝试上限：缺少人物/一手来源等输入契约，或内置修订后仍不满足确定性交付质量契约时立即隔离；网络、超时等其他渲染错误达到上限后隔离。候选会原子退回 `pending_deep`，隔离任务只保留审计记录，不再阻塞后续报告。这个变量不限制 SMTP 重试，也不能用来绕过报告质量闸门。
 

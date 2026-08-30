@@ -93,6 +93,8 @@ python main.py --smoke-test # 小成本真实检查接口；SMTP 只登录、不
 
 完整运行还会生成 `logs/run_audit_latest.md`、`logs/run_audit_latest.json` 和 `logs/current_run.log`。其中包含信源返回量、漏斗、每条材料/路线的结构化去留理由，以及各阶段模型 token 用量；不会保存 prompt、模型回答正文或模型私有推理。信源部分失败、全部失败、超时和真实零命中会分别记账；机制抽取后先保存可续跑候选，再把原文标为已分析，避免中途异常造成永久漏项。启用邮件后，Markdown 审计和本轮日志会随报告一起发送。研究进度与外部覆盖是两条独立状态轴：待分析/待深挖/执行失败时标题为 `[阶段性研究]`，正文披露已完成范围；研究已闭合但可选信源或动态页面覆盖不全时标题为 `[覆盖受限]`。只有两条轴都闭合，0 条交付才可解释为本期没有合格新信号。
 
+V0 的吞吐原则是“召回不等于值得直接消耗完整 Rubric”。普通论文先在同一分析批次中做保守资格预筛：只有明确的综述、纯 benchmark、窄应用或无机制产品材料会终止；不确定项、漏回项和高信号原点仍进入完整机制判断或保留 pending。Technical Report 的机制总数不设上限，但机制索引和已完成判断会写入父报告检查点，每次出队只评估有界分片，避免一份长报告垄断整轮预算。审计会分别显示资格预筛排除数、完整 Rubric 数与报告分片续跑数。
+
 定时参数：
 
 ```env
@@ -109,6 +111,10 @@ PARADIGM_REPORT_TIMEOUT_SECONDS=1200
 PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS=360
 PARADIGM_REPORT_ROUTE_CONCURRENCY=2
 PARADIGM_REPORT_MAX_RENDER_ATTEMPTS=3
+PARADIGM_ANALYSIS_BATCH_SIZE=6
+PARADIGM_ORIGIN_PREFILTER_ENABLED=true
+PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE=2
+PARADIGM_DEEP_BATCH_SIZE=1
 SCHEDULE_DAY_OF_WEEK=fri
 SCHEDULE_HOUR=9
 SCHEDULE_MINUTE=15

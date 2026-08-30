@@ -772,6 +772,192 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         self.assertEqual(len(extracted), 7)
 
+    def test_technical_report_mechanisms_resume_from_bounded_checkpoint(self) -> None:
+        evidence = paper("checkpoint")
+        evidence.raw = {"origin_kind": "technical_report"}
+        mechanisms = [
+            {
+                "canonical_name": f"Mechanism {index}",
+                "route_family": "Frontier systems",
+                "thesis": "t",
+                "problem_shift": "p",
+                "mechanism": "m",
+                "keywords": [f"mechanism-{index}"],
+                "innovation_types": ["architecture"],
+                "source_evidence": [f"Section {index}"],
+            }
+            for index in range(1, 4)
+        ]
+        index_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps({"mechanisms": mechanisms})
+                    )
+                )
+            ]
+        )
+        assessment_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "assessment": {
+                                    "innovation_types": ["architecture"],
+                                    "rubric_answers": rubric_answers(
+                                        ["architecture"]
+                                    ),
+                                }
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(
+                        side_effect=[
+                            index_response,
+                            assessment_response,
+                            assessment_response,
+                            assessment_response,
+                        ]
+                    )
+                )
+            )
+        )
+        analyzer = ParadigmAnalyzer(
+            client=client,
+            model="test",
+            technical_report_mechanism_slice=2,
+        )
+
+        first = asyncio.run(analyzer.extract(evidence))
+        self.assertEqual(
+            len([item for item in first if item.canonical_name]), 2
+        )
+        self.assertTrue(evidence.raw["technical_report_slice_pending"])
+        self.assertEqual(client.chat.completions.create.await_count, 3)
+
+        second = asyncio.run(analyzer.extract(evidence))
+        self.assertEqual(
+            {item.canonical_name for item in second},
+            {"Mechanism 3"},
+        )
+        self.assertNotIn("technical_report_slice_pending", evidence.raw)
+        self.assertEqual(client.chat.completions.create.await_count, 4)
+
+    def test_pending_technical_report_restores_mechanism_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ParadigmStore(Path(directory) / "radar.db")
+            evidence = paper("restore")
+            evidence.raw = {
+                "origin_kind": "technical_report",
+                "technical_report_checkpoint_version": (
+                    "technical-report-checkpoint-v1"
+                ),
+                "technical_report_mechanism_seeds": [
+                    {"canonical_name": "Mechanism A"}
+                ],
+                "technical_report_completed_mechanisms": {"key": {"x": 1}},
+                "technical_report_mechanism_failure_counts": {"key": 2},
+            }
+            store.mark_evidence([evidence], analyzed=False)
+
+            rediscovered = paper("restore")
+            selected, _ = store.plan_origins([rediscovered])
+
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(
+                rediscovered.raw["technical_report_mechanism_failure_counts"],
+                {"key": 2},
+            )
+
+    def test_batch_origin_eligibility_screens_only_explicit_rejection(self) -> None:
+        survey = paper("survey")
+        mechanism = paper("mechanism")
+        triage_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "decisions": [
+                                    {
+                                        "fingerprint": survey.fingerprint,
+                                        "decision": "screen_out",
+                                        "reason": "摘要明确说明这是无新机制的综述。",
+                                    },
+                                    {
+                                        "fingerprint": mechanism.fingerprint,
+                                        "decision": "full_review",
+                                        "reason": "可能改变训练信号，需要完整核验。",
+                                    },
+                                ]
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+        extraction_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "hypotheses": [
+                                    {
+                                        "canonical_name": "Mechanism route",
+                                        "thesis": "t",
+                                        "problem_shift": "p",
+                                        "mechanism": "m",
+                                        "innovation_types": ["architecture"],
+                                        "rubric_answers": rubric_answers(
+                                            ["architecture"]
+                                        ),
+                                    }
+                                ]
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(
+                        side_effect=[triage_response, extraction_response]
+                    )
+                )
+            )
+        )
+
+        extracted = asyncio.run(
+            ParadigmAnalyzer(
+                client=client,
+                model="test",
+                enable_batch_prefilter=True,
+            ).run([survey, mechanism])
+        )
+
+        by_fingerprint = {
+            item.evidence.fingerprint: item for item in extracted
+        }
+        self.assertEqual(
+            by_fingerprint[survey.fingerprint].rubric_assessment["version"],
+            "origin-eligibility-v1",
+        )
+        self.assertEqual(
+            by_fingerprint[mechanism.fingerprint].canonical_name,
+            "Mechanism route",
+        )
+        self.assertEqual(client.chat.completions.create.await_count, 2)
+
     def test_technical_report_mechanism_failure_is_isolated(self) -> None:
         evidence = paper()
         evidence.raw = {"origin_kind": "technical_report"}
@@ -896,6 +1082,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         payload = {
             "innovation_types": ["architecture"],
             "rubric_answers": rubric_answers(["architecture"]),
+            "substantive_uptake_evidence_indices": [1],
             "mental_model": {
                 "observation_axis": "沿世界模型的状态转移预测流程观察。",
                 "low_resolution_model": (
@@ -954,6 +1141,19 @@ class ParadigmPipelineTests(unittest.TestCase):
         item = candidate()
         item.mental_model = {}
         item.evidence[0].summary = "机制细节" * 1000
+        item.evidence.append(
+            TechnicalEvidence(
+                source="curated-kol-blog",
+                evidence_type=EvidenceType.SECONDARY_INTERPRETATION,
+                title="Direct mechanism analysis",
+                url="https://example.net/direct-analysis",
+                summary="逐项分析训练信号、机制边界和反事实。" * 30,
+                raw={
+                    "relationship": "independent_mechanism_analysis",
+                    "independence": "independent",
+                },
+            )
+        )
         asyncio.run(
             ParadigmSynthesizer(client=client, model="test").run([item])
         )
@@ -973,6 +1173,11 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertIn("interpretive_compression", prompt)
         self.assertEqual(
             _candidate_dossier(item)["mental_model"], item.mental_model
+        )
+        self.assertTrue(item.evidence[1].raw["substantive_uptake"])
+        self.assertEqual(
+            item.evidence[1].raw["substantive_uptake_source"],
+            "synthesis-v1",
         )
 
     def test_synthesis_evidence_budget_is_explicit_not_a_fixed_top_k(self) -> None:
@@ -1713,6 +1918,52 @@ class ParadigmPipelineTests(unittest.TestCase):
             violations,
         )
 
+    def test_historical_update_route_must_link_current_uptake_evidence(self) -> None:
+        item = candidate()
+        uptake_url = "https://example.net/current-independent-analysis"
+        item.evidence.append(
+            TechnicalEvidence(
+                source="independent-analysis",
+                evidence_type=EvidenceType.SECONDARY_INTERPRETATION,
+                title="Current independent analysis",
+                url=uptake_url,
+                raw={
+                    "relationship": "independent_mechanism_analysis",
+                    "independence": "independent",
+                    "substantive_uptake": True,
+                },
+            )
+        )
+        item.freshness_assessment = {
+            "classification": "historical_reactivated",
+            "decision": "include",
+            "current_uptake_urls": [uptake_url],
+        }
+        body = "这条路线解释训练信号、推理接口与能力边界之间的因果关系。" * 28
+        without_uptake = (
+            "### 一条重新进入观察的技术路线\n\n"
+            f"{body}\n\n"
+            "[原始论文](https://arxiv.org/abs/2607.00001)\n\n"
+            "**讨论势能判断：** 本期存在独立分析，但仍未形成复现。"
+        )
+        self.assertTrue(
+            any(
+                "本期实质承接证据" in value
+                for value in _route_draft_violations(without_uptake, item)
+            )
+        )
+
+        with_uptake = without_uptake.replace(
+            "**讨论势能判断：**",
+            f"[本期独立分析]({uptake_url})。\n\n**讨论势能判断：**",
+        )
+        self.assertFalse(
+            any(
+                "本期实质承接证据" in value
+                for value in _route_draft_violations(with_uptake, item)
+            )
+        )
+
     def test_url_grounding_preserves_case_sensitive_path(self) -> None:
         item = candidate()
         item.evidence[0].url = "https://research.example/Reports/ModelV1"
@@ -2270,6 +2521,108 @@ class ParadigmPipelineTests(unittest.TestCase):
             publisher_only["classification"],
             "historical_without_current_uptake",
         )
+
+    def test_generic_recent_discussion_cannot_reactivate_old_route(self) -> None:
+        reference = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        item = candidate(
+            [
+                TechnicalEvidence(
+                    source="official",
+                    evidence_type=EvidenceType.TECHNICAL_BLOG,
+                    title="Old mechanism",
+                    url="https://example.org/old-mechanism",
+                    published_at="2025-05-14T00:00:00+00:00",
+                ),
+                TechnicalEvidence(
+                    source="curated-kol-blog",
+                    evidence_type=EvidenceType.SECONDARY_INTERPRETATION,
+                    title="A broad discussion of adjacent agents",
+                    url="https://example.net/adjacent-discussion",
+                    summary="A long but generic discussion of agent systems." * 20,
+                    published_at="2026-08-12T00:00:00+00:00",
+                    raw={
+                        "relationship": "independent_commentary",
+                        "independence": "independent",
+                    },
+                ),
+            ]
+        )
+
+        assessment = assess_candidate_freshness(
+            item, reference_time=reference, window_days=30
+        )
+
+        self.assertEqual(assessment["decision"], "defer")
+        self.assertEqual(assessment["current_uptake_urls"], [])
+
+    def test_audited_substantive_discussion_reactivates_and_exposes_source(self) -> None:
+        reference = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        uptake_url = "https://example.net/mechanism-analysis"
+        item = candidate(
+            [
+                TechnicalEvidence(
+                    source="official",
+                    evidence_type=EvidenceType.TECHNICAL_BLOG,
+                    title="Old mechanism",
+                    url="https://example.org/old-mechanism",
+                    published_at="2025-05-14T00:00:00+00:00",
+                ),
+                TechnicalEvidence(
+                    source="curated-kol-blog",
+                    evidence_type=EvidenceType.SECONDARY_INTERPRETATION,
+                    title="Direct mechanism analysis",
+                    url=uptake_url,
+                    summary="The analysis directly tests the mechanism boundary.",
+                    published_at="2026-08-12T00:00:00+00:00",
+                    raw={
+                        "relationship": "independent_mechanism_analysis",
+                        "independence": "independent",
+                        "substantive_uptake": True,
+                    },
+                ),
+            ]
+        )
+
+        assessment = assess_candidate_freshness(
+            item, reference_time=reference, window_days=30
+        )
+
+        self.assertEqual(assessment["decision"], "include")
+        self.assertEqual(assessment["current_uptake_urls"], [uptake_url])
+        self.assertEqual(
+            assessment["current_uptake_evidence"][0]["qualification_reason"],
+            "独立且直接关联本机制的实质讨论",
+        )
+
+    def test_small_counter_change_does_not_reactivate_old_route(self) -> None:
+        reference = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        primary = TechnicalEvidence(
+            source="arxiv",
+            evidence_type=EvidenceType.PRIMARY_PAPER,
+            title="Old paper",
+            url="https://arxiv.org/abs/2501.00001",
+            published_at="2025-01-02T00:00:00+00:00",
+        )
+        citation = TechnicalEvidence(
+            source="semantic-scholar",
+            evidence_type=EvidenceType.CITATION,
+            title="Old paper",
+            url="https://www.semanticscholar.org/paper/example",
+            published_at="2025-01-02T00:00:00+00:00",
+            raw={"metric_delta": {"citations": 1}},
+        )
+        item = candidate([primary, citation])
+
+        small = assess_candidate_freshness(
+            item, reference_time=reference, window_days=30
+        )
+        self.assertEqual(small["decision"], "defer")
+
+        citation.raw["metric_delta"] = {"citations": 3}
+        material = assess_candidate_freshness(
+            item, reference_time=reference, window_days=30
+        )
+        self.assertEqual(material["decision"], "include")
 
     def test_official_repository_requires_external_primary_material(self) -> None:
         now = datetime.now(timezone.utc).isoformat()

@@ -54,7 +54,12 @@ class ParadigmOrchestrator:
             broad_lookback_days=self.ordinary_discovery_lookback_days,
             high_signal_lookback_days=self.high_signal_discovery_lookback_days,
         )
-        self.analyzer = ParadigmAnalyzer()
+        self.analyzer = ParadigmAnalyzer(
+            enable_batch_prefilter=config.PARADIGM_ORIGIN_PREFILTER_ENABLED,
+            technical_report_mechanism_slice=(
+                config.PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE
+            ),
+        )
         self.enricher = EvidenceEnricher()
         self.synthesizer = ParadigmSynthesizer()
         self.trajectory = ResearcherTrajectoryAnalyzer()
@@ -299,9 +304,11 @@ class ParadigmOrchestrator:
                 extractions,
                 analyzed_origin_count,
                 failed_origin_count,
+                mechanism_slice_deferred_count,
                 budget_deferred_origins,
                 hydration_stats,
                 completed_origins,
+                resumable_checkpoint_origins,
             ) = await self._analyze_origins_in_batches(origins, origin_deadline)
             stats.update(hydration_stats)
             if hydration_stats["priority_origin_hydration_failed"]:
@@ -358,6 +365,17 @@ class ParadigmOrchestrator:
             stats["candidate_extractions"] = sum(
                 item.is_candidate for item in extractions
             )
+            stats["origin_prefilter_rejected_count"] = sum(
+                item.rubric_assessment.get("version")
+                == "origin-eligibility-v1"
+                for item in extractions
+            )
+            stats["origin_full_review_count"] = (
+                analyzed_origin_count
+                - failed_origin_count
+                - mechanism_slice_deferred_count
+                - stats["origin_prefilter_rejected_count"]
+            )
             new_candidates = cluster_extractions(extractions)
             new_candidates = self.store.attach_history(new_candidates)
             _commit_origin_analysis_checkpoint(
@@ -365,25 +383,49 @@ class ParadigmOrchestrator:
                 new_candidates,
                 completed_origins,
             )
+            # Technical Report 的机制结果先作为 candidate checkpoint 保存，
+            # 再推进父报告的机制进度。若候选保存失败，父报告仍停在旧进度，
+            # 下轮最多重算，绝不会形成“机制已完成但候选不存在”的漏项。
+            if resumable_checkpoint_origins:
+                self.store.mark_evidence(
+                    resumable_checkpoint_origins,
+                    analyzed=False,
+                )
+                run_audit.event(
+                    "technical_report_mechanism_checkpoint",
+                    "saved",
+                    f"{len(resumable_checkpoint_origins)} 份 Technical Report "
+                    "已在候选快照之后保存机制续跑进度",
+                )
         else:
             new_candidates = []
             analyzed_origin_count = 0
             failed_origin_count = 0
+            mechanism_slice_deferred_count = 0
             budget_deferred_origins = []
             completed_origins = []
+            resumable_checkpoint_origins = []
             stats["candidate_extractions"] = 0
+            stats["origin_prefilter_rejected_count"] = 0
+            stats["origin_full_review_count"] = 0
             stats.update(_empty_hydration_stats())
 
         stats["analysis_count"] = analyzed_origin_count
         stats["analysis_failed_count"] = failed_origin_count
+        stats["analysis_mechanism_slice_deferred_count"] = (
+            mechanism_slice_deferred_count
+        )
         stats["analysis_completed_count"] = (
-            analyzed_origin_count - failed_origin_count
+            analyzed_origin_count
+            - failed_origin_count
+            - mechanism_slice_deferred_count
         )
         stats["analysis_budget_deferred_count"] = len(budget_deferred_origins)
         stats["analysis_deferred_count"] = (
             len(safety_deferred_origins)
             + len(budget_deferred_origins)
             + failed_origin_count
+            + mechanism_slice_deferred_count
         )
         stats["pending_origin_backlog_remaining"] = stats[
             "analysis_deferred_count"
@@ -807,18 +849,20 @@ class ParadigmOrchestrator:
         self,
         origins: list,
         deadline: float,
-    ) -> tuple[list, int, int, list, dict[str, int], list]:
+    ) -> tuple[list, int, int, int, list, dict[str, int], list, list]:
         """逐批抽取；只有候选快照落盘后，原点才能提交为已分析。"""
         extractions = []
         analyzed_count = 0
         failed_count = 0
+        mechanism_slice_deferred_count = 0
         hydration_totals = _empty_hydration_stats()
         completed_origins = []
+        resumable_checkpoint_origins = []
         budget_deferred = []
         batch_size = config.PARADIGM_ANALYSIS_BATCH_SIZE
 
         def record_failed(items: list, reason: str) -> None:
-            nonlocal analyzed_count, failed_count
+            nonlocal analyzed_count, failed_count, mechanism_slice_deferred_count
             now = datetime.now(timezone.utc).isoformat()
             for item in items:
                 item.raw["analysis_failure_count"] = (
@@ -837,7 +881,7 @@ class ParadigmOrchestrator:
         async def analyze_group(group: list) -> None:
             """Split only unexpected batch failures; accept valid peer outputs."""
 
-            nonlocal analyzed_count, failed_count
+            nonlocal analyzed_count, failed_count, mechanism_slice_deferred_count
             remaining = _remaining_seconds(deadline)
             if remaining <= 0:
                 budget_deferred.extend(group)
@@ -883,6 +927,16 @@ class ParadigmOrchestrator:
                 if not item.canonical_name
                 and not item.rubric_assessment
                 and bool(item.rejection_reason)
+                and (
+                    not item.evidence.raw.get("technical_report_slice_pending")
+                    or item.evidence.raw.get("technical_report_last_run_failure")
+                )
+            }
+            slice_deferred_fingerprints = {
+                item.evidence.fingerprint
+                for item in returned
+                if item.evidence.raw.get("technical_report_slice_pending")
+                and not item.evidence.raw.get("technical_report_last_run_failure")
             }
             missing_fingerprints = allowed - returned_fingerprints
             if missing_fingerprints:
@@ -892,12 +946,34 @@ class ParadigmOrchestrator:
                     f"模型/分析器漏回 {len(missing_fingerprints)} 条输入；"
                     "只保留漏项待重试，已返回的同批结果继续提交",
                 )
-            terminal_failures = failed_fingerprints | missing_fingerprints
+            terminal_failures = (
+                failed_fingerprints
+                | missing_fingerprints
+                | slice_deferred_fingerprints
+            )
             successful = [
                 item for item in group if item.fingerprint not in terminal_failures
             ]
             failed = [
-                item for item in group if item.fingerprint in terminal_failures
+                item
+                for item in group
+                if item.fingerprint
+                in (failed_fingerprints | missing_fingerprints)
+            ]
+            slice_deferred = [
+                item
+                for item in group
+                if item.fingerprint in slice_deferred_fingerprints
+            ]
+            resumable_fingerprints = {
+                item.fingerprint
+                for item in group
+                if item.raw.get("technical_report_slice_pending")
+            }
+            ordinary_failed = [
+                item
+                for item in failed
+                if item.fingerprint not in resumable_fingerprints
             ]
             if failed:
                 now = datetime.now(timezone.utc).isoformat()
@@ -906,11 +982,30 @@ class ParadigmOrchestrator:
                         _safe_int(item.raw.get("analysis_failure_count", 0)) + 1
                     )
                     item.raw["last_analysis_failure_at"] = now
-                self.store.mark_evidence(failed, analyzed=False)
+                if ordinary_failed:
+                    self.store.mark_evidence(ordinary_failed, analyzed=False)
+            if slice_deferred:
+                run_audit.event(
+                    "technical_report_mechanism_slice",
+                    "deferred",
+                    f"{len(slice_deferred)} 份 Technical Report 已形成机制检查点；"
+                    "候选快照提交后再保存，未完成部分下轮继续，"
+                    "不计作模型结构失败",
+                )
+            for item in group:
+                if (
+                    item.fingerprint in resumable_fingerprints
+                    and all(
+                        existing.fingerprint != item.fingerprint
+                        for existing in resumable_checkpoint_origins
+                    )
+                ):
+                    resumable_checkpoint_origins.append(item)
             completed_origins.extend(successful)
             extractions.extend(returned)
             analyzed_count += len(group)
             failed_count += len(failed)
+            mechanism_slice_deferred_count += len(slice_deferred)
 
         for offset in range(0, len(origins), batch_size):
             remaining = _remaining_seconds(deadline)
@@ -919,9 +1014,11 @@ class ParadigmOrchestrator:
                     extractions,
                     analyzed_count,
                     failed_count,
+                    mechanism_slice_deferred_count,
                     origins[offset:],
                     hydration_totals,
                     completed_origins,
+                    resumable_checkpoint_origins,
                 )
             origin_batch = origins[offset : offset + batch_size]
             try:
@@ -936,9 +1033,11 @@ class ParadigmOrchestrator:
                     extractions,
                     analyzed_count,
                     failed_count,
+                    mechanism_slice_deferred_count,
                     origins[offset:],
                     hydration_totals,
                     completed_origins,
+                    resumable_checkpoint_origins,
                 )
             except Exception as exc:
                 targets = sum(_is_high_priority_origin(item) for item in origin_batch)
@@ -964,17 +1063,21 @@ class ParadigmOrchestrator:
                     extractions,
                     analyzed_count,
                     failed_count,
+                    mechanism_slice_deferred_count,
                     budget_deferred,
                     hydration_totals,
                     completed_origins,
+                    resumable_checkpoint_origins,
                 )
         return (
             extractions,
             analyzed_count,
             failed_count,
+            mechanism_slice_deferred_count,
             [],
             hydration_totals,
             completed_origins,
+            resumable_checkpoint_origins,
         )
 
     async def _deep_analyze_in_batches(

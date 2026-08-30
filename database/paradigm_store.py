@@ -1221,7 +1221,18 @@ def _restore_execution_metadata(item: TechnicalEvidence, payload_json: str) -> N
         previous_raw = previous.get("raw") or {}
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
         return
-    for key in ("analysis_failure_count", "last_analysis_failure_at"):
+    for key in (
+        "analysis_failure_count",
+        "last_analysis_failure_at",
+        "origin_eligibility_decision",
+        "origin_eligibility_reason",
+        "technical_report_checkpoint_version",
+        "technical_report_mechanism_seeds",
+        "technical_report_completed_mechanisms",
+        "technical_report_mechanism_failure_counts",
+        "technical_report_slice_pending",
+        "technical_report_partial_failure",
+    ):
         if key in previous_raw:
             item.raw[key] = previous_raw[key]
 

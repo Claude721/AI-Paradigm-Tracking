@@ -358,12 +358,23 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 )
             )
 
-        extractions, attempted, failed, deferred, _, completed = result
+        (
+            extractions,
+            attempted,
+            failed,
+            mechanism_slice_deferred,
+            deferred,
+            _,
+            completed,
+            resumable,
+        ) = result
         self.assertEqual(len(extractions), 1)
         self.assertEqual(attempted, 1)
         self.assertEqual(failed, 0)
+        self.assertEqual(mechanism_slice_deferred, 0)
         self.assertEqual(deferred, [second])
         self.assertEqual(completed, [first])
+        self.assertEqual(resumable, [])
         orchestrator.store.mark_evidence.assert_not_called()
 
     def test_unexpected_origin_batch_failure_isolated_and_kept_pending(
@@ -403,12 +414,23 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 )
             )
 
-        extractions, attempted, failed, deferred, _, completed = result
+        (
+            extractions,
+            attempted,
+            failed,
+            mechanism_slice_deferred,
+            deferred,
+            _,
+            completed,
+            resumable,
+        ) = result
         self.assertEqual([item.evidence for item in extractions], [second])
         self.assertEqual(attempted, 2)
         self.assertEqual(failed, 1)
+        self.assertEqual(mechanism_slice_deferred, 0)
         self.assertEqual(deferred, [])
         self.assertEqual(completed, [second])
+        self.assertEqual(resumable, [])
         self.assertEqual(first.raw["analysis_failure_count"], 1)
         orchestrator.store.mark_evidence.assert_called_once_with(
             [first], analyzed=False
@@ -444,15 +466,79 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 )
             )
 
-        extractions, attempted, failed, deferred, _, completed = result
+        (
+            extractions,
+            attempted,
+            failed,
+            mechanism_slice_deferred,
+            deferred,
+            _,
+            completed,
+            resumable,
+        ) = result
         self.assertEqual([item.evidence for item in extractions], [first])
         self.assertEqual((attempted, failed), (2, 1))
+        self.assertEqual(mechanism_slice_deferred, 0)
         self.assertEqual(deferred, [])
         self.assertEqual(completed, [first])
+        self.assertEqual(resumable, [])
         self.assertEqual(second.raw["analysis_failure_count"], 1)
         orchestrator.store.mark_evidence.assert_called_once_with(
             [second], analyzed=False
         )
+
+    def test_report_slice_checkpoint_waits_for_outer_candidate_commit(self) -> None:
+        report = _origin("2608.00023")
+        report.raw.update(
+            {
+                "origin_kind": "technical_report",
+                "technical_report_slice_pending": True,
+            }
+        )
+        orchestrator = object.__new__(ParadigmOrchestrator)
+        orchestrator.enricher = SimpleNamespace(
+            hydrate_priority_origins=AsyncMock(
+                return_value={
+                    "priority_origin_targets": 1,
+                    "priority_origin_hydrated": 1,
+                    "priority_origin_hydration_failed": 0,
+                }
+            )
+        )
+        orchestrator.analyzer = SimpleNamespace(
+            run=AsyncMock(return_value=[_rejected_extraction(report)])
+        )
+        orchestrator.store = SimpleNamespace(mark_evidence=Mock())
+
+        with (
+            patch.object(config, "PARADIGM_ANALYSIS_BATCH_SIZE", 1),
+            patch(
+                "agents.paradigm_orchestrator._remaining_seconds",
+                side_effect=[5.0, 5.0],
+            ),
+        ):
+            result = asyncio.run(
+                orchestrator._analyze_origins_in_batches(
+                    [report], deadline=123.0
+                )
+            )
+
+        (
+            _,
+            attempted,
+            failed,
+            mechanism_slice_deferred,
+            deferred,
+            _,
+            completed,
+            resumable,
+        ) = result
+        self.assertEqual((attempted, failed, mechanism_slice_deferred), (1, 0, 1))
+        self.assertEqual(deferred, [])
+        self.assertEqual(completed, [])
+        self.assertEqual(resumable, [report])
+        # ``run`` saves candidate snapshots first, then persists this list.
+        orchestrator.store.mark_evidence.assert_not_called()
 
     def test_unexpected_deep_failure_does_not_abort_peer_candidate(self) -> None:
         first = ParadigmCandidate(

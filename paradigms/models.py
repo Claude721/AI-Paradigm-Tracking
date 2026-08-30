@@ -196,6 +196,107 @@ def _evidence_datetime(value: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _material_uptake_delta(evidence: "TechnicalEvidence") -> bool:
+    """Require a visible magnitude change, not any floating counter tick."""
+
+    delta = evidence.raw.get("metric_delta")
+    if not isinstance(delta, dict):
+        return False
+
+    def amount(name: str) -> float:
+        return nonnegative_number(delta.get(name, 0))
+
+    if evidence.evidence_type == EvidenceType.CITATION:
+        return amount("citations") >= 3 or amount("influential_citations") >= 1
+    if evidence.evidence_type in {
+        EvidenceType.IMPLEMENTATION,
+        EvidenceType.INDEPENDENT_REPLICATION,
+        EvidenceType.PRODUCT_ADOPTION,
+    }:
+        return amount("stars") >= 25 or amount("forks") >= 3
+    if evidence.evidence_type in {
+        EvidenceType.COMMUNITY_DISCUSSION,
+        EvidenceType.SECONDARY_INTERPRETATION,
+    }:
+        return (
+            amount("comments") >= 5
+            or amount("replies") >= 5
+            or amount("likes") >= 20
+            or amount("score") >= 20
+        )
+    return False
+
+
+def _qualifying_current_uptake(evidence: "TechnicalEvidence") -> tuple[bool, str]:
+    """Return whether one secondary record can reactivate an old route.
+
+    Search hits and generic recent commentary are intentionally insufficient.
+    A discussion source must have completed an upstream substantive-link audit;
+    otherwise the safe V0 behavior is to keep the route in observation.
+    """
+
+    raw = evidence.raw or {}
+    if raw.get("indexed_discovery_only"):
+        return False, "仅为搜索索引命中"
+    relationship = str(raw.get("relationship", "")).casefold()
+    independence = str(raw.get("independence", "")).casefold()
+    if relationship in {
+        "author_self_release",
+        "official_release_repository",
+        "publisher_self_release",
+        "paper_linked_repository",
+        "publisher_original_implementation",
+    } or independence in {"author", "publisher", "official", "self"}:
+        return False, "发布者/作者自身活动不属于独立承接"
+
+    evidence_type = evidence.evidence_type
+    if evidence_type in {
+        EvidenceType.INDEPENDENT_REPLICATION,
+        EvidenceType.PRODUCT_ADOPTION,
+    }:
+        return (
+            (True, "独立复现或产品采用")
+            if independence == "independent"
+            else (False, "复现/采用的独立性未核验")
+        )
+    if evidence_type == EvidenceType.IMPLEMENTATION:
+        return (
+            (True, "独立实现")
+            if independence == "independent"
+            else (False, "实现的独立性未核验")
+        )
+    if evidence_type == EvidenceType.PEER_REVIEW:
+        return (
+            (True, "独立同行评议")
+            if independence == "independent"
+            else (False, "评议独立性未核验")
+        )
+    if evidence_type == EvidenceType.CITATION:
+        return (
+            (True, "引用指标出现可核验量级变化")
+            if _material_uptake_delta(evidence)
+            else (False, "引用总量或微小变化不足以构成本期进展")
+        )
+    if evidence_type in {
+        EvidenceType.COMMUNITY_DISCUSSION,
+        EvidenceType.SECONDARY_INTERPRETATION,
+    }:
+        if independence != "independent":
+            return False, "讨论者独立性未核验"
+        if raw.get("substantive_uptake") is not True:
+            return False, "尚未核验为直接讨论本机制的实质承接"
+        if relationship not in {
+            "independent_commentary",
+            "independent_discussion",
+            "independent_analysis",
+            "mechanism_discussion",
+            "independent_mechanism_analysis",
+        }:
+            return False, "讨论与本机制的关系类型未闭合"
+        return True, "独立且直接关联本机制的实质讨论"
+    return False, "证据类型不构成历史路线更新"
+
+
 def assess_candidate_freshness(
     candidate: "ParadigmCandidate",
     *,
@@ -236,22 +337,12 @@ def assess_candidate_freshness(
             continue
         if evidence.evidence_type not in uptake_types:
             continue
-        if evidence.raw.get("indexed_discovery_only"):
-            continue
-        # 发布者自己的公告、仓库与作者自发帖只能证明“确实发布过”，
-        # 不能证明外部社区正在承接。否则新建一个官方仓库就会把旧论文
-        # 错判为本期重新升温。
-        relationship = str(evidence.raw.get("relationship", "")).casefold()
-        independence = str(evidence.raw.get("independence", "")).casefold()
-        if relationship in {
-            "author_self_release",
-            "official_release_repository",
-            "publisher_self_release",
-        } or independence in {"author", "publisher", "self"}:
-            continue
         published = _evidence_datetime(evidence.published_at)
-        has_current_delta = bool(evidence.raw.get("metric_delta"))
-        if (published and cutoff <= published <= now + timedelta(days=1)) or has_current_delta:
+        qualifying, _ = _qualifying_current_uptake(evidence)
+        current_date = bool(
+            published and cutoff <= published <= now + timedelta(days=1)
+        )
+        if qualifying and (current_date or _material_uptake_delta(evidence)):
             current_uptake.append(evidence)
 
     recent_primary = [
@@ -277,7 +368,7 @@ def assess_candidate_freshness(
         decision = "defer"
         reason = "一手材料发布日期不可核验，且没有窗口内独立承接"
     return {
-        "version": "freshness-v1",
+        "version": "freshness-v2",
         "classification": classification,
         "decision": decision,
         "reason": reason,
@@ -291,6 +382,20 @@ def assess_candidate_freshness(
         ],
         "current_uptake_urls": [
             value.url for value in current_uptake
+            if safe_public_contact_target("source", value.url)
+        ],
+        "current_uptake_evidence": [
+            {
+                "title": value.title,
+                "url": value.url,
+                "published_at": value.published_at,
+                "evidence_type": value.evidence_type.value,
+                "relationship": str(value.raw.get("relationship", "")),
+                "independence": str(value.raw.get("independence", "")),
+                "metric_delta": value.raw.get("metric_delta", {}),
+                "qualification_reason": _qualifying_current_uptake(value)[1],
+            }
+            for value in current_uptake
             if safe_public_contact_target("source", value.url)
         ],
         "undated_primary_count": len(undated_primary),

@@ -422,6 +422,20 @@ PARADIGM_REPORT_MAX_RENDER_ATTEMPTS: int = max(
 PARADIGM_ANALYSIS_BATCH_SIZE: int = max(
     1, min(_env_int("PARADIGM_ANALYSIS_BATCH_SIZE", 6), 24)
 )
+# 普通论文先按批次做一次保守的“是否值得进入完整机制 Rubric”判断。
+# 这不是 Top-K：每条材料都有带 fingerprint 的显式结果，任何不确定、漏回
+# 或结构失败都会保留 pending；只有明确的综述、纯 benchmark、窄应用等
+# 非机制原点才在这里终止，从而把昂贵调用留给真正需要解释的材料。
+PARADIGM_ORIGIN_PREFILTER_ENABLED: bool = _env_bool(
+    "PARADIGM_ORIGIN_PREFILTER_ENABLED", True
+)
+# Technical Report 的机制数量不设总上限，但每次从原点队列取出时只评估
+# 有界数量，并把索引与已完成机制写回 evidence checkpoint。这样调度公平性
+# 以实际模型调用为单位，而不是让一份长报告在一次出队中独占预算。
+PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE: int = max(
+    1,
+    min(_env_int("PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE", 2), 12),
+)
 PARADIGM_DEEP_BATCH_SIZE: int = max(
     1, min(_env_int("PARADIGM_DEEP_BATCH_SIZE", 1), 6)
 )

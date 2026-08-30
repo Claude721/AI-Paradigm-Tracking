@@ -225,6 +225,7 @@ _BOOLEAN_ENVIRONMENT_KEYS = (
     "FOLLOW_BUILDERS_ENABLED",
     "PARADIGM_ALLOW_UPDATES",
     "PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED",
+    "PARADIGM_ORIGIN_PREFILTER_ENABLED",
     "EMAIL_PUSH_ENABLED",
     "EMAIL_PUSH_REQUIRED",
     "SMTP_USE_SSL",
@@ -258,6 +259,7 @@ _INTEGER_ENVIRONMENT_RANGES: dict[str, tuple[int, int | None]] = {
     "PARADIGM_REPORT_ROUTE_CONCURRENCY": (1, 4),
     "PARADIGM_REPORT_MAX_RENDER_ATTEMPTS": (1, 10),
     "PARADIGM_ANALYSIS_BATCH_SIZE": (1, 24),
+    "PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE": (1, 12),
     "PARADIGM_DEEP_BATCH_SIZE": (1, 6),
     "SCHEDULE_HOUR": (0, 23),
     "SCHEDULE_MINUTE": (0, 59),
@@ -493,6 +495,8 @@ def _execution_budget_check() -> Check:
         f"发现单源 {discovery_budget}s；阶段预留 {stage_reserve}s；"
         f"抽取/深挖批次 {config.PARADIGM_ANALYSIS_BATCH_SIZE}/"
         f"{config.PARADIGM_DEEP_BATCH_SIZE}；"
+        f"普通论文资格预筛 {'开' if config.PARADIGM_ORIGIN_PREFILTER_ENABLED else '关'}；"
+        f"报告机制分片 {config.PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE}；"
         + (
             "为 90 分钟 Actions 的安装、测试、邮件和 artifact 保留约 10 分钟"
             if status == "ready"

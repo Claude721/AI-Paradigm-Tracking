@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+from dataclasses import fields
 
 import config
 from agents.llm_utils import build_client, parse_json_object
@@ -13,6 +15,7 @@ from run_audit import run_audit
 from skills.loader import SkillLoader
 
 from .models import (
+    EvidenceType,
     ParadigmCandidate,
     ParadigmExtraction,
     ResearcherProfile,
@@ -30,10 +33,22 @@ logger = logging.getLogger(__name__)
 
 
 class ParadigmAnalyzer:
-    def __init__(self, concurrency: int = 6, client=None, model: str = ""):
+    def __init__(
+        self,
+        concurrency: int = 6,
+        client=None,
+        model: str = "",
+        *,
+        enable_batch_prefilter: bool = False,
+        technical_report_mechanism_slice: int = 0,
+    ):
         self.concurrency = max(concurrency, 1)
         self.client = client
         self.model = model
+        self.enable_batch_prefilter = bool(enable_batch_prefilter)
+        self.technical_report_mechanism_slice = max(
+            int(technical_report_mechanism_slice or 0), 0
+        )
         self.skill_loader = SkillLoader()
 
     def _get_client(self):
@@ -43,6 +58,38 @@ class ParadigmAnalyzer:
 
     async def run(self, evidence: list[TechnicalEvidence]) -> list[ParadigmExtraction]:
         semaphore = asyncio.Semaphore(self.concurrency)
+
+        eligible = list(evidence)
+        prefiltered: list[ParadigmExtraction] = []
+        if self.enable_batch_prefilter:
+            ordinary = [item for item in evidence if _should_prefilter_origin(item)]
+            bypassed = [
+                item for item in evidence if item.fingerprint not in {
+                    value.fingerprint for value in ordinary
+                }
+            ]
+            screened = await self._screen_origin_batch(ordinary)
+            full_review = []
+            for item in ordinary:
+                decision = screened.get(item.fingerprint)
+                if decision is None:
+                    prefiltered.append(
+                        self._failed_extraction(
+                            item,
+                            "原点资格预筛漏回或结构失败；保留待重试",
+                        )
+                    )
+                    continue
+                verdict, reason = decision
+                item.raw["origin_eligibility_decision"] = verdict
+                item.raw["origin_eligibility_reason"] = reason
+                if verdict == "screen_out":
+                    prefiltered.append(
+                        self._eligibility_rejection(item, reason)
+                    )
+                else:
+                    full_review.append(item)
+            eligible = [*bypassed, *full_review]
 
         async def guarded(item: TechnicalEvidence) -> list[ParadigmExtraction]:
             async with semaphore:
@@ -67,8 +114,150 @@ class ParadigmAnalyzer:
                     return [self._failed_extraction(item, "抽取结果意外为空")]
                 return values
 
-        batches = await asyncio.gather(*(guarded(item) for item in evidence))
-        return [extraction for batch in batches for extraction in batch]
+        batches = await asyncio.gather(*(guarded(item) for item in eligible))
+        return [*prefiltered, *[
+            extraction for batch in batches for extraction in batch
+        ]]
+
+    async def _screen_origin_batch(
+        self,
+        evidence: list[TechnicalEvidence],
+    ) -> dict[str, tuple[str, str]]:
+        """Conservatively identify records that clearly need no full Rubric.
+
+        Every decision is keyed by the input fingerprint. Unknown identities,
+        missing rows and malformed output deliberately stay pending rather than
+        being converted into research rejections.
+        """
+
+        if not evidence:
+            return {}
+        records = [
+            {
+                "fingerprint": item.fingerprint,
+                "source": item.source[:80],
+                "title": item.title[:300],
+                "summary": item.summary[:2400],
+                "origin_kind": str(
+                    item.raw.get("origin_kind", "research_paper")
+                ),
+                "frontier_domains": item.raw.get("frontier_domains", []),
+            }
+            for item in evidence
+        ]
+        prompt = self.skill_loader.render(
+            "origin_eligibility",
+            origin_records=json.dumps(records, ensure_ascii=False),
+        )
+        allowed = {item.fingerprint for item in evidence}
+        last_error: Exception | None = None
+        for attempt in range(2):
+            response = None
+            try:
+                client, model = self._get_client()
+                repair_note = (
+                    ""
+                    if attempt == 0
+                    else "\n上一轮身份或 JSON 契约无效。逐条原样返回全部 fingerprint。"
+                )
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt + repair_note}],
+                    temperature=0.0,
+                    max_tokens=max(1200, min(4000, 450 * len(evidence))),
+                    response_format={"type": "json_object"},
+                )
+                payload = parse_json_object(
+                    response.choices[0].message.content or "{}"
+                )
+                rows = payload.get("decisions")
+                if not isinstance(rows, list):
+                    raise ValueError("缺少 decisions 数组")
+                decisions: dict[str, tuple[str, str]] = {}
+                foreign = 0
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    fingerprint = str(row.get("fingerprint", "")).strip()
+                    if fingerprint not in allowed:
+                        foreign += 1
+                        continue
+                    verdict = str(row.get("decision", "")).strip()
+                    reason = str(row.get("reason", "")).strip()
+                    if verdict not in {"full_review", "screen_out"}:
+                        continue
+                    if verdict == "screen_out" and not reason:
+                        continue
+                    if fingerprint in decisions:
+                        raise ValueError("同一 fingerprint 返回多次")
+                    decisions[fingerprint] = (verdict, reason)
+                if foreign:
+                    run_audit.event(
+                        "origin_eligibility_contract",
+                        "warning",
+                        f"丢弃 {foreign} 条不属于当前批次的预筛输出",
+                    )
+                missing = allowed - decisions.keys()
+                if missing:
+                    run_audit.event(
+                        "origin_eligibility_contract",
+                        "deferred",
+                        f"资格预筛漏回 {len(missing)} 条输入；仅对应材料保留 pending",
+                    )
+                run_audit.record_llm(
+                    stage="origin_eligibility",
+                    role="sub",
+                    model=model,
+                    subject=f"{len(evidence)} origins",
+                    response=response,
+                )
+                return decisions
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "原点资格预筛第 %s 次失败 [%s 条]: %s",
+                    attempt + 1,
+                    len(evidence),
+                    exc,
+                )
+                run_audit.record_llm(
+                    stage="origin_eligibility",
+                    role="sub",
+                    model=self.model,
+                    subject=f"{len(evidence)} origins / attempt-{attempt + 1}",
+                    response=response,
+                    error=exc,
+                )
+        run_audit.event(
+            "origin_eligibility_contract",
+            "deferred",
+            f"{len(evidence)} 条资格预筛失败并保留 pending："
+            f"{type(last_error).__name__ if last_error else 'unknown'}",
+        )
+        return {}
+
+    @staticmethod
+    def _eligibility_rejection(
+        evidence: TechnicalEvidence,
+        reason: str,
+    ) -> ParadigmExtraction:
+        return ParadigmExtraction(
+            evidence=evidence,
+            is_candidate=False,
+            canonical_name="",
+            thesis="",
+            problem_shift="",
+            mechanism="",
+            rejection_reason=reason,
+            rubric_assessment={
+                "version": "origin-eligibility-v1",
+                "stage": "origin_eligibility",
+                "decision": "reject",
+                "decision_reason": reason,
+                "answer_coverage": 1.0,
+                "answers": [],
+            },
+        )
 
     async def extract(self, evidence: TechnicalEvidence) -> list[ParadigmExtraction]:
         if evidence.raw.get("origin_kind") == "technical_report":
@@ -182,8 +371,15 @@ class ParadigmAnalyzer:
         self,
         evidence: TechnicalEvidence,
     ) -> list[ParadigmExtraction]:
-        """系统报告先建立机制索引，再逐机制回答 Rubric，隔离长 JSON 故障。"""
+        """Index once, assess a bounded slice, and resume without recomputation.
+
+        The mechanism count remains unlimited.  The slice only bounds one queue
+        visit; completed mechanism results and the report index live in the
+        pending evidence payload until every seed has a terminal assessment.
+        """
         evidence.raw.pop("technical_report_partial_failure", None)
+        evidence.raw.pop("technical_report_slice_pending", None)
+        evidence.raw.pop("technical_report_last_run_failure", None)
         document_excerpt = str(evidence.raw.get("document_excerpt", ""))
         report_material = evidence.summary
         if document_excerpt:
@@ -194,31 +390,60 @@ class ParadigmAnalyzer:
                 f"{report_material}\n\n[官方报告正文节选：{source_kind}]\n"
                 f"{document_excerpt}"
             )
-        index_prompt = self.skill_loader.render(
-            "technical_report_index",
-            source=evidence.source,
-            title=evidence.title,
-            report_material=report_material[:50_000],
-            authors=_author_prompt_summary(evidence.authors),
-            organization=evidence.organization,
-            identifiers=evidence.identifiers,
-            frontier_domains=evidence.raw.get("frontier_domains", []),
-            publisher_context={
-                "organization": evidence.organization,
-                "publisher_tier": evidence.raw.get("publisher_tier", "unknown"),
-                "publisher_evidence": evidence.raw.get("publisher_evidence", ""),
-            },
+        checkpoint_version = "technical-report-checkpoint-v1"
+        cached_version = str(
+            evidence.raw.get("technical_report_checkpoint_version", "")
         )
-        run_audit.event(
-            "technical_report_index",
-            "request_bounded",
-            f"{evidence.title[:80]}：输入 {len(index_prompt)} 字符；"
-            f"报告材料 {len(report_material[:50_000])} 字符",
-        )
-        mechanisms, index_error, disposition_reason = await self._request_report_index(
-            evidence,
-            index_prompt,
-        )
+        cached_seeds = evidence.raw.get("technical_report_mechanism_seeds")
+        cached_mechanisms = [
+            item
+            for item in (cached_seeds if isinstance(cached_seeds, list) else [])
+            if isinstance(item, dict)
+            and str(item.get("canonical_name", "")).strip()
+            and str(item.get("problem_shift", "")).strip()
+            and str(item.get("mechanism", "")).strip()
+        ]
+        if cached_version == checkpoint_version and cached_mechanisms:
+            mechanisms = cached_mechanisms
+            index_error = ""
+            disposition_reason = ""
+            run_audit.event(
+                "technical_report_index",
+                "checkpoint_reused",
+                f"{evidence.title[:80]}：复用 {len(mechanisms)} 个机制种子",
+            )
+        else:
+            index_prompt = self.skill_loader.render(
+                "technical_report_index",
+                source=evidence.source,
+                title=evidence.title,
+                report_material=report_material[:50_000],
+                authors=_author_prompt_summary(evidence.authors),
+                organization=evidence.organization,
+                identifiers=evidence.identifiers,
+                frontier_domains=evidence.raw.get("frontier_domains", []),
+                publisher_context={
+                    "organization": evidence.organization,
+                    "publisher_tier": evidence.raw.get("publisher_tier", "unknown"),
+                    "publisher_evidence": evidence.raw.get("publisher_evidence", ""),
+                },
+            )
+            run_audit.event(
+                "technical_report_index",
+                "request_bounded",
+                f"{evidence.title[:80]}：输入 {len(index_prompt)} 字符；"
+                f"报告材料 {len(report_material[:50_000])} 字符",
+            )
+            mechanisms, index_error, disposition_reason = (
+                await self._request_report_index(evidence, index_prompt)
+            )
+            if mechanisms:
+                evidence.raw["technical_report_checkpoint_version"] = (
+                    checkpoint_version
+                )
+                evidence.raw["technical_report_mechanism_seeds"] = mechanisms
+                evidence.raw["technical_report_completed_mechanisms"] = {}
+                evidence.raw["technical_report_mechanism_failure_counts"] = {}
         if not mechanisms:
             if not index_error and disposition_reason:
                 return [
@@ -245,42 +470,109 @@ class ParadigmAnalyzer:
                 )
             ]
 
+        completed_payloads = evidence.raw.get(
+            "technical_report_completed_mechanisms"
+        )
+        if not isinstance(completed_payloads, dict):
+            completed_payloads = {}
+        else:
+            completed_payloads = {
+                str(key): payload
+                for key, payload in completed_payloads.items()
+                if isinstance(payload, dict)
+                and _report_extraction_from_payload(evidence, payload) is not None
+            }
+        failure_counts = evidence.raw.get(
+            "technical_report_mechanism_failure_counts"
+        )
+        if not isinstance(failure_counts, dict):
+            failure_counts = {}
+        seeds = [
+            (_report_mechanism_key(seed, index), index, seed)
+            for index, seed in enumerate(mechanisms, 1)
+        ]
+        pending = [
+            value for value in seeds if value[0] not in completed_payloads
+        ]
+        # A repeatedly malformed mechanism moves behind never-attempted peers,
+        # so one bad section cannot starve the rest of the same report.
+        pending.sort(
+            key=lambda value: (
+                int(failure_counts.get(value[0], 0) or 0),
+                value[1],
+            )
+        )
+        slice_limit = self.technical_report_mechanism_slice
+        selected = pending[:slice_limit] if slice_limit else pending
         semaphore = asyncio.Semaphore(min(self.concurrency, 2))
 
-        async def guarded(index: int, seed: dict):
+        async def guarded(key: str, index: int, seed: dict):
             async with semaphore:
-                return await self._assess_report_mechanism(
+                extraction, error = await self._assess_report_mechanism(
                     evidence,
                     seed,
                     index=index,
                 )
+                return key, extraction, error
 
         assessed = await asyncio.gather(
-            *(guarded(index, seed) for index, seed in enumerate(mechanisms, 1))
+            *(guarded(key, index, seed) for key, index, seed in selected)
         )
-        successful = [item for item, _ in assessed if item is not None]
-        failures = [
-            f"机制 {index}: {error}"
-            for index, (item, error) in enumerate(assessed, 1)
-            if item is None
-        ]
+        failures = []
+        newly_completed: list[ParadigmExtraction] = []
+        for key, extraction, error in assessed:
+            if extraction is None:
+                failure_counts[key] = int(failure_counts.get(key, 0) or 0) + 1
+                failures.append(f"{key[:10]}: {error}")
+                continue
+            completed_payloads[key] = _report_extraction_payload(extraction)
+            failure_counts.pop(key, None)
+            newly_completed.append(extraction)
+        evidence.raw["technical_report_completed_mechanisms"] = completed_payloads
+        evidence.raw["technical_report_mechanism_failure_counts"] = failure_counts
+
+        successful = []
+        for key, _, _ in seeds:
+            payload = completed_payloads.get(key)
+            if not isinstance(payload, dict):
+                continue
+            restored = _report_extraction_from_payload(evidence, payload)
+            if restored is not None:
+                successful.append(restored)
+
+        remaining = len(mechanisms) - len(successful)
         if failures:
             evidence.raw["technical_report_partial_failure"] = True
-            successful.append(
-                self._failed_extraction(
-                    evidence,
+            evidence.raw["technical_report_last_run_failure"] = True
+        if remaining:
+            evidence.raw["technical_report_slice_pending"] = True
+            if failures:
+                reason = (
                     "Technical Report 部分机制评估失败；"
-                    + "；".join(failures),
+                    f"检查点已完成 {len(successful)}/{len(mechanisms)}，"
+                    f"剩余 {remaining}；下次从检查点继续；本轮失败 "
+                    + "；".join(failures)
                 )
-            )
+            else:
+                reason = (
+                    f"Technical Report 机制检查点未闭合：已完成 "
+                    f"{len(successful)}/{len(mechanisms)}，剩余 {remaining}；"
+                    "下次从检查点继续"
+                )
+            return [
+                *newly_completed,
+                self._failed_extraction(evidence, reason),
+            ]
+        evidence.raw.pop("technical_report_slice_pending", None)
+        evidence.raw.pop("technical_report_partial_failure", None)
+        evidence.raw.pop("technical_report_last_run_failure", None)
+        if newly_completed:
+            return newly_completed
         if successful:
+            # Defensive recovery for a legacy checkpoint that had all mechanism
+            # payloads but never committed the parent analyzed flag.
             return successful
-        return [
-            self._failed_extraction(
-                evidence,
-                "Technical Report 全部机制评估失败",
-            )
-        ]
+        return [self._failed_extraction(evidence, "Technical Report 全部机制评估失败")]
 
     async def _request_report_index(
         self,
@@ -539,6 +831,61 @@ def _string_list(value) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _should_prefilter_origin(evidence: TechnicalEvidence) -> bool:
+    """Only ordinary papers use the cheap gate; high-signal origins bypass it."""
+
+    raw = evidence.raw or {}
+    try:
+        origin_priority = int(raw.get("origin_priority", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        origin_priority = 0
+    return bool(
+        evidence.evidence_type == EvidenceType.PRIMARY_PAPER
+        and raw.get("origin_kind", "research_paper") == "research_paper"
+        and raw.get("origin_eligibility_decision") != "full_review"
+        and not raw.get("explicit_seed")
+        and origin_priority < 2
+        and not raw.get("priority_researcher_match")
+    )
+
+
+def _report_mechanism_key(seed: dict, index: int) -> str:
+    payload = json.dumps(
+        {"index": index, "seed": seed},
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _report_extraction_payload(extraction: ParadigmExtraction) -> dict:
+    """Serialize only the mechanism judgment; evidence is the parent checkpoint."""
+
+    return {
+        field.name: getattr(extraction, field.name)
+        for field in fields(ParadigmExtraction)
+        if field.name != "evidence"
+    }
+
+
+def _report_extraction_from_payload(
+    evidence: TechnicalEvidence,
+    payload: dict,
+) -> ParadigmExtraction | None:
+    allowed = {
+        field.name for field in fields(ParadigmExtraction) if field.name != "evidence"
+    }
+    values = {key: value for key, value in payload.items() if key in allowed}
+    required = {"is_candidate", "canonical_name", "thesis", "problem_shift", "mechanism"}
+    if not required.issubset(values):
+        return None
+    try:
+        return ParadigmExtraction(evidence=evidence, **values)
+    except (TypeError, ValueError):
+        return None
+
+
 def _author_prompt_summary(authors: list[str]) -> str:
     """大型系统报告保留关键署名结构，不把数百个人名灌进模型上下文。"""
     cleaned = list(dict.fromkeys(name.strip() for name in authors if name.strip()))
@@ -733,6 +1080,11 @@ class ParadigmSynthesizer:
             f"证据明细 {len(evidence_payload['records'])} 条，"
             f"折叠 {evidence_payload['overflow']['count']} 条",
         )
+        visible_evidence_indices = {
+            int(record["index"])
+            for record in evidence_payload["records"]
+            if not record.get("detail_deferred_due_to_context")
+        }
         last_error: Exception | None = None
         partial_payload: dict[str, object] = {}
         validation_error = ""
@@ -784,7 +1136,11 @@ class ParadigmSynthesizer:
                     payload = _merge_structured_payload(partial_payload, payload)
                 partial_payload = payload
                 try:
-                    self._apply_synthesis_payload(candidate, payload)
+                    self._apply_synthesis_payload(
+                        candidate,
+                        payload,
+                        visible_evidence_indices=visible_evidence_indices,
+                    )
                 except Exception as exc:
                     validation_error = str(exc)
                     raise
@@ -828,7 +1184,10 @@ class ParadigmSynthesizer:
 
     @staticmethod
     def _apply_synthesis_payload(
-        candidate: ParadigmCandidate, payload: dict[str, object]
+        candidate: ParadigmCandidate,
+        payload: dict[str, object],
+        *,
+        visible_evidence_indices: set[int],
     ) -> None:
         for field_name in (
             "name",
@@ -882,6 +1241,45 @@ class ParadigmSynthesizer:
         candidate.rubric_assessment = assessment
         if assessment["decision"] == "incomplete":
             raise ValueError(assessment["decision_reason"])
+
+        # The synthesis model may certify only a fully expanded, independently
+        # sourced discussion as directly substantive for this mechanism.  The
+        # delivery freshness gate consumes this explicit audit marker; generic
+        # topic overlap can never create it by itself.
+        for item in candidate.evidence:
+            if item.raw.get("substantive_uptake_source") == "synthesis-v1":
+                item.raw.pop("substantive_uptake", None)
+                item.raw.pop("substantive_uptake_source", None)
+        substantive_indices = {
+            int(value)
+            for value in payload.get("substantive_uptake_evidence_indices", [])
+            if str(value).isdigit()
+        }
+        allowed_relationships = {
+            "independent_commentary",
+            "independent_discussion",
+            "independent_analysis",
+            "mechanism_discussion",
+            "independent_mechanism_analysis",
+        }
+        for index in substantive_indices & visible_evidence_indices:
+            if not 0 <= index < len(candidate.evidence):
+                continue
+            item = candidate.evidence[index]
+            if (
+                item.evidence_type
+                not in {
+                    EvidenceType.COMMUNITY_DISCUSSION,
+                    EvidenceType.SECONDARY_INTERPRETATION,
+                }
+                or str(item.raw.get("independence", "")).casefold()
+                != "independent"
+                or str(item.raw.get("relationship", "")).casefold()
+                not in allowed_relationships
+            ):
+                continue
+            item.raw["substantive_uptake"] = True
+            item.raw["substantive_uptake_source"] = "synthesis-v1"
 
         excluded = {
             int(value)

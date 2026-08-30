@@ -82,6 +82,8 @@
 | `PARADIGM_REPORT_ROUTE_CONCURRENCY` | 推荐 `2`；路线级写作并发，每条通过后立即写入状态 artifact 可恢复的 checkpoint |
 | `PARADIGM_REPORT_MAX_RENDER_ATTEMPTS` | 推荐 `3`；持久化渲染重试上限，达到后隔离任务并把候选退回深挖，不影响 SMTP 重试 |
 | `PARADIGM_ANALYSIS_BATCH_SIZE` | 推荐 `6`；机制抽取检查点粒度，不是候选上限 |
+| `PARADIGM_ORIGIN_PREFILTER_ENABLED` | 推荐 `true`；普通论文先做保守的批量资格判断，任何不确定或漏回项仍进入完整 Rubric/保留 pending，不是 Top-K |
+| `PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE` | 推荐 `2`；单份 Technical Report 每次出队评估的机制数，总机制数不设上限并跨轮续跑 |
 | `PARADIGM_DEEP_BATCH_SIZE` | 推荐 `1`；深挖检查点粒度，避免半完成档案入库 |
 | `EMAIL_MAX_ATTACHMENT_BYTES` | 推荐 `10000000`；报告异常膨胀时阻断发送并保留 outbox |
 
@@ -92,6 +94,8 @@
 GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留空时同时发现社区和普通技术网页，结果仍只算索引线索。LessWrong/KOL RSS、Rubric、前沿覆盖地图和个人目录都随代码提交，无需创建 Secret 或 Variable。旧版 `PARADIGM_MAX_ANALYSIS_ITEMS`、`PARADIGM_MAX_DEEP_CANDIDATES` 等 Variable 可以删除；即使保留，新代码也不会读取。Reddit 的 Client ID/Secret 必须和“已批准”开关一起配置；只填密钥但不开启批准开关时，代码不会请求 Reddit API。Semantic Scholar 同理：Secret 留空、Variable 为 `false` 时，代码不会匿名请求。
 
 跨提交恢复状态会从新到旧校验不可变快照，跳过下载失败、压缩包损坏、缺少数据库或无法迁移的快照；找到最近一份健康 SQLite 后再迁移到当前 schema 并读取前沿覆盖地图版本。它不再因为 commit SHA 或一个可迁移的版本号变化就重置。普通 Prompt、Skill 或报告样式更新会延续跨周历史；覆盖地图升级时仍恢复旧数据库用于证据去重，但程序会用 60 天窗口补扫新加入的技术面，报告时效仍使用普通任务窗口。已经分析过且正文未变化的材料不会再次调用 LLM。旧状态中缺少可靠分类来源的 Technical Report 会按当前文档元数据与系统结构规则重新核验；机制队列在高信号与普通材料之间按 1:3 加权轮转，两类内部再交错新增与 FIFO backlog。报告中每条已通过闸门的路线草稿也会按候选证据与写作 Skill 签名保存；总编超时后，下次只补未完成路线并重做轻量开篇，不重烧完整路线写作。存在活动 outbox 时先恢复它：成功交付后当前进程退出，工作流上传确认状态并自动 dispatch 一个 `reset_state=false`、`smoke_only=false` 的后续 run；确定性输入缺陷或耗尽渲染重试时隔离旧任务，并在当前进程继续新研究。自动 dispatch 失败会让当前任务失败并触发告警，不能静默把续投当成本周研究。若找不到任何健康 artifact，工作流会明确失败并要求人工判断；只有确定要建立新基线时才以 `reset_state=true` 运行。
+
+V0 的分析续跑还包含两个细粒度检查点。普通论文若已通过资格预筛但完整 Rubric 失败，下轮直接续跑完整 Rubric，不重复支付预筛调用。长报告的机制索引、已完成机制与失败次数保存在父原点中，每次只推进配置的机制分片；候选快照成功后才提交父报告进度，因此进程中断最多造成重算，不会形成已完成机制永久漏项。
 
 ## 4. 首次手动验收
 
