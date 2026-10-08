@@ -19,6 +19,7 @@ from agents.paradigm_orchestrator import (
     _deferred_deep_snapshot,
 )
 from database.paradigm_store import ParadigmStore
+from tests.completion_fixtures import COMPLETED_RESEARCH
 from paradigms.analyzer import ResearcherTrajectoryAnalyzer
 from paradigms.enrichment import EvidenceEnricher
 from paradigms.models import (
@@ -375,8 +376,10 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.store.mark_evidence([temporary], analyzed=False)
         pending = copy.deepcopy(self.candidate)
         pending.evidence.append(temporary)
+        pending.status = "observe"
+        self.store.mark_evidence([pending.evidence[0]], analyzed=True)
         self.store.save_candidates([pending])
-        self.store.enqueue_report([pending], {"origin_count": 1}, report_date="2026-09-23")
+        self.store.enqueue_report([pending], {**COMPLETED_RESEARCH, "origin_count": 1}, report_date="2026-09-23")
         with sqlite3.connect(self.path) as conn:
             values = [row[0] for row in conn.execute(
                 "SELECT payload_json FROM evidence_state "
@@ -386,7 +389,7 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("Hidden raw user body" in value for value in values))
         self.assertFalse(any("Temporary user body" in value for value in values))
         self.assertEqual(temporary.raw["body"], "Hidden raw user body")
-        restored = self.store.load_pending_deep_candidates()[0]
+        restored = self.store.load_candidate_snapshots({pending.key})[0]
         persisted = next(item for item in restored.evidence if item.source == "independent-lab")
         self.assertEqual(persisted.raw["metric_delta"], {"stars": 25.0})
 

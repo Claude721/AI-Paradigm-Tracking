@@ -589,7 +589,13 @@ class ParadigmOrchestrator:
         stats["refreshed_paradigms"] = len(refreshed)
         stats["refresh_unchanged_count"] = len(refresh_unchanged)
         run_audit.checkpoint(stats)
-        candidates = [*new_candidates, *refreshed]
+        # Withholding an incomplete run must not lose already closed routes.
+        # An unchanged, unreported historical snapshot is still eligible for
+        # current policy/freshness checks; prepare_report handles deduplication.
+        candidates = [
+            *new_candidates, *refreshed,
+            *(item for item in refresh_unchanged if is_reportable(item)),
+        ]
         # Tavily/Reddit 的用户正文只供本轮综合与人物核验，之后即清除；
         # 数据库和邮件只保留链接、指标、覆盖状态和已提炼的分析。
         candidates = self.enricher.finalize(candidates)
@@ -773,6 +779,7 @@ class ParadigmOrchestrator:
             candidate
             for candidate in reportable
             if not _delivery_primary_source_ready(candidate)
+            or not self.store.candidate_inputs_current(candidate)
         ]
         if delivery_source_deferred:
             deferred_keys = {
@@ -789,7 +796,7 @@ class ParadigmOrchestrator:
                 "delivery_primary_source_readiness",
                 "warning",
                 f"{len(delivery_source_deferred)} 条已通过研究准入的路线缺少"
-                "安全的一手论文/官方材料 URL；保留 pending_deep，不发送"
+                "安全的一手论文/官方材料 URL 或当前来源版本；保留 pending_deep，不发送"
                 "无法追溯原文的报告",
             )
         stats["delivery_profile_deferred_count"] = len(
@@ -873,9 +880,7 @@ class ParadigmOrchestrator:
             or stats["delivery_source_deferred_count"]
             or stats["report_safety_deferred_count"]
         )
-        # ``run_incomplete`` 保留给旧 outbox/邮件消费者，但只表达研究事务
-        # 尚未闭合。信源局部退化用 coverage_incomplete 单独交付，避免把
-        # “研究已完成但覆盖受限”误报成 backlog。
+        # 保留兼容统计，但未闭合研究/覆盖均不得进入报告或邮件交付。
         stats["run_incomplete"] = stats["research_incomplete"]
         stats["pending_work_count"] = (
             stats["evidence_checkpoint_rejected_count"]
@@ -893,14 +898,8 @@ class ParadigmOrchestrator:
             or stats["refresh_budget_deferred_count"]
         )
         stats["result_kind"] = (
-            "partial_memo"
-            if reportable and stats["research_incomplete"]
-            else "research_incomplete"
-            if stats["research_incomplete"]
-            else "coverage_limited_memo"
-            if reportable and stats["coverage_incomplete"]
-            else "coverage_limited_no_signal"
-            if stats["coverage_incomplete"]
+            "research_blocked"
+            if stats["research_incomplete"] or stats["coverage_incomplete"]
             else "complete_memo"
             if reportable
             else "complete_no_signal"
@@ -961,6 +960,14 @@ class ParadigmOrchestrator:
             stats["origin_count"],
             len(candidates),
             len(reportable),
+        )
+        logger.info(
+            "研究闭合账本：原点完成=%s/%s，深挖返回=%s/%s，"
+            "待办=%s，持久化待办=%s，研究未闭合=%s，覆盖未闭合=%s",
+            stats["analysis_completed_count"], stats["planned_analysis_count"],
+            stats["deep_candidate_count"], stats["planned_deep_candidate_count"],
+            stats["pending_work_count"], queue_after["pending_total_count"],
+            stats["research_incomplete"], stats["coverage_incomplete"],
         )
         return stats
 

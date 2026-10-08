@@ -28,6 +28,7 @@ from paradigms.models import (
     verified_organization_attribution,
 )
 from paradigms.researcher_identity import same_verified_researcher
+from paradigms.completion import require_completed_research, partial_report_violations
 from run_audit import run_audit
 from runtime_clock import scheduled_date
 from skills.loader import SkillLoader
@@ -89,6 +90,7 @@ class ParadigmReportGenerator:
         date = report_date or scheduled_date()
         path = self.output_dir / f"paradigm_radar_{date}.md"
         stats = pipeline_stats or {}
+        require_completed_research(stats, candidates=candidates)
         ordered = sorted(candidates, key=lambda item: item.total_score, reverse=True)
         if not ordered:
             content = self._empty_report(date, stats)
@@ -400,134 +402,9 @@ class ParadigmReportGenerator:
 
     @staticmethod
     def _empty_report(date: str, stats: dict) -> str:
-        coverage = stats.get("frontier_coverage") or {}
-        incomplete = [
-            value.get("label", domain_id)
-            for domain_id, value in (coverage.get("domains") or {}).items()
-            if value.get("status") in {"query_failed", "not_executed"}
-        ]
-        failed_lanes = [
-            name
-            for name, value in (coverage.get("recall_lanes") or {}).items()
-            if value.get("status") == "query_failed"
-            or str(value.get("status", "")).startswith("not_executed_")
-        ]
-        academic_incomplete = [
-            (
-                f"{name}={value.get('status')}"
-                f"(queries {value.get('completed_queries', 0)}/"
-                f"{value.get('planned_queries', value.get('queries', 0))}, 429 "
-                f"{value.get('rate_limited_requests', 0)})"
-            )
-            for name, value in (coverage.get("academic_indexes") or {}).items()
-            if value.get("status")
-            not in {"completed", "completed_after_retry"}
-        ]
-        failed_sources = [
-            f"{name}={value.get('status')}"
-            for name, value in (coverage.get("source_health") or {}).items()
-            if value.get("status") in {"partial", "query_failed", "timed_out"}
-        ]
-        official = coverage.get("official_pages") or {}
-        official_incomplete = (
-            int(official.get("checked_pages", 0) or 0)
-            < int(official.get("total_pages", 0) or 0)
-            or bool(official.get("request_failed"))
-            or bool(official.get("parse_zero_links"))
-            or bool(official.get("detail_failures"))
-        )
-        incomplete_parts = []
-        if incomplete:
-            incomplete_parts.append("领域：" + "、".join(incomplete))
-        if failed_lanes:
-            incomplete_parts.append("召回车道：" + "、".join(failed_lanes))
-        if academic_incomplete:
-            incomplete_parts.append("学术索引：" + "、".join(academic_incomplete))
-        if failed_sources:
-            incomplete_parts.append("发现源：" + "、".join(failed_sources))
-        if official_incomplete:
-            incomplete_parts.append(
-                "官方入口："
-                f"请求失败 {official.get('request_failed', 0)}、"
-                f"解析零链接 {official.get('parse_zero_links', 0)}、"
-                f"详情失败 {official.get('detail_failures', 0)}"
-            )
-        pending_work = int(stats.get("pending_work_count", 0) or 0)
-        research_incomplete = bool(
-            stats.get("research_incomplete", stats.get("run_incomplete"))
-            or pending_work
-        )
-        coverage_incomplete = bool(
-            stats.get("coverage_incomplete") or incomplete_parts
-        )
-        coverage_note = (
-            "\n\n本轮存在**召回覆盖未闭合**："
-            + "；".join(incomplete_parts)
-            + "。这会降低结论置信度，具体失败车道与重试线索见随信审计。"
-            if incomplete_parts
-            else ""
-        )
-        if pending_work:
-            progress_note = (
-                "\n\n本轮还存在**尚未完成研究判断的执行积压**："
-                f"机制抽取完成 {stats.get('analysis_completed_count', stats.get('analysis_count', 0))}/"
-                f"{stats.get('planned_analysis_count', 0)} 条；"
-                f"待抽取 {stats.get('analysis_deferred_count', 0)} 条，"
-                f"待深挖 {stats.get('candidate_deferred_count', 0)} 条，"
-                f"综合/Rubric 待重试 {stats.get('candidate_research_incomplete_count', 0)} 条，"
-                f"待刷新 {stats.get('refresh_deferred_count', 0)} 条，"
-                f"待补全人物交付信息 {stats.get('delivery_profile_deferred_count', 0)} 条，"
-                f"待补全一手链接 {stats.get('delivery_source_deferred_count', 0)} 条，"
-                f"因显式报告 safety limit 延后 {stats.get('report_safety_deferred_count', 0)} 条。"
-                "这些材料只是因软时间预算或显式 safety limit 延后，"
-                "并未被 Rubric 淘汰；因此本期空白不能解释为近期没有新范式。"
-            )
-        else:
-            progress_note = ""
-        if research_incomplete:
-            memo_heading = "## 本期运行状态 Memo"
-            memo = (
-                f"本轮已发现 {stats.get('origin_count', 0)} 份一手机制材料（含论文、"
-                "Technical Report、原创思想文章与原生实现），但研究链路**尚未完成**，因此当前 0 条交付"
-                "不是技术判断，也不能解释为本周没有值得关注的新工作。系统"
-                "不会用未完成样本冒充完整周报；已发现材料与已完成研究检查点"
-                "均已保留，后续运行会从 backlog 继续。"
-            )
-            closing = (
-                "优先恢复未闭合的召回车道、机制抽取、深挖与人物/原文交付"
-                "契约；在这些步骤完成前，不对近期技术演变做负面结论。"
-            )
-        elif coverage_incomplete:
-            memo_heading = "## 本期研究 Memo"
-            memo = (
-                f"本期研究判断已经执行完成，但召回覆盖仍有明确边界。本轮扫描了 "
-                f"{stats.get('origin_count', 0)} 份一手机制材料；在当前已覆盖材料中，"
-                "没有路线同时跨过技术外延、发布者可信度与外部承接门槛。这个"
-                "结果只能解释为**覆盖受限条件下没有可交付信号**，不能外推为"
-                "近期所有领域都没有新进展。相关失败车道、限流与官方入口异常"
-                "会保留在审计中，待后续运行补齐。"
-            )
-            closing = (
-                "优先补齐本轮退化的学术索引、召回车道与官方入口；只有覆盖"
-                "恢复后，才把空结果视为完整的周期判断。"
-            )
-        else:
-            memo_heading = "## 本期研究 Memo"
-            memo = (
-                f"本期共扫描 {stats.get('origin_count', 0)} 份一手机制材料（含论文、"
-                "Technical Report、原创思想文章与原生实现）；在覆盖完整且已经完成研究判断的材料中，没有"
-                "内容同时跨过**技术外延、发布者可信度和外部承接**三道门槛。"
-                "技术范式不会按周出现，这一期不为了维持篇幅把局部 benchmark "
-                "改进或作者的宏大叙事包装成趋势。"
-            )
-            closing = (
-                "继续观察新的原始机制是否出现独立复现、跨团队承接或有内容的"
-                "二次讨论。只有当讨论开始围绕设计思想、适用边界和新能力展开，"
-                "而不只是转发论文标题时，扩散信号才真正成立。"
-            )
+        require_completed_research(stats)
         ordinary_window = stats.get(
-            "ordinary_discovery_lookback_days",
-            config.SOURCING_LOOKBACK_DAYS,
+            "ordinary_discovery_lookback_days", config.SOURCING_LOOKBACK_DAYS
         )
         high_signal_window = stats.get(
             "high_signal_discovery_lookback_days",
@@ -537,13 +414,16 @@ class ParadigmReportGenerator:
 
 > {date} · 普通发现 {ordinary_window} 天 · 高信号回补 {high_signal_window} 天
 
-{memo_heading}
+## 本期研究 Memo
 
-{memo}{coverage_note}{progress_note}
+本期共扫描 {stats.get('origin_count', 0)} 份一手机制材料，已完成配置信源的召回与全部计划研究判断。
+没有路线同时跨过**技术外延、发布者可信度和外部承接**三道门槛，因此本期没有可交付的新路线或进展更新。
+这一结论适用于本期约定的信源、窗口和研究规则，不是对所有 AI 研究的全局否定。
+技术范式不会按周出现，本期不以局部 benchmark 改进或作者的宏大叙事填充报告。
 
 ## 接下来真正值得盯的信号
 
-{closing}
+继续观察新机制的独立复现、跨团队承接和实质二次讨论。
 """
 
 def _candidate_dossier(item: ParadigmCandidate) -> dict:
@@ -1066,6 +946,7 @@ def _editorial_violations(
     if require_primary_sources:
         violations.extend(_primary_source_violations(content, candidates or []))
     violations.extend(_ungrounded_url_violations(content, candidates or []))
+    violations.extend(partial_report_violations(content))
     return violations
 
 
@@ -1516,105 +1397,15 @@ def _without_researcher_index(content: str) -> str:
 
 
 def _attach_research_scope_boundary(content: str, stats: dict) -> str:
-    """Place unfinished-sample scope beside the opening editorial claim."""
-
-    pending = int(stats.get("pending_work_count", 0) or 0)
-    research_incomplete = bool(
-        stats.get("research_incomplete", stats.get("run_incomplete")) or pending
-    )
-    value = re.sub(
-        r"(?ms)\n*> \*\*阶段性研究范围：\*\*.*?(?=\n\n|\Z)",
-        "",
-        content,
-    ).strip()
-    if not research_incomplete:
-        return value
-    planned = int(stats.get("planned_analysis_count", 0) or 0)
-    completed = int(
-        stats.get("analysis_completed_count", stats.get("analysis_count", 0)) or 0
-    )
-    note = (
-        "> **阶段性研究范围：** 本期仍有 "
-        f"{pending} 项研究事务待续跑，机制抽取已完成 {completed}/{planned} 条。"
-        "以下路线只代表当前已完成判断样本中的候选信号，不代表对本期全部"
-        "召回材料的完整结论，也不能表述为已经形成确定的新范式。"
-    )
-    heading = re.search(r"(?m)^## 本期研究 Memo\s*$", value)
-    if not heading:
-        return value
-    insertion = heading.end()
-    return value[:insertion] + "\n\n" + note + value[insertion:]
+    """Retained helper name; incomplete inputs are rejected, never disclosed."""
+    require_completed_research(stats, content=content)
+    return content.strip()
 
 
 def _attach_coverage_boundary(content: str, stats: dict) -> str:
-    """Deterministically disclose degraded recall and unfinished backlog."""
-
-    coverage = stats.get("frontier_coverage") or {}
-    issues = []
-    failed_lanes = [
-        name
-        for name, value in (coverage.get("recall_lanes") or {}).items()
-        if value.get("status") == "query_failed"
-        or str(value.get("status", "")).startswith("not_executed_")
-    ]
-    if failed_lanes:
-        issues.append("未闭合召回车道：" + "、".join(failed_lanes))
-    degraded_indexes = [
-        f"{name}={value.get('status')}"
-        for name, value in (coverage.get("academic_indexes") or {}).items()
-        if value.get("status") not in {"completed", "completed_after_retry"}
-    ]
-    if degraded_indexes:
-        issues.append("学术索引退化：" + "、".join(degraded_indexes))
-    failed_sources = [
-        f"{name}={value.get('status')}"
-        for name, value in (coverage.get("source_health") or {}).items()
-        if value.get("status") in {"partial", "query_failed", "timed_out"}
-    ]
-    if failed_sources:
-        issues.append("发现源异常：" + "、".join(failed_sources))
-    official = coverage.get("official_pages") or {}
-    if (
-        official.get("request_failed")
-        or official.get("parse_zero_links")
-        or official.get("detail_failures")
-    ):
-        issues.append(
-            "官方入口异常：请求失败 "
-            f"{official.get('request_failed', 0)}、解析零链接 "
-            f"{official.get('parse_zero_links', 0)}、详情失败 "
-            f"{official.get('detail_failures', 0)}"
-        )
-    pending = int(stats.get("pending_work_count", 0) or 0)
-    if pending:
-        issues.append(f"仍有 {pending} 项研究积压，将在后续运行续跑")
-    if not issues:
-        return content
-
-    value = re.sub(
-        r"(?ms)\n*^## 本轮覆盖边界\s*$.*?(?=^##\s|\Z)",
-        "\n",
-        content,
-    ).strip()
-    section = (
-        "## 本轮覆盖边界\n\n"
-        "本期结论只覆盖已经完成检索与研究判断的材料。"
-        + "；".join(issues)
-        + "。这些缺口不能被解释为对应领域没有新进展。"
-    )
-    insertion = re.search(
-        r"(?m)^## (?:关键人物与公开联系入口|原文与一手资料|接下来真正值得盯的信号)\s*$",
-        value,
-    )
-    if insertion:
-        return (
-            value[: insertion.start()].rstrip()
-            + "\n\n"
-            + section
-            + "\n\n"
-            + value[insertion.start() :].lstrip()
-        )
-    return value + "\n\n" + section
+    """Coverage defects belong in failure audit, not a formal research memo."""
+    require_completed_research(stats, content=content)
+    return content
 
 
 def _editorial_body(content: str) -> str:

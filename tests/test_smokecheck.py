@@ -263,7 +263,9 @@ class SmokeCheckContractTests(unittest.TestCase):
         self.assertIn("响应契约正常", detail)
         self.assertEqual(client.get.await_count, 1)
         params = client.get.await_args.kwargs["params"]
-        self.assertEqual(params["query"], "machine learning")
+        self.assertEqual(params["term"], "machine learning")
+        self.assertEqual(params["group"], "ICLR.cc/2026/Conference")
+        self.assertNotIn("sort", params)
         self.assertEqual(params["limit"], 1)
         self.assertEqual(params["offset"], 0)
 

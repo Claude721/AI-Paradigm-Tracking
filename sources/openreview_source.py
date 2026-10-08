@@ -96,42 +96,48 @@ class OpenReviewSource:
                     )
                 offset = 0
                 notes: list[dict] = []
+                seen_pages: set[tuple[str, ...]] = set()
                 while True:
                     params = {
-                        # /notes 目前可能要求浏览器 Challenge；官方 search
-                        # 端点仍允许公开检索，并支持 venueid 过滤。
-                        "query": query,
-                        "venueid": venue,
+                        # Match the public API v2 SDK search_notes contract.
+                        # query/venueid/sort/details belong to other contracts;
+                        # search_notes exposes term/content/group/source.
+                        "term": query,
+                        "content": "all",
+                        "group": venue,
+                        "source": "all",
                         # limit 是 API 传输页大小，不是候选上限。
                         "limit": self.limit,
                         "offset": offset,
-                        # tmdate 是最后讨论/修改时间，会让数年前的
-                        # 投稿因新回复被伪装成本周论文。原点召回必须
-                        # 以投稿创建时间 cdate 排序和截断。
-                        "sort": "cdate:desc",
-                        "details": "replyCount",
                     }
                     response = await self._get_with_backoff(client, params)
-                    page = response.json().get("notes", [])
-                    dated = []
+                    payload = response.json()
+                    if not isinstance(payload, dict) or "notes" not in payload:
+                        raise ValueError("OpenReview search response is missing notes")
+                    page = payload["notes"]
+                    if not isinstance(page, list):
+                        raise ValueError("OpenReview search notes must be a list")
+                    signature = tuple(str(note.get("id", "")) for note in page)
+                    if page and signature in seen_pages:
+                        raise ValueError("OpenReview search repeated a page; offset did not advance")
+                    seen_pages.add(signature)
                     for note in page:
+                        if not _note_matches_venue(note, venue):
+                            self.relevance_filtered_count += 1
+                            continue
                         submitted = _submission_timestamp(note)
                         if not submitted:
                             self.undated_filtered_count += 1
                             continue
-                        dated.append(submitted)
                         if submitted < cutoff_ms:
                             continue
                         if not _note_matches_query(note, query):
                             self.relevance_filtered_count += 1
                             continue
                         notes.append(note)
-                    if (
-                        len(page) < self.limit
-                        or not page
-                        or any(value < cutoff_ms for value in dated)
-                        or not dated
-                    ):
+                    # Search order is not a verified creation-date order. Old
+                    # or undated hits cannot justify skipping later pages.
+                    if len(page) < self.limit:
                         break
                     offset += self.limit
                 return notes
@@ -190,7 +196,7 @@ class OpenReviewSource:
                         else "",
                         authors=list(authors) if isinstance(authors, list) else [],
                         organization=venue,
-                        metrics={"review_replies": reply_count},
+                        metrics={"review_replies": reply_count} if "replyCount" in details else {},
                         identifiers={"openreview": note_id},
                         raw={
                             "author_openreview_ids": author_ids,
@@ -241,7 +247,9 @@ class OpenReviewSource:
     def coverage(self) -> dict[str, int | str]:
         return {
             "status": (
-                "not_executed"
+                "not_configured"
+                if not self.venues
+                else "not_executed"
                 if not self.completed_queries
                 and not self.failed_queries
                 and not self.not_executed_queries
@@ -276,6 +284,21 @@ def _value(value):
     if isinstance(value, dict) and "value" in value:
         return value["value"]
     return value
+
+
+def _note_matches_venue(note: dict, venue: str) -> bool:
+    """A broad search hit or reply is not a configured-venue submission."""
+    note_id, forum = note.get("id"), note.get("forum")
+    if forum and forum != note_id:
+        return False
+    content = note.get("content") or {}
+    declared = _value(content.get("venueid")) or note.get("domain") or ""
+    if declared:
+        return str(declared) == venue or str(declared).startswith(venue + "/")
+    return any(
+        str(invitation).startswith(venue + "/-/")
+        for invitation in (note.get("invitations") or [])
+    )
 
 
 def _submission_timestamp(note: dict) -> int:

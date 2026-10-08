@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 import config
+from paradigms.completion import ResearchNotCompleteError
+from tests.completion_fixtures import COMPLETED_RESEARCH
 from agents.paradigm_orchestrator import ParadigmOrchestrator, _apply_safety_limit
 from agents.llm_utils import parse_json_object
 from database.paradigm_store import ParadigmStore
@@ -1488,7 +1490,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = asyncio.run(
                 ParadigmReportGenerator(directory, client=client, model="test").generate(
-                    [item], {"origin_count": 1}
+                    [item], {**COMPLETED_RESEARCH, "origin_count": 1}
                 )
             )
             content = path.read_text(encoding="utf-8")
@@ -1562,7 +1564,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             path = asyncio.run(
                 ParadigmReportGenerator(
                     directory, client=client, model="test"
-                ).generate([item], {"origin_count": 1})
+                ).generate([item], {**COMPLETED_RESEARCH, "origin_count": 1})
             )
             content = path.read_text(encoding="utf-8")
 
@@ -1652,7 +1654,7 @@ class ParadigmPipelineTests(unittest.TestCase):
                     directory, client=client, model="test"
                 ).generate(
                     [first, second],
-                    {"origin_count": 52},
+                    {**COMPLETED_RESEARCH, "origin_count": 52},
                     save_route_fragment=fragments.__setitem__,
                 )
             )
@@ -1845,36 +1847,17 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         self.assertFalse(_valid_editorial_report(report + f"\n\n{english}", [item]))
 
-    def test_incomplete_memo_gets_opening_scope_and_rejects_absolute_claims(self) -> None:
-        memo = (
-            "本期完成样本显示一些研究正在改变状态更新接口，但外部承接仍然有限。"
-            * 10
-        )
-        content = (
-            "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
-            f"{memo}\n\n## 接下来真正值得盯的信号\n\n观察独立复现。"
-        )
-        scoped = _attach_research_scope_boundary(
-            content,
-            {
-                "research_incomplete": True,
-                "pending_work_count": 88,
-                "planned_analysis_count": 100,
-                "analysis_completed_count": 12,
-            },
-        )
-        self.assertIn("阶段性研究范围", scoped)
-        self.assertIn("12/100", scoped)
-        self.assertIn("当前已完成判断样本中的候选信号", scoped)
-        overclaimed = scoped.replace(
-            "本期完成样本显示一些研究",
-            "这是真正意义上的新范式，研究",
-            1,
-        )
-        self.assertTrue(
-            any("确定新范式" in value for value in _editorial_violations(overclaimed, []))
-        )
-
+    def test_incomplete_memo_is_rejected_instead_of_getting_scope_disclaimer(self) -> None:
+        content = "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n研究结论。"
+        with self.assertRaises(ResearchNotCompleteError):
+            _attach_research_scope_boundary(
+                content, {**COMPLETED_RESEARCH, "pending_work_count": 88}
+            )
+        self.assertTrue(any(
+            "阶段性" in value for value in _editorial_violations(
+                content + "\n\n> **阶段性研究范围：** 本轮只完成部分研究。", []
+            )
+        ))
     def test_report_gate_parses_memo_before_level_three_route_heading(self) -> None:
         item = candidate()
         memo = "本期从旧系统的运行边界出发，解释新机制改变了什么关键接口以及为什么值得继续观察。" * 14
@@ -2036,7 +2019,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             generator = ParadigmReportGenerator(directory, client=client, model="test")
             with self.assertRaises(RuntimeError):
-                asyncio.run(generator.generate([item], {"origin_count": 1}))
+                asyncio.run(generator.generate([item], {**COMPLETED_RESEARCH, "origin_count": 1}))
             self.assertEqual(list(Path(directory).glob("*.md")), [])
 
     def test_presentation_target_is_advisory_without_full_rewrite(self) -> None:
@@ -2080,7 +2063,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             path = asyncio.run(
                 ParadigmReportGenerator(
                     directory, client=client, model="test"
-                ).generate([item], {"origin_count": 1})
+                ).generate([item], {**COMPLETED_RESEARCH, "origin_count": 1})
             )
             content = path.read_text(encoding="utf-8")
         self.assertEqual(client.chat.completions.create.await_count, 2)
@@ -2102,54 +2085,20 @@ class ParadigmPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             generator = ParadigmReportGenerator(directory, client=client, model="test")
             with self.assertRaises(RuntimeError):
-                asyncio.run(generator.generate([item], {"origin_count": 1}))
+                asyncio.run(generator.generate([item], {**COMPLETED_RESEARCH, "origin_count": 1}))
             self.assertEqual(list(Path(directory).glob("*.md")), [])
         self.assertEqual(client.chat.completions.create.await_count, 2)
 
-    def test_empty_report_discloses_failed_recall_lane_and_official_page(self) -> None:
-        content = ParadigmReportGenerator._empty_report(
-            "2026-07-28",
-            {
-                "origin_count": 0,
-                "ordinary_discovery_lookback_days": 7,
-                "high_signal_discovery_lookback_days": 60,
-                "frontier_coverage": {
-                    "domains": {},
-                    "recall_lanes": {
-                        "priority_researchers_1": {
-                            "status": "query_failed",
-                            "hits": 0,
-                        }
-                    },
-                    "academic_indexes": {
-                        "openreview": {
-                            "status": "partial",
-                            "queries": 4,
-                            "completed_queries": 3,
-                            "failed_queries": 1,
-                            "requests": 8,
-                            "rate_limited_requests": 2,
-                            "results": 5,
-                        }
-                    },
-                    "official_pages": {
-                        "total_pages": 2,
-                        "checked_pages": 2,
-                        "request_failed": 1,
-                        "parse_zero_links": 0,
-                        "detail_failures": 0,
-                    },
-                },
-            },
-        )
-        self.assertIn("本期研究 Memo", content)
-        self.assertIn("覆盖受限条件下没有可交付信号", content)
-        self.assertIn("priority_researchers_1", content)
-        self.assertIn("openreview=partial", content)
-        self.assertIn("官方入口", content)
-        self.assertIn("普通发现 7 天", content)
-        self.assertIn("高信号回补 60 天", content)
-
+    def test_empty_report_rejects_failed_recall_lane_and_official_page(self) -> None:
+        for frontier in (
+            {"recall_lanes": {"priority_researchers_1": {"status": "query_failed"}}},
+            {"academic_indexes": {"openreview": {"status": "partial"}}},
+            {"official_pages": {"total_pages": 2, "checked_pages": 2, "request_failed": 1}},
+        ):
+            with self.subTest(frontier=frontier), self.assertRaises(ResearchNotCompleteError):
+                ParadigmReportGenerator._empty_report(
+                    "2026-07-28", {**COMPLETED_RESEARCH, "frontier_coverage": frontier}
+                )
     def test_discovery_assigns_long_window_only_to_high_signal_lanes(self) -> None:
         discovery = ParadigmDiscovery(
             broad_lookback_days=7,
@@ -3510,11 +3459,13 @@ class ParadigmPipelineTests(unittest.TestCase):
             )
         call = transport.get.await_args
         self.assertTrue(call.args[0].endswith("/notes/search"))
-        self.assertEqual(call.kwargs["params"]["query"], "world model")
+        self.assertEqual(call.kwargs["params"]["term"], "world model")
         self.assertEqual(
-            call.kwargs["params"]["venueid"], "ICLR.cc/2026/Conference"
+            call.kwargs["params"]["group"], "ICLR.cc/2026/Conference"
         )
-        self.assertEqual(call.kwargs["params"]["sort"], "cdate:desc")
+        self.assertNotIn("sort", call.kwargs["params"])
+        self.assertNotIn("details", call.kwargs["params"])
+        self.assertNotIn("venueid", call.kwargs["params"])
 
     def test_openreview_uses_submission_date_and_filters_weak_search_hits(self) -> None:
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)

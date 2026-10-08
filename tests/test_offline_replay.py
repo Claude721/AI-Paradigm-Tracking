@@ -421,7 +421,7 @@ class OfflineReplayTests(unittest.IsolatedAsyncioTestCase):
                     results.append(await orchestrator.run(reference_time=reference))
 
             first, second, third = results
-            self.assertEqual(first["result_kind"], "research_incomplete")
+            self.assertEqual(first["result_kind"], "research_blocked")
             self.assertEqual(first["work_queue_after"]["pending_origin_count"], 3)
             self.assertEqual(first["pending_queue_net_change"], 3)
             self.assertEqual(second["result_kind"], "complete_no_signal")

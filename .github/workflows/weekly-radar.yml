@@ -236,7 +236,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_only }}
         run: python main.py --smoke-test
 
-      - name: 抓取、分析并发送邮件
+      - name: 抓取、分析并在研究全部闭合后发送邮件
         id: pipeline
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
         run: |

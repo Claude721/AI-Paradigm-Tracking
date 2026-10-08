@@ -570,12 +570,12 @@ async def _openreview() -> tuple[int, str]:
                 response = await client.get(
                     "https://api2.openreview.net/notes/search",
                     params={
-                        "query": "machine learning",
-                        "venueid": venue,
+                        "term": "machine learning",
+                        "content": "all",
+                        "group": venue,
+                        "source": "all",
                         "limit": 1,
                         "offset": 0,
-                        "sort": "tmdate:desc",
-                        "details": "replyCount",
                     },
                 )
                 response.raise_for_status()

@@ -197,6 +197,7 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
     """渲染并投递一个持久化 outbox 任务，不重新执行研究。"""
 
     from notifications.email_notifier import send_report_email
+    from paradigms.completion import ResearchNotCompleteError, require_completed_research
     from run_audit import run_audit
 
     stats = dict(job.stats)
@@ -211,6 +212,23 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
         )
         stats.update(run_audit.write(stats, status="duplicate_skipped"))
         stats["email_sent"] = False
+        return stats
+
+    try:
+        require_completed_research(stats, content=job.report_content, candidates=job.candidates)
+    except ResearchNotCompleteError as exc:
+        store.quarantine_report_job(
+            job.delivery_key, exc, failure_kind="research_not_complete",
+            requeue_candidates=False,
+        )
+        stats.update({
+            "delivery_quarantined": True,
+            "delivery_failure_kind": "research_not_complete",
+            "delivery_last_error": str(exc),
+            "result_kind": "research_blocked", "email_sent": False,
+        })
+        run_audit.event("report_outbox", "quarantined", str(exc))
+        stats.update(run_audit.write(stats, status="delivery_rejected"))
         return stats
 
     report_path = generator.output_dir / job.report_name
@@ -349,10 +367,6 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
         status=(
             "recovered_delivery"
             if recovered
-            else "completed_with_backlog"
-            if stats.get("research_incomplete", stats.get("run_incomplete"))
-            else "completed_coverage_limited"
-            if stats.get("coverage_incomplete")
             else "completed"
         ),
     )
@@ -449,7 +463,7 @@ async def _run_pipeline_once() -> dict:
                 ),
             }
             logger.warning(
-                "历史交付 %s 已隔离并退回深挖队列；本轮继续执行新研究",
+                "历史交付 %s 已隔离，研究快照已保留；本轮继续执行新研究",
                 pending_job.delivery_key[:12],
             )
 
@@ -457,12 +471,26 @@ async def _run_pipeline_once() -> dict:
     if config.PIPELINE_MODE != "legacy" and quarantined_recovery:
         stats.update(quarantined_recovery)
     if config.PIPELINE_MODE != "legacy":
-        report_date = stats.get("report_date") or scheduled_date()
-        job = orchestrator.store.enqueue_report(
-            orchestrator.pending_delivery,
-            stats,
-            report_date=report_date,
-        )
+        from paradigms.completion import ResearchNotCompleteError, require_completed_research
+
+        try:
+            require_completed_research(stats)
+            report_date = stats.get("report_date") or scheduled_date()
+            job = orchestrator.store.enqueue_report(
+                orchestrator.pending_delivery, stats, report_date=report_date,
+            )
+        except ResearchNotCompleteError as exc:
+            stats.update({
+                "result_kind": "research_blocked", "email_sent": False,
+                "delivery_failure_kind": "research_not_complete",
+                "delivery_blocking_reasons": exc.violations,
+                "delivery_last_error": str(exc),
+            })
+            run_audit.checkpoint(stats)
+            run_audit.event("research_completion_gate", "failed", str(exc))
+            run_audit.write(stats, status="research_blocked")
+            _write_pipeline_result(stats)
+            raise
         delivery_result = await _deliver_paradigm_job(
             orchestrator.store,
             generator,
@@ -525,7 +553,7 @@ async def run_pipeline() -> dict:
 
 
 def _write_pipeline_result(result: dict) -> Path:
-    """Write a non-secret workflow hand-off marker after a successful run."""
+    """Write a non-secret workflow marker, including blocked research runs."""
 
     output = Path("logs/pipeline_result.json")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -535,18 +563,21 @@ def _write_pipeline_result(result: dict) -> Path:
         result.get("research_incomplete", result.get("run_incomplete", False))
     )
     coverage_incomplete = bool(result.get("coverage_incomplete"))
+    from paradigms.completion import research_completion_violations
     payload = {
         "runtime": runtime_provenance(),
         "recovered_delivery_only": recovered_only,
         "fresh_research_executed": research_executed,
         "fresh_research_completed": bool(
-            research_executed and not research_incomplete and not coverage_incomplete
+            research_executed and not research_completion_violations(result)
+            and not result.get("delivery_quarantined")
         ),
         "research_incomplete": research_incomplete,
         "coverage_incomplete": coverage_incomplete,
         "pending_work_count": int(result.get("pending_work_count", 0) or 0),
         "delivery_quarantined": bool(result.get("delivery_quarantined")),
         "delivery_failure_kind": str(result.get("delivery_failure_kind", "")),
+        "delivery_blocking_reasons": result.get("delivery_blocking_reasons", []),
         "recovered_delivery_quarantined": bool(
             result.get("recovered_delivery_quarantined")
         ),
@@ -591,18 +622,17 @@ async def _regenerate_report_once() -> dict:
                 "--report 发现待交付任务 %s，优先复用研究快照/报告制品续投",
                 pending_job.delivery_key[:12],
             )
-            return await _deliver_paradigm_job(
+            result = await _deliver_paradigm_job(
                 store, generator, pending_job, recovered=True
             )
-        candidates = store.latest_reported_candidates()
-        stats = store.stats()
-        stats["new_paradigms"] = sum(
-            item.report_kind == "new" for item in candidates
-        )
-        stats["updated_paradigms"] = sum(
-            item.report_kind == "update" for item in candidates
-        )
-        report_path = await generator.generate(candidates, stats)
+            if result.get("delivery_quarantined"):
+                raise RuntimeError("旧报告未满足当前完整交付契约，已隔离；请先完成正式研究")
+            return result
+        job = store.latest_completed_report_job()
+        if job is None:
+            raise RuntimeError("没有已闭合的历史报告可重生成；请先完成正式研究")
+        candidates, stats = job.candidates, dict(job.stats)
+        report_path = await generator.generate(candidates, stats, report_date=job.report_date)
     logger.info(f"报告已重新生成: {report_path}")
     from notifications.email_notifier import send_report_email
     stats["report_path"] = str(report_path)

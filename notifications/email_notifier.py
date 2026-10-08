@@ -13,6 +13,7 @@ from pathlib import Path
 
 import config
 from runtime_clock import scheduled_date
+from paradigms.completion import require_completed_research
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ async def send_report_email(
     delivery_key: str = "",
 ) -> bool:
     """发送报告附件；必需投递模式下失败会让任务明确失败。"""
+    if report_path.stem.startswith("paradigm_radar_") or delivery_key or stats.get("pipeline_mode") == "paradigm":
+        require_completed_research(stats)
     if not config.EMAIL_PUSH_ENABLED:
         logger.info("邮件推送未启用，报告仅保存在本地")
         return False
@@ -103,38 +106,23 @@ def _send_sync(
             f"{len(content_bytes)} > {config.EMAIL_MAX_ATTACHMENT_BYTES} bytes"
         )
     sender = config.SMTP_FROM or config.SMTP_USERNAME
-    is_paradigm = report_path.stem.startswith("paradigm_radar_")
+    is_paradigm = bool(
+        report_path.stem.startswith("paradigm_radar_")
+        or delivery_key or stats.get("pipeline_mode") == "paradigm"
+    )
+    if is_paradigm:
+        require_completed_research(stats, content=content)
     report_date = report_path.stem.removeprefix(
         "paradigm_radar_" if is_paradigm else "deal_flow_"
     )
 
     message = EmailMessage()
     if is_paradigm:
-        research_incomplete = bool(
-            stats.get("research_incomplete", stats.get("run_incomplete"))
+        message["Subject"] = (
+            f"AI 技术范式雷达｜{report_date}｜"
+            f"{stats.get('new_paradigms', 0)} 个新范式 + "
+            f"{stats.get('updated_paradigms', 0)} 个进展"
         )
-        coverage_incomplete = bool(
-            stats.get("coverage_incomplete")
-            or stats.get("recall_coverage_incomplete")
-        )
-        if research_incomplete:
-            message["Subject"] = (
-                f"[阶段性研究] AI 技术范式雷达｜{report_date}｜"
-                f"已交付 {stats.get('high_value_count', 0)} 条，"
-                f"待续研 {stats.get('pending_work_count', 0)} 项"
-            )
-        elif coverage_incomplete:
-            message["Subject"] = (
-                f"[覆盖受限] AI 技术范式雷达｜{report_date}｜"
-                f"{stats.get('new_paradigms', 0)} 个新信号 + "
-                f"{stats.get('updated_paradigms', 0)} 个进展"
-            )
-        else:
-            message["Subject"] = (
-                f"AI 技术范式雷达｜{report_date}｜"
-                f"{stats.get('new_paradigms', 0)} 个新范式 + "
-                f"{stats.get('updated_paradigms', 0)} 个进展"
-            )
     else:
         message["Subject"] = (
             f"AI Sourcing 周报｜{report_date}｜"
@@ -149,15 +137,7 @@ def _send_sync(
         )
         message["X-AI-Radar-Delivery-Key"] = delivery_key
     if is_paradigm:
-        status_line = (
-            "本轮仍有研究事务待续跑；附件是阶段性 memo，结论只覆盖已完成"
-            "判断的样本，不能把 0 条交付理解为本周没有重要技术。"
-            if research_incomplete
-            else "本轮研究判断已完成，但部分召回入口覆盖受限；附件已明确"
-            "列出边界，空结果不能外推到未覆盖领域。"
-            if coverage_incomplete
-            else "AI 技术范式雷达本期研究与交付已完成。"
-        )
+        status_line = "AI 技术范式雷达本期研究与交付已完成。"
         body = (
             status_line
             + "\n\n"
@@ -167,7 +147,7 @@ def _send_sync(
             f"实质进展更新：{stats.get('updated_paradigms', 0)}\n\n"
             f"本轮完成机制抽取：{stats.get('analysis_completed_count', stats.get('analysis_count', 0))}/"
             f"{stats.get('planned_analysis_count', 0)}\n"
-            f"留待后续运行：{stats.get('pending_work_count', 0)} 项\n\n"
+            "本期计划研究事务已全部闭合。\n\n"
             f"LLM 调用：{stats.get('llm_call_count', 0)} 次\n"
             f"LLM 合计 tokens：{stats.get('llm_total_tokens', 0)}\n\n"
             "完整证据、人物轨迹、公开专业联系方式和运行审计见附件。"

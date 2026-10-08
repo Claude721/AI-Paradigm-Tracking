@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, Mock, patch
 import config
 import main as app_main
 import setup_env
+from paradigms.completion import ResearchNotCompleteError
+from tests.completion_fixtures import COMPLETED_RESEARCH
 from agents.paradigm_orchestrator import (
     ParadigmOrchestrator,
     _delivery_primary_source_ready,
@@ -902,7 +904,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
     def test_report_outbox_preserves_research_and_commits_delivery_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ParadigmStore(Path(directory) / "radar.db")
-            evidence = _origin("2608.00005")
+            evidence = store.observe_origins([_origin("2608.00005")])[0][0]
             candidate = ParadigmCandidate(
                 key="durable-route",
                 name="Durable route",
@@ -915,7 +917,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             store.save_candidates([candidate])
             job = store.enqueue_report(
                 [candidate],
-                {"origin_count": 1, "new_paradigms": 1},
+                {**COMPLETED_RESEARCH, "origin_count": 1, "new_paradigms": 1},
                 report_date="2026-08-09",
             )
 
@@ -974,7 +976,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             )
             store.save_candidates([candidate])
             job = store.enqueue_report(
-                [candidate], {"new_paradigms": 1}, report_date="2026-08-09"
+                [candidate], {**COMPLETED_RESEARCH, "new_paradigms": 1}, report_date="2026-08-09"
             )
             report_path = Path(directory) / job.report_name
 
@@ -1061,7 +1063,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             )
             store.save_candidates([candidate])
             job = store.enqueue_report(
-                [candidate], {"new_paradigms": 1}, report_date="2026-08-16"
+                [candidate], {**COMPLETED_RESEARCH, "new_paradigms": 1}, report_date="2026-08-16"
             )
 
             migrate_state(
@@ -1100,7 +1102,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             )
             store.save_candidates([candidate])
             job = store.enqueue_report(
-                [candidate], {"new_paradigms": 1}, report_date="2026-08-16"
+                [candidate], {**COMPLETED_RESEARCH, "new_paradigms": 1}, report_date="2026-08-16"
             )
             store.begin_render_attempt(job.delivery_key)
             store.begin_render_attempt(job.delivery_key)
@@ -1149,7 +1151,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             )
             store.save_candidates([candidate])
             job = store.enqueue_report(
-                [candidate], {"new_paradigms": 1}, report_date="2026-08-16"
+                [candidate], {**COMPLETED_RESEARCH, "new_paradigms": 1}, report_date="2026-08-16"
             )
             generator = SimpleNamespace(
                 output_dir=Path(directory),
@@ -1234,7 +1236,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
         orchestrator = SimpleNamespace(
             store=store,
             pending_delivery=[],
-            run=AsyncMock(return_value={"result_kind": "complete_no_signal"}),
+            run=AsyncMock(return_value={**COMPLETED_RESEARCH, "result_kind": "complete_no_signal"}),
         )
         generator = SimpleNamespace()
         delivery = AsyncMock(
@@ -1281,7 +1283,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
         orchestrator = SimpleNamespace(
             store=store,
             pending_delivery=[],
-            run=AsyncMock(return_value={"result_kind": "complete_no_signal"}),
+            run=AsyncMock(return_value={**COMPLETED_RESEARCH, "result_kind": "complete_no_signal"}),
         )
         generator = SimpleNamespace()
         delivery = AsyncMock(
@@ -1373,7 +1375,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             )
             store.save_candidates([candidate])
             job = store.enqueue_report(
-                [candidate], {"new_paradigms": 1}, report_date="2026-08-09"
+                [candidate], {**COMPLETED_RESEARCH, "new_paradigms": 1}, report_date="2026-08-09"
             )
             report_path = Path(directory) / job.report_name
 
@@ -1445,7 +1447,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             )
             store.save_candidates([item])
             job = store.enqueue_report(
-                [item], {"new_paradigms": 1}, report_date="2026-08-09"
+                [item], {**COMPLETED_RESEARCH, "new_paradigms": 1}, report_date="2026-08-09"
             )
             store.save_rendered_report(job.delivery_key, "# stale report")
             pending = store.load_pending_report_job()
@@ -1485,28 +1487,26 @@ class ExecutionReliabilityTests(unittest.TestCase):
             self.assertEqual(generator.generate.await_count, 1)
             self.assertIsNone(store.load_pending_report_job())
 
-    def test_empty_outbox_key_changes_when_coverage_materially_changes(self) -> None:
+    def test_empty_outbox_rejects_incomplete_results_and_deduplicates_closed_results(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ParadigmStore(Path(directory) / "radar.db")
+            with self.assertRaises(ResearchNotCompleteError):
+                store.enqueue_report(
+                    [], {**COMPLETED_RESEARCH, "run_incomplete": True, "pending_work_count": 5},
+                    report_date="2026-08-09",
+                )
+            self.assertIsNone(store.load_pending_report_job())
             first = store.enqueue_report(
-                [],
-                {"origin_count": 0, "run_incomplete": True, "pending_work_count": 5},
-                report_date="2026-08-09",
+                [], {**COMPLETED_RESEARCH, "origin_count": 0}, report_date="2026-08-09"
             )
             duplicate = store.enqueue_report(
-                [],
-                {"origin_count": 0, "run_incomplete": True, "pending_work_count": 5},
-                report_date="2026-08-09",
+                [], {**COMPLETED_RESEARCH, "origin_count": 0}, report_date="2026-08-09"
             )
             completed = store.enqueue_report(
-                [],
-                {"origin_count": 10, "run_incomplete": False, "pending_work_count": 0},
-                report_date="2026-08-09",
+                [], {**COMPLETED_RESEARCH, "origin_count": 10}, report_date="2026-08-09"
             )
-
         self.assertEqual(first.delivery_key, duplicate.delivery_key)
         self.assertNotEqual(first.delivery_key, completed.delivery_key)
-
     def test_identity_seed_alone_does_not_satisfy_person_delivery_contract(self) -> None:
         item = ParadigmCandidate(
             key="person-contract",
@@ -2031,61 +2031,15 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(source.fetch_error, "AllFeedsMissing")
         self.assertEqual(source.missing_feeds, 3)
 
-    def test_empty_report_discloses_runtime_backlog(self) -> None:
-        content = ParadigmReportGenerator._empty_report(
-            "2026-08-03",
-            {
-                "origin_count": 100,
-                "planned_analysis_count": 100,
-                "analysis_count": 12,
-                "analysis_deferred_count": 88,
-                "candidate_deferred_count": 0,
-                "refresh_deferred_count": 0,
-                "pending_work_count": 88,
-            },
-        )
-        self.assertIn("尚未完成研究判断的执行积压", content)
-        self.assertIn("不能解释为近期没有新范式", content)
-        self.assertNotIn("100 篇论文、Technical Report 与官方技术博客，但没有材料", content)
-
-    def test_empty_report_discloses_timed_out_discovery_source(self) -> None:
-        content = ParadigmReportGenerator._empty_report(
-            "2026-08-15",
-            {
-                "origin_count": 0,
-                "recall_coverage_incomplete": True,
-                "frontier_coverage": {
-                    "source_health": {
-                        "huggingface-papers": {
-                            "status": "timed_out",
-                            "results": 0,
-                        }
-                    }
-                },
-            },
-        )
-        self.assertIn("发现源：huggingface-papers=timed_out", content)
-        self.assertIn("召回覆盖未闭合", content)
-
-    def test_empty_report_discloses_partially_failed_discovery_source(self) -> None:
-        content = ParadigmReportGenerator._empty_report(
-            "2026-08-15",
-            {
-                "origin_count": 0,
-                "recall_coverage_incomplete": True,
-                "frontier_coverage": {
-                    "source_health": {
-                        "research-blog": {
-                            "status": "partial",
-                            "results": 3,
-                        }
-                    }
-                },
-            },
-        )
-        self.assertIn("发现源：research-blog=partial", content)
-        self.assertIn("召回覆盖未闭合", content)
-
+    def test_empty_report_rejects_runtime_backlog(self) -> None:
+        with self.assertRaises(ResearchNotCompleteError):
+            ParadigmReportGenerator._empty_report("2026-08-15", {**COMPLETED_RESEARCH, "pending_work_count": 88})
+    def test_empty_report_rejects_timed_out_discovery_source(self) -> None:
+        with self.assertRaises(ResearchNotCompleteError):
+            ParadigmReportGenerator._empty_report("2026-08-15", {**COMPLETED_RESEARCH, "frontier_coverage": {"source_health": {"fixture": {"status": "timed_out"}}}})
+    def test_empty_report_rejects_partially_failed_discovery_source(self) -> None:
+        with self.assertRaises(ResearchNotCompleteError):
+            ParadigmReportGenerator._empty_report("2026-08-15", {**COMPLETED_RESEARCH, "frontier_coverage": {"source_health": {"fixture": {"status": "partial"}}}})
     def test_failure_notification_does_not_require_a_report(self) -> None:
         with (
             patch.object(config, "EMAIL_PUSH_ENABLED", True),

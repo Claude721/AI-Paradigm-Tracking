@@ -25,6 +25,7 @@ from paradigms.models import (
     technical_evidence_from_dict,
 )
 from paradigms.researcher_identity import merge_researcher_profiles
+from paradigms.completion import ResearchNotCompleteError, require_completed_research
 
 logger = logging.getLogger(__name__)
 
@@ -622,6 +623,20 @@ class ParadigmStore:
         creating another email after a renderer or SMTP failure.
         """
 
+        require_completed_research(stats, candidates=candidates)
+        # Verify the durable queue too, not merely the caller's summary flags.
+        with self.transaction():
+            require_completed_research({
+                **stats,
+                "work_queue_after": self.work_queue_snapshot(reference_time=datetime.now(timezone.utc)),
+            })
+            if any(not self.candidate_inputs_current(item) for item in candidates):
+                raise ResearchNotCompleteError(["候选一手来源版本与当前研究记录不一致"])
+            return self._enqueue_completed_report(candidates, stats, report_date=report_date)
+
+    def _enqueue_completed_report(
+        self, candidates: list[ParadigmCandidate], stats: dict, *, report_date: str,
+    ) -> ReportOutboxJob:
         candidates = [_persistable_candidate(item) for item in candidates]
 
         report_name = f"paradigm_radar_{report_date}.md"
@@ -632,9 +647,7 @@ class ParadigmStore:
                 for candidate in candidates
             ),
         }
-        # 空报告同样是一项研究结果，但同一天可能先经历一次覆盖不完整的
-        # 运行、随后又完成补跑。没有候选签名可区分这两种结果时，把覆盖和
-        # backlog 摘要纳入幂等键；完全相同的重跑仍不会重复发信。
+        # 完整空报告同样是一项研究结果；不同完整召回结果使用不同幂等键。
         if not candidates:
             identity["empty_result_basis"] = {
                 key: stats.get(key)
@@ -743,6 +756,26 @@ class ParadigmStore:
                 """
             ).fetchone()
         return _report_job_from_row(row) if row else None
+
+    def latest_completed_report_job(self) -> ReportOutboxJob | None:
+        """Historical regeneration uses the original closed run, not today's stats."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT delivery_key, report_date, report_name, status,
+                       candidate_payload_json, stats_json, report_content,
+                       attempt_count, render_attempt_count, last_error,
+                       failure_kind, quarantined_at
+                FROM report_outbox WHERE status='delivered'
+                ORDER BY delivered_at DESC, created_at DESC"""
+            ).fetchall()
+        for row in rows:
+            job = _report_job_from_row(row)
+            try:
+                require_completed_research(job.stats, content=job.report_content, candidates=job.candidates)
+            except ResearchNotCompleteError:
+                continue
+            return job
+        return None
 
     def save_rendered_report(self, delivery_key: str, content: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -875,6 +908,7 @@ class ParadigmStore:
         error: Exception | str,
         *,
         failure_kind: str,
+        requeue_candidates: bool = True,
     ) -> None:
         """Isolate an unrecoverable snapshot and atomically requeue its research.
 
@@ -899,6 +933,12 @@ class ParadigmStore:
                 for value in json.loads(row[0])
             ]
             for candidate in candidates:
+                if not requeue_candidates and conn.execute(
+                    "SELECT 1 FROM paradigms WHERE paradigm_key=?", (candidate.key,)
+                ).fetchone() is not None:
+                    # Retiring an old partial delivery must not overwrite newer
+                    # research. Recreate only an otherwise missing snapshot.
+                    continue
                 candidate.status = "pending_deep"
                 payload = json.dumps(
                     candidate.to_dict(),
@@ -963,7 +1003,7 @@ class ParadigmStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT candidate_payload_json FROM report_outbox
+                SELECT candidate_payload_json, stats_json, report_content FROM report_outbox
                 WHERE delivery_key=?
                 """,
                 (delivery_key,),
@@ -973,6 +1013,7 @@ class ParadigmStore:
             candidates = [
                 candidate_from_dict(value) for value in json.loads(row[0])
             ]
+            require_completed_research(json.loads(row[1]), content=row[2], candidates=candidates)
             for candidate in candidates:
                 self._mark_candidate_reported(
                     conn,

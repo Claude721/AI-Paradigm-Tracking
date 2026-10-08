@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 from apscheduler.triggers.cron import CronTrigger
 
 import config
+from paradigms.completion import ResearchNotCompleteError
+from tests.completion_fixtures import COMPLETED_RESEARCH
 import main as app_main
 from agents.sourcing_agent import SourcingAgent
 from notifications.email_notifier import _send_sync, send_report_email
@@ -121,67 +123,22 @@ class WeeklyPipelineTests(unittest.TestCase):
                 message.get_payload()[2].get_filename(), audit.name
             )
 
-    def test_incomplete_research_email_cannot_masquerade_as_empty_week(self) -> None:
+    def test_incomplete_research_email_is_not_sent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "paradigm_radar_2026-08-09.md"
-            report.write_text("# 研究未完成状态", encoding="utf-8")
-            with (
-                patch.object(config, "SMTP_HOST", "smtp.example.com"),
-                patch.object(config, "SMTP_PORT", 465),
-                patch.object(config, "SMTP_USERNAME", "sender@example.com"),
-                patch.object(config, "SMTP_PASSWORD", "app-password"),
-                patch.object(config, "SMTP_FROM", "sender@example.com"),
-                patch.object(config, "SMTP_TO", ["receiver@example.com"]),
-                patch.object(config, "SMTP_USE_SSL", True),
-                patch("notifications.email_notifier.smtplib.SMTP_SSL") as smtp,
-            ):
-                _send_sync(
-                    report,
-                    {
-                        "run_incomplete": True,
-                        "pending_work_count": 88,
-                        "high_value_count": 0,
-                    },
-                )
-
-            message = (
-                smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
-            )
-            self.assertIn("[阶段性研究]", message["Subject"])
-            self.assertIn("不能把 0 条交付理解", message.get_body().get_content())
-
-    def test_coverage_limited_email_is_not_labeled_as_research_backlog(self) -> None:
+            report.write_text("# 未完成的旧报告", encoding="utf-8")
+            with patch("notifications.email_notifier.smtplib.SMTP_SSL") as smtp:
+                with self.assertRaises(ResearchNotCompleteError):
+                    _send_sync(report, {**COMPLETED_RESEARCH, "run_incomplete": True, "pending_work_count": 88})
+                smtp.assert_not_called()
+    def test_coverage_limited_email_is_not_sent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "paradigm_radar_2026-08-09.md"
-            report.write_text("# 覆盖受限报告", encoding="utf-8")
-            with (
-                patch.object(config, "SMTP_HOST", "smtp.example.com"),
-                patch.object(config, "SMTP_PORT", 465),
-                patch.object(config, "SMTP_USERNAME", "sender@example.com"),
-                patch.object(config, "SMTP_PASSWORD", "app-password"),
-                patch.object(config, "SMTP_FROM", "sender@example.com"),
-                patch.object(config, "SMTP_TO", ["receiver@example.com"]),
-                patch.object(config, "SMTP_USE_SSL", True),
-                patch("notifications.email_notifier.smtplib.SMTP_SSL") as smtp,
-            ):
-                _send_sync(
-                    report,
-                    {
-                        "research_incomplete": False,
-                        "coverage_incomplete": True,
-                        "pending_work_count": 0,
-                        "new_paradigms": 0,
-                        "updated_paradigms": 0,
-                    },
-                )
-
-            message = (
-                smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
-            )
-            self.assertIn("[覆盖受限]", message["Subject"])
-            self.assertNotIn("[阶段性研究]", message["Subject"])
-            self.assertIn("研究判断已完成", message.get_body().get_content())
-
+            report.write_text("# 未完成的旧报告", encoding="utf-8")
+            with patch("notifications.email_notifier.smtplib.SMTP_SSL") as smtp:
+                with self.assertRaises(ResearchNotCompleteError):
+                    _send_sync(report, {**COMPLETED_RESEARCH, "coverage_incomplete": True})
+                smtp.assert_not_called()
     def test_run_audit_records_usage_and_decisions_without_model_content(self) -> None:
         response = SimpleNamespace(
             usage=SimpleNamespace(
@@ -304,7 +261,7 @@ class WeeklyPipelineTests(unittest.TestCase):
                 ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "邮件发送失败"):
-                    asyncio.run(send_report_email(report, {}))
+                    asyncio.run(send_report_email(report, dict(COMPLETED_RESEARCH)))
 
     def test_failed_pipeline_preserves_completed_checkpoints(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -339,7 +296,7 @@ class WeeklyPipelineTests(unittest.TestCase):
                 patch.object(config, "SMTP_USE_SSL", True),
                 patch("notifications.email_notifier.smtplib.SMTP_SSL") as smtp,
             ):
-                _send_sync(report, {}, delivery_key="delivery-123")
+                _send_sync(report, dict(COMPLETED_RESEARCH), delivery_key="delivery-123")
 
             message = (
                 smtp.return_value.__enter__.return_value.send_message.call_args.args[0]

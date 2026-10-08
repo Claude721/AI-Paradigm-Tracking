@@ -286,6 +286,7 @@ def _quarantine_incompatible_outbox(path: Path) -> None:
 
     from database.paradigm_store import ParadigmStore
     from reports.paradigm_generator import _report_input_violations
+    from paradigms.completion import ResearchNotCompleteError, require_completed_research
 
     store = ParadigmStore(path)
     with sqlite3.connect(path) as connection:
@@ -302,6 +303,14 @@ def _quarantine_incompatible_outbox(path: Path) -> None:
     for delivery_key in keys:
         job = store.get_report_job(delivery_key)
         if job is None:
+            continue
+        try:
+            require_completed_research(job.stats, content=job.report_content, candidates=job.candidates)
+        except ResearchNotCompleteError as exc:
+            store.quarantine_report_job(
+                delivery_key, exc,
+                failure_kind="research_not_complete", requeue_candidates=False,
+            )
             continue
         violations = _report_input_violations(job.candidates)
         if not violations:

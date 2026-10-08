@@ -20,6 +20,7 @@ from paradigms.enrichment import EvidenceEnricher
 from paradigms.discovery import DiscoveryBatch
 from paradigms.models import EvidenceType, ParadigmCandidate, ParadigmExtraction, TechnicalEvidence
 from paradigms.scheduler import ResearchLaneScheduler
+from paradigms.completion import ResearchNotCompleteError
 from run_audit import run_audit
 from runtime_clock import research_window
 from reports.paradigm_generator import ParadigmReportGenerator
@@ -373,6 +374,21 @@ class ResearchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["high_value_count"], 1)
         self.assertEqual(stats["current_window_deep_completed_count"], 1)
         self.assertTrue(stats["research_incomplete"])
+        with self.assertRaises(ResearchNotCompleteError):
+            self.store.enqueue_report(
+                self.orchestrator.pending_delivery, stats, report_date="2026-10-08"
+            )
+        self.assertIsNone(self.store.load_pending_report_job())
+        self.assertEqual(self.store.latest_reported_candidates(), [])
+        # Finish the durable remainder without losing or resynthesizing the
+        # previously ready route; only this closed run can be delivered.
+        self.orchestrator.enricher.refresh = AsyncMock(return_value=[])
+        stats = await self.orchestrator.run(
+            reference_time=datetime(2026, 10, 8, tzinfo=timezone.utc)
+        )
+        self.assertFalse(stats["research_incomplete"])
+        self.assertEqual(stats["high_value_count"], 1)
+        self.assertEqual(stats["work_queue_after"]["pending_total_count"], 0)
         job = self.store.enqueue_report(
             self.orchestrator.pending_delivery, stats, report_date="2026-10-08"
         )
