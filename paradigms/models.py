@@ -882,9 +882,14 @@ class ParadigmExtraction:
     scope_score: float = 0.0
     incremental_penalty: float = 0.0
     rejection_reason: str = ""
+    # Program-owned identity for an indexed report mechanism. A model's prose
+    # rename must not create another execution task for the same seed.
+    mechanism_id: str = ""
 
     @property
     def normalized_key(self) -> str:
+        if self.mechanism_id:
+            return self.mechanism_id
         text = self.canonical_name or self.mechanism or self.evidence.title
         return normalize_paradigm_name(text)
 

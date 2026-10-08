@@ -132,6 +132,13 @@ def research_completion_violations(stats: dict) -> list[str]:
             if failed:
                 label = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(name))[:64]
                 issues.append(f"{section}/{label}={status[:40]}")
+            if section == "academic_indexes" and status not in {"not_configured", "disabled"}:
+                planned = value.get("planned_queries", value.get("queries", 0))
+                try:
+                    if _count(planned) > number(value, "completed_queries") or number(value, "failed_queries") or number(value, "not_executed_queries"):
+                        issues.append(f"academic_indexes/{name} 查询基数未闭合")
+                except (TypeError, ValueError, OverflowError):
+                    issues.append("学术查询计划计数无效")
     for section, planned, checked, failure_keys in (
         ("official_pages", "total_pages", "checked_pages",
          ("request_failed", "parse_zero_links", "detail_failures")),
@@ -142,13 +149,73 @@ def research_completion_violations(stats: dict) -> list[str]:
         if not isinstance(value, dict):
             issues.append(f"{section} 覆盖账本无效")
             continue
+        if value.get("status") in {"not_configured", "disabled"}:
+            continue
         if number(value, checked) < number(value, planned) or any(
             value.get(key) for key in failure_keys
         ):
             issues.append(f"{section} 尚未闭合")
+    for section in ("curated_kol_sources", "high_signal_forums", "curated_kol_x"):
+        value = frontier.get(section) or {}
+        if not isinstance(value, dict):
+            issues.append(f"{section} 覆盖账本无效")
+            continue
+        if value.get("status") in {"not_configured", "disabled"}:
+            continue
+        planned, complete, failures = ("configured_batches", "completed_batches", "failed_batches") if section == "curated_kol_x" else ("configured_feeds", "completed_feeds", "failed_feeds")
+        if number(value, complete) < number(value, planned) or value.get(failures):
+            issues.append(f"{section} 已配置入口未全部闭合")
     if frontier.get("query_failures"):
         issues.append("领域查询仍有失败")
+    campaign = stats.get("research_campaign")
+    if campaign is not None:
+        if not isinstance(campaign, dict) or not campaign.get("campaign_id"):
+            issues.append("研究批次完成凭据无效")
+        else:
+            for kind in ("origin", "deep", "refresh"):
+                if campaign.get(f"{kind}_planned") is None or campaign.get(f"{kind}_completed") is None:
+                    issues.append("研究批次任务基数缺失")
+                elif number(campaign, f"{kind}_planned") != number(campaign, f"{kind}_completed"):
+                    issues.append(f"研究批次 {kind} 尚未全部闭合")
+            if number(campaign, "pending_total_count"):
+                issues.append("研究批次持久化任务未清零")
     return list(dict.fromkeys(issues))
+
+
+def discovery_retry_sources(frontier: dict) -> set[str]:
+    """Map unresolved coverage capabilities to their production adapter."""
+    selected = {
+        name for name, value in (frontier.get("source_health") or {}).items()
+        if value.get("status") not in _CLOSED_STATUSES["source_health"]
+    }
+    for name, value in (frontier.get("academic_indexes") or {}).items():
+        if value.get("status") in {"not_configured", "disabled"}:
+            continue
+        if value.get("status") not in _CLOSED_STATUSES["academic_indexes"] or value.get("failed_queries") or value.get("not_executed_queries") or value.get("completed_queries", 0) < value.get("planned_queries", value.get("queries", 0)):
+            selected.add(name)
+    if frontier.get("query_failures") or any(
+        value.get("status") not in _CLOSED_STATUSES[section]
+        for section in ("domains", "recall_lanes")
+        for value in (frontier.get(section) or {}).values()
+    ):
+        selected.add("arxiv")
+    for section, source, checked, total, failures in (
+        ("official_pages", "priority-research-page", "checked_pages", "total_pages", ("request_failed", "parse_zero_links", "detail_failures")),
+        ("official_repositories", "official-repository-release", "checked_organizations", "configured_organizations", ("failed_organizations", "repository_page_failures", "unverified_primary_releases")),
+    ):
+        value = frontier.get(section) or {}
+        if value.get("status") in {"not_configured", "disabled"}:
+            continue
+        if value.get(checked, 0) < value.get(total, 0) or any(value.get(key) for key in failures):
+            selected.add(source)
+    for section, source in (("curated_kol_sources", "curated-kol-feeds"), ("high_signal_forums", "high-signal-forums"), ("curated_kol_x", "curated-kol-x")):
+        value = frontier.get(section) or {}
+        if value.get("status") in {"not_configured", "disabled"}:
+            continue
+        planned, complete, failures = ("configured_batches", "completed_batches", "failed_batches") if section == "curated_kol_x" else ("configured_feeds", "completed_feeds", "failed_feeds")
+        if value.get(complete, 0) < value.get(planned, 0) or value.get(failures):
+            selected.add(source)
+    return selected
 
 
 def require_completed_research(stats: dict, *, content: str = "", candidates=None) -> None:

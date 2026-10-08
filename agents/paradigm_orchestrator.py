@@ -18,6 +18,7 @@ from paradigms.analyzer import (
     ParadigmAnalyzer,
     ParadigmSynthesizer,
     ResearcherTrajectoryAnalyzer,
+    _should_prefilter_origin,
 )
 from paradigms.clustering import (
     cluster_extractions,
@@ -39,8 +40,9 @@ from paradigms.models import (
 from paradigms.publication import classify_publication
 from paradigms.scoring import is_reportable, score_candidate
 from paradigms.scheduler import ResearchLaneScheduler
+from paradigms.async_utils import gather_scoped
 from run_audit import run_audit
-from runtime_clock import research_now, research_window, scheduled_date
+from runtime_clock import research_now, research_window, scheduled_date, observation_now
 
 logger = logging.getLogger(__name__)
 
@@ -66,15 +68,41 @@ class ParadigmOrchestrator:
             technical_report_mechanism_slice=(
                 config.PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE
             ),
+            stage_cache=self.store.campaigns,
         )
         self.enricher = EvidenceEnricher()
         self.synthesizer = ParadigmSynthesizer()
-        self.trajectory = ResearcherTrajectoryAnalyzer()
+        self.trajectory = ResearcherTrajectoryAnalyzer(stage_cache=self.store.campaigns)
+        self.deep_concurrency = config.PARADIGM_DEEP_CONCURRENCY
         # 由统一入口在邮件成功后再登记交付，避免“数据库显示已交付但邮件失败”。
         self.pending_delivery: list = []
 
-    async def run(self, *, reference_time: datetime | None = None) -> dict:
-        with research_window(reference_time):
+    async def run(self, *, reference_time: datetime | None = None, resume_only: bool = False) -> dict:
+        active = self.store.campaigns.active()
+        if resume_only and active is None:
+            raise RuntimeError("没有待续跑的研究批次；--resume-research 不启动新发现")
+        with research_window(active.reference_time if active else reference_time,
+                             observation_time=reference_time or datetime.now(timezone.utc),
+                             lookback_days=active.ordinary_days if active else self.ordinary_discovery_lookback_days):
+            if active is None:
+                active = self.store.campaigns.begin(
+                    reference_time=research_now(), ordinary_days=self.ordinary_discovery_lookback_days,
+                    high_signal_days=self.high_signal_discovery_lookback_days,
+                    bootstrap=self.bootstrap_mode, seeds=list(config.PARADIGM_SEED_ARXIV_IDS),
+                )
+            self.campaign = self.store.campaigns.begin_run(active.campaign_id)
+            self.ordinary_discovery_lookback_days = active.ordinary_days
+            self.high_signal_discovery_lookback_days = active.high_signal_days
+            self.discovery_lookback_days = active.high_signal_days
+            self.bootstrap_mode = active.bootstrap
+            # The same window applies even when the next process starts weeks
+            # later. Do not let a resume silently become another discovery run.
+            if isinstance(self.discovery, ParadigmDiscovery):
+                self.discovery = ParadigmDiscovery(
+                    broad_lookback_days=active.ordinary_days,
+                    high_signal_lookback_days=active.high_signal_days,
+                )
+                self.discovery.arxiv.seed_arxiv_ids = active.seeds
             return await self._run_research()
 
     async def _run_research(self) -> dict:
@@ -83,13 +111,22 @@ class ParadigmOrchestrator:
         stats: dict = {
             "pipeline_mode": "paradigm",
             "reference_time": research_now().isoformat(),
+            "observation_time": observation_now().isoformat(),
             "report_date": scheduled_date(research_now()),
             "run_budget_seconds": config.PARADIGM_RUN_BUDGET_SECONDS,
         }
         queue_before = self.store.work_queue_snapshot(reference_time=research_now())
         stats["work_queue_before"] = queue_before
 
-        batch = await self.discovery.run()
+        if self.campaign.discovery is None:
+            batch = await self.discovery.run()
+            stats["discovery_resumed"] = False
+        else:
+            from paradigms.completion import discovery_retry_sources
+            retry_sources = discovery_retry_sources(self.campaign.discovery.coverage)
+            stats["discovery_resumed"] = True
+            stats["discovery_retry_sources"] = sorted(retry_sources)
+            batch = await self.discovery.retry(self.campaign.discovery) if retry_sources else self.campaign.discovery
         # 发现源的耗时不可预知，尤其冷启动会翻阅更长窗口。研究阶段的份额
         # 必须在发现完成后按剩余时间重新划分，否则慢发现会把机制抽取窗口
         # 直接吃完，形成“抓到近两万条、只分析六条”的假运行。
@@ -167,7 +204,7 @@ class ParadigmOrchestrator:
         degraded_indexes = [
             name
             for name, value in academic_indexes.items()
-            if value.get("status") not in {"completed", "completed_after_retry"}
+            if value.get("status") not in {"completed", "completed_after_retry", "not_configured", "disabled"}
         ]
         run_audit.event(
             "academic_index_coverage",
@@ -266,6 +303,8 @@ class ParadigmOrchestrator:
             or official_warning
             or failed_sources
         )
+        from paradigms.completion import discovery_retry_sources
+        stats["recall_coverage_incomplete"] = bool(stats["recall_coverage_incomplete"] or discovery_retry_sources(batch.coverage))
         # 覆盖地图基线只受普通窗口内的 landscape 车道和 OpenAlex 核心
         # 学术召回影响。Technical Report、重点研究者、OpenReview、官方网页
         # 与 Feed 的局部失败仍会进入本期覆盖边界，但不能把 60 天 bootstrap
@@ -278,7 +317,12 @@ class ParadigmOrchestrator:
                 recall_lanes=recall_lanes,
             )
         )
-        origins, incremental, origin_checkpoint = self.store.observe_origins(batch.origins)
+        with self.store.transaction():
+            # Persist the downstream campaign snapshot before the upstream
+            # discovery records are acknowledged. A crash commits both or none.
+            self.store.campaigns.save_discovery(self.campaign.campaign_id, batch)
+            origins, incremental, origin_checkpoint = self.store.observe_origins(batch.origins)
+            self.store.campaigns.reconcile(self.campaign.campaign_id)
         stats.update({f"origin_{key}": value for key, value in incremental.items()})
         # 发现和分析必须是两个独立检查点。先把本轮所有新原点写成 pending，
         # 即使后续只处理其中一部分，也不会把运行预算误写成研究淘汰。
@@ -438,11 +482,7 @@ class ParadigmOrchestrator:
         stats["analysis_mechanism_slice_deferred_count"] = (
             mechanism_slice_deferred_count
         )
-        stats["analysis_completed_count"] = (
-            analyzed_origin_count
-            - failed_origin_count
-            - mechanism_slice_deferred_count
-        )
+        stats["analysis_completed_count"] = len(completed_origins)
         stats["current_window_origin_completed_count"] = sum(
             _origin_is_in_delivery_window(
                 item, reference_time=research_now(),
@@ -476,12 +516,7 @@ class ParadigmOrchestrator:
             ),
         )
         stats["analysis_budget_deferred_count"] = len(budget_deferred_origins)
-        stats["analysis_deferred_count"] = (
-            len(safety_deferred_origins)
-            + len(budget_deferred_origins)
-            + failed_origin_count
-            + mechanism_slice_deferred_count
-        )
+        stats["analysis_deferred_count"] = max(planned_count - len(completed_origins), 0)
         stats["pending_origin_backlog_remaining"] = stats[
             "analysis_deferred_count"
         ]
@@ -596,6 +631,13 @@ class ParadigmOrchestrator:
             *new_candidates, *refreshed,
             *(item for item in refresh_unchanged if is_reportable(item)),
         ]
+        current_keys = {item.key for item in candidates}
+        recovered = self.store.load_candidate_snapshots(
+            self.store.campaigns.candidate_keys(self.campaign.campaign_id) - current_keys
+        )
+        recovered = [item for item in recovered if item.status != "pending_deep" and is_reportable(item)]
+        candidates.extend(recovered)
+        stats["completed_outputs_recovered"] = len(recovered)
         # Tavily/Reddit 的用户正文只供本轮综合与人物核验，之后即清除；
         # 数据库和邮件只保留链接、指标、覆盖状态和已提炼的分析。
         candidates = self.enricher.finalize(candidates)
@@ -954,6 +996,17 @@ class ParadigmOrchestrator:
         stats["elapsed_seconds"] = (
             datetime.now(timezone.utc) - started
         ).total_seconds()
+        stats.update(run_audit.token_totals())
+        ledger = self.store.campaigns.reconcile(self.campaign.campaign_id)
+        stats["research_campaign"] = ledger
+        stats["research_incomplete"] = bool(stats["research_incomplete"] or ledger["pending_total_count"] or queue_after["pending_total_count"])
+        stats["run_incomplete"] = stats["research_incomplete"]
+        stats["pending_work_count"] = max(stats["pending_work_count"], ledger["pending_total_count"], queue_after["pending_total_count"])
+        stats["result_kind"] = "research_blocked" if stats["research_incomplete"] or stats["coverage_incomplete"] else "complete_memo" if reportable else "complete_no_signal"
+        from paradigms.completion import research_completion_violations
+        ready = not research_completion_violations(stats)
+        self.store.campaigns.save_stats(self.campaign.campaign_id, stats, ready=ready)
+        stats["research_campaign"] = self.store.campaigns.snapshot(self.campaign.campaign_id)
         run_audit.checkpoint(stats)
         logger.info(
             "范式研究阶段完成：原始材料=%s，范式候选=%s，待交付=%s",
@@ -1008,6 +1061,12 @@ class ParadigmOrchestrator:
         historical = self.store.load_refresh_candidates(
             exclude_keys=set(deep_tasks), limit=0
         )
+        campaign = getattr(self, "campaign", None)
+        campaign_key = campaign.campaign_id if campaign else None
+        if campaign_key:
+            pending_refresh = self.store.campaigns.seal_refresh_scope(campaign_key, historical)
+            historical = [item for item in historical if item.key in pending_refresh]
+            self.store.campaigns.reconcile(campaign_key)
         historical, refresh_safety = _apply_safety_limit(
             historical, config.PARADIGM_REFRESH_SAFETY_LIMIT
         )
@@ -1027,6 +1086,25 @@ class ParadigmOrchestrator:
         refresh_budget = []
         refresh_attempted = 0
         visited_deep_keys = set()
+        visited_origins = set()
+        origin_completed, origin_partial, origin_failed, origin_budget_by_key = {}, {}, set(), {}
+
+        def start_attempts(kind, group):
+            if not campaign_key:
+                return {}
+            from database.paradigm_store import _deep_checkpoint_input_signature, _persistable_candidate
+            objects = [(item.fingerprint, item.source_revision) for item in group] if kind == "origin" else [(item.key, _deep_checkpoint_input_signature(item), _persistable_candidate(item).to_dict()) for item in group]
+            attempts = self.store.campaigns.start_attempt(campaign_key, kind, objects)
+            return dict(zip((entry[0] for entry in objects), attempts))
+
+        def finish_attempts(attempts, done, budget, failures, *, kind):
+            if not campaign_key:
+                return
+            identity = (lambda item: item.fingerprint) if kind == "origin" else (lambda item: item.key)
+            done_ids, budget_ids, failed_ids = ({identity(item) for item in values} for values in (done, budget, failures))
+            for key, attempt in attempts.items():
+                outcome = "returned" if key in done_ids else "budget_deferred" if key in budget_ids else "execution_failed" if key in failed_ids else "dependency_pending"
+                self.store.campaigns.finish_attempts([attempt], outcome=outcome)
 
         def clean_deep_queue(lane):
             queue = deep_queues[lane]
@@ -1084,25 +1162,54 @@ class ParadigmOrchestrator:
             )
             visit_started = monotonic()
             if stage == "origin":
+                batch_size = config.PARADIGM_ANALYSIS_BATCH_SIZE
+                if getattr(self.analyzer, "enable_batch_prefilter", False) and all(
+                    _should_prefilter_origin(item) for item in list(origin_queues[lane])[:config.PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE]
+                ):
+                    batch_size = config.PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE
                 group = [
                     origin_queues[lane].popleft()
                     for _ in range(min(
-                        len(origin_queues[lane]), config.PARADIGM_ANALYSIS_BATCH_SIZE
+                        len(origin_queues[lane]), batch_size
                     ))
                 ]
                 committed_keys = set()
+                before_progress = {item.fingerprint: len(item.raw.get("technical_report_completed_mechanisms", {})) for item in group}
+                attempts = start_attempts("origin", group)
                 result = await self._analyze_origins_in_batches(
                     group, visit_deadline, candidate_keys=committed_keys,
                     history_index=history_index,
                 )
                 values, count, failures, slices, budget, hydrated, done, resumable = result
+                done_ids = {item.fingerprint for item in [*done, *resumable, *budget]}
+                finish_attempts(attempts, done, budget, [item for item in group if item.fingerprint not in done_ids], kind="origin")
                 extractions.extend(values)
-                analyzed += count
-                failed += failures
-                partial += slices
-                origin_budget.extend(budget)
-                completed_origins.extend(done)
-                partial_origins.extend(resumable)
+                visited_origins.update(item.fingerprint for item in group if item.fingerprint not in {value.fingerprint for value in budget})
+                for item in done:
+                    origin_completed[item.fingerprint] = item
+                    origin_partial.pop(item.fingerprint, None)
+                    origin_failed.discard(item.fingerprint)
+                    origin_budget_by_key.pop(item.fingerprint, None)
+                for item in resumable:
+                    origin_partial[item.fingerprint] = item
+                    if item.raw.get("technical_report_last_run_failure"):
+                        origin_failed.add(item.fingerprint)
+                    else:
+                        origin_failed.discard(item.fingerprint)
+                    # A mechanism slice is a fair visit, not a forced new run.
+                    # Requeue only demonstrated progress; failed/no-progress
+                    # mechanisms stay durable without spinning this process.
+                    if not item.raw.get("technical_report_last_run_failure") and len(item.raw.get("technical_report_completed_mechanisms", {})) > before_progress.get(item.fingerprint, 0):
+                        snapshots = self.store.load_origin_snapshots([item.fingerprint])
+                        if snapshots:
+                            origin_queues[lane].append(snapshots[0])
+                origin_failed.update(item.fingerprint for item in group if item.fingerprint not in {value.fingerprint for value in [*done, *resumable, *budget]})
+                origin_budget_by_key.update((item.fingerprint, item) for item in budget)
+                analyzed, failed = len(visited_origins), len(origin_failed)
+                partial = len(set(origin_partial) - origin_failed - set(origin_budget_by_key))
+                completed_origins = list(origin_completed.values())
+                partial_origins = list(origin_partial.values())
+                origin_budget = list(origin_budget_by_key.values())
                 for key, value in hydrated.items():
                     hydration[key] += value
                 candidate_keys.update(committed_keys)
@@ -1120,7 +1227,7 @@ class ParadigmOrchestrator:
             elif stage == "deep":
                 group = []
                 examined = 0
-                while deep_queues[lane] and examined < config.PARADIGM_DEEP_BATCH_SIZE:
+                while deep_queues[lane] and examined < max(config.PARADIGM_DEEP_BATCH_SIZE, getattr(self, "deep_concurrency", 1)):
                     examined += 1
                     key = deep_queues[lane].popleft()
                     if key not in deep_tasks or deep_lanes.get(key) != lane:
@@ -1146,6 +1253,7 @@ class ParadigmOrchestrator:
                     group.append(deep_tasks.pop(key))
                     deep_lanes.pop(key, None)
                 if group:
+                    attempts = start_attempts("deep", group)
                     done, budget, failures = await self._deep_analyze_in_batches(
                         group, supporting, visit_deadline
                     )
@@ -1155,17 +1263,19 @@ class ParadigmOrchestrator:
                     # Paid substage results and failure/support snapshots are
                     # durable before the next lane runs or the process ends.
                     self.store.save_candidates([*done, *budget, *failures])
+                    finish_attempts(attempts, done, budget, failures, kind="deep")
                     for item in [*done, *budget, *failures]:
                         history_index.upsert(item)
                 previous_stage[lane] = "deep"
             else:
                 group = []
-                while refresh_queue and len(group) < config.PARADIGM_DEEP_BATCH_SIZE:
+                while refresh_queue and len(group) < max(config.PARADIGM_DEEP_BATCH_SIZE, getattr(self, "deep_concurrency", 1)):
                     item = refresh_queue.popleft()
                     if item.key in refresh_keys:
                         refresh_keys.remove(item.key)
                         group.append(item)
                 if group:
+                    attempts = start_attempts("refresh", group)
                     values, stable, budget, failures, count = await self._refresh_in_batches(
                         group, supporting, visit_deadline
                     )
@@ -1179,7 +1289,11 @@ class ParadigmOrchestrator:
                     saved = EvidenceEnricher.finalize(copy.deepcopy([
                         *values, *stable, *failures
                     ]))
-                    self.store.save_candidates(saved)
+                    with self.store.transaction():
+                        self.store.save_candidates(saved)
+                        if campaign_key:
+                            self.store.campaigns.complete_refresh(campaign_key, [item.key for item in [*values, *stable]])
+                            finish_attempts(attempts, [*values, *stable], budget, failures, kind="refresh")
                     for item in saved:
                         history_index.upsert(item)
             scheduler.account(lane, visit_started, stage=stage)
@@ -1198,7 +1312,9 @@ class ParadigmOrchestrator:
             })
 
         for queue in origin_queues.values():
-            origin_budget.extend(queue)
+            origin_budget_by_key.update((item.fingerprint, item) for item in queue)
+        origin_budget = list(origin_budget_by_key.values())
+        partial = len(set(origin_partial) - origin_failed - set(origin_budget_by_key))
         safety_deep = []
         for key, item in deep_tasks.items():
             snapshot = _deferred_deep_snapshot(self.store, item, supporting)
@@ -1208,6 +1324,13 @@ class ParadigmOrchestrator:
                 deep_budget[key] = snapshot
         refresh_budget.extend(item for item in refresh_queue if item.key in refresh_keys)
         service = scheduler.snapshot()
+        # Temporary partial-visit placeholders are not final origin verdicts.
+        # Once their parent closes, keep only the actual mechanism assessments.
+        extractions = [value for value in extractions if not (
+            value.evidence.fingerprint in origin_completed
+            and not value.canonical_name and not value.rubric_assessment
+            and bool(value.rejection_reason)
+        )]
         run_audit.event(
             "research_service_lanes", "observed",
             f"本期/更新/补课按实际耗时轮转：{service['seconds']}；"
@@ -1253,6 +1376,39 @@ class ParadigmOrchestrator:
         resumable_checkpoint_origins = []
         budget_deferred = []
         batch_size = config.PARADIGM_ANALYSIS_BATCH_SIZE
+        if getattr(self.analyzer, "enable_batch_prefilter", False) and all(_should_prefilter_origin(item) for item in origins):
+            batch_size = config.PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE
+
+        def committed_mechanisms(item):
+            pairs = set()
+            receipts = item.raw.get("technical_report_committed_candidates", {})
+            payloads = item.raw.get("technical_report_completed_mechanisms", {})
+            for key, keys in receipts.items():
+                snapshots = self.store.load_candidate_snapshots(keys)
+                if len(snapshots) != len(keys) or any(
+                    not self.store.candidate_inputs_current(candidate) or not any(
+                        evidence.fingerprint == item.fingerprint and evidence.source_revision == item.source_revision
+                        for evidence in candidate.evidence
+                    ) for candidate in snapshots
+                ):
+                    continue
+                payload = payloads.get(key, {})
+                if payload:
+                    pairs.add((payload.get("canonical_name"), payload.get("mechanism")))
+            return pairs
+
+        def save_report_progress(item, extraction, mechanism_key):
+            values = [extraction] if extraction is not None else []
+            candidates = cluster_extractions(values)
+            with self.store.transaction():
+                candidates = self.store.attach_history(candidates, history_index=history_index) if history_index is not None else self.store.attach_history(candidates)
+                if mechanism_key:
+                    item.raw.setdefault("technical_report_committed_candidates", {})[mechanism_key] = [candidate.key for candidate in candidates]
+                _commit_origin_analysis_checkpoint(self.store, candidates, [], [item])
+            candidate_keys.update(candidate.key for candidate in candidates)
+            if history_index is not None:
+                for candidate in candidates:
+                    history_index.upsert(candidate)
 
         def record_failed(items: list, reason: str) -> None:
             nonlocal analyzed_count, failed_count, mechanism_slice_deferred_count
@@ -1320,7 +1476,10 @@ class ParadigmOrchestrator:
                     item.raw["last_analysis_failure_at"] = (
                         datetime.now(timezone.utc).isoformat()
                     )
-                candidates = cluster_extractions(returned)
+                already_committed = committed_mechanisms(item)
+                candidates = cluster_extractions([
+                    value for value in returned if (value.canonical_name, value.mechanism) not in already_committed
+                ])
                 transaction = getattr(self.store, "transaction", None)
                 with transaction() if callable(transaction) else nullcontext():
                     if history_index is None:
@@ -1370,17 +1529,21 @@ class ParadigmOrchestrator:
             async def consume():
                 stream = getattr(self.analyzer, "iter_results", None)
                 if callable(stream):
-                    async with aclosing(stream(group)) as results:
-                        async for origin, values in results:
-                            key = origin.fingerprint
-                            if key not in expected or key in processed:
-                                run_audit.event(
-                                    "origin_analysis_contract", "warning",
-                                    "忽略外来或重复的原点结果包",
-                                )
-                                continue
-                            commit_result(expected[key], values)
-                            processed.add(key)
+                    callback = getattr(self.analyzer, "checkpoint_callback", None)
+                    if isinstance(self.analyzer, ParadigmAnalyzer):
+                        self.analyzer.checkpoint_callback = save_report_progress
+                    try:
+                        async with aclosing(stream(group)) as results:
+                            async for origin, values in results:
+                                key = origin.fingerprint
+                                if key not in expected or key in processed:
+                                    run_audit.event("origin_analysis_contract", "warning", "忽略外来或重复的原点结果包")
+                                    continue
+                                commit_result(expected[key], values)
+                                processed.add(key)
+                    finally:
+                        if isinstance(self.analyzer, ParadigmAnalyzer):
+                            self.analyzer.checkpoint_callback = callback
                 else:
                     # Compatibility for non-streaming local/test analyzers.
                     values = await self.analyzer.run(group)
@@ -1509,7 +1672,8 @@ class ParadigmOrchestrator:
         completed: list = []
         budget_deferred: list = []
         execution_deferred: list = []
-        batch_size = config.PARADIGM_DEEP_BATCH_SIZE
+        concurrency = getattr(self, "deep_concurrency", 1)
+        batch_size = max(config.PARADIGM_DEEP_BATCH_SIZE, concurrency)
 
         def resumable(candidate):
             return _resumable_deep_snapshot(
@@ -1634,6 +1798,8 @@ class ParadigmOrchestrator:
             except asyncio.TimeoutError:
                 budget_deferred.extend(deferred_snapshot(item) for item in group)
                 return
+            except (sqlite3.DatabaseError, OSError):
+                raise
             except Exception as exc:
                 if len(group) > 1:
                     midpoint = len(group) // 2
@@ -1666,7 +1832,11 @@ class ParadigmOrchestrator:
 
         for offset in range(0, len(candidates), batch_size):
             group = candidates[offset : offset + batch_size]
-            await process_group(group)
+            if concurrency > 1:
+                for start in range(0, len(group), concurrency):
+                    await gather_scoped(*(process_group([item]) for item in group[start:start + concurrency]))
+            else:
+                await process_group(group)
             if budget_deferred:
                 # The untouched queue tail may have received unique support in
                 # this discovery window. Preserve it before it ages out, just
@@ -1689,7 +1859,8 @@ class ParadigmOrchestrator:
         budget_deferred: list = []
         execution_deferred: list = []
         attempted = 0
-        batch_size = config.PARADIGM_DEEP_BATCH_SIZE
+        concurrency = getattr(self, "deep_concurrency", 1)
+        batch_size = max(config.PARADIGM_DEEP_BATCH_SIZE, concurrency)
 
         async def process_group(group: list) -> None:
             nonlocal attempted
@@ -1730,6 +1901,8 @@ class ParadigmOrchestrator:
                 _mark_refresh_attempted(self, group)
                 budget_deferred.extend(group)
                 return
+            except (sqlite3.DatabaseError, OSError):
+                raise
             except Exception as exc:
                 if len(group) > 1:
                     midpoint = len(group) // 2
@@ -1771,7 +1944,11 @@ class ParadigmOrchestrator:
 
         for offset in range(0, len(candidates), batch_size):
             group = candidates[offset : offset + batch_size]
-            await process_group(group)
+            if concurrency > 1:
+                for start in range(0, len(group), concurrency):
+                    await gather_scoped(*(process_group([item]) for item in group[start:start + concurrency]))
+            else:
+                await process_group(group)
             if budget_deferred:
                 budget_deferred.extend(candidates[offset + len(group) :])
                 break

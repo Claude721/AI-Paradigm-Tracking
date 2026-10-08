@@ -1,6 +1,6 @@
 # AI 技术范式雷达
 
-> 当前状态（2026-10-08）：V0 重构中，尚未通过生产可用性验收。已实现来源版本/检查点分离、逐原点提交、综合与人物检查点、本期/更新/补课统一轮转及运行版本指纹；万条历史积压的离线回放中，本期路线能提前完成研究子阶段。9 月 25 日和 10 月 2 日的云端运行仍使用旧提交 `c2cf688`，在过期日期测试处退出，未验证这批修复。实施范围与未完成项见 [V0 重构计划](docs/V0_REBUILD_PLAN.md)。
+> 当前状态（2026-10-08）：V0 工程候选，尚未通过生产可用性验收。schema v8 固定研究批次、窗口与发现快照，跨进程只推进未完成任务；万条合成原点在延迟模型中经三次运行闭合，再通过真实报告器与模拟邮件确认。未执行真实 API/邮件验收，已知 403/404 信源也未被删除或假装恢复。验收证据与阻碍见 [工程体检](docs/PROJECT_HEALTH_REPORT.md)，设计范围见 [V0 重构计划](docs/V0_REBUILD_PLAN.md)。
 
 这个项目不再以 GitHub 项目或 Product Hunt 产品为基本单位，而是每周捕捉正在形成的 AI 技术范式，并从技术反向锁定关键研究者。
 
@@ -63,7 +63,9 @@ Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，�
 
 系统使用独立的 `database/paradigm_radar.db`。同一证据按 DOI、arXiv ID 或稳定 URL 去重；观察池和已报告路线会在每周重新检索近期讨论。有界刷新按“最久未尝试”轮转，成功但无变化也会清除旧执行错误，避免同一批历史路线永久占据队首或尾部路线饿死。同一范式只有在证据签名发生实质变化时才会以“进展更新”再次出现，因此相邻周不会原样重复。报告前还会独立做时效核验：**首次进入本地数据库不等于本周新发布**；只有窗口内有可核验发布日期的一手材料，才能标为新路线。旧材料只有出现窗口内独立讨论、复现、采用或可核验指标增量时才作为进展更新；网页 `dateModified` 不能冒充发布日期。
 
-研究检查点与报告交付是两个状态：研究完成后先把候选快照写入持久化 outbox；多路线报告再逐路线写作并逐条保存 checkpoint，最后只生成轻量的全局 Memo 框架，程序确定性装配全部路线。深挖中的综合结果在技术 Rubric 闭合后单独保存清洗快照；人物轨迹成功后也会立即保存第二个清洗检查点，但仍保持 `pending_deep`，直到正常报告/交付事务完成。后续报告阶段失败可在 48 小时内复用两段研究；人物接口失败会明确延期，不能作为成功档案交付。一手来源换版、本轮新关联的支持证据、综合或人物策略版本变化、快照过期或未闭合 Rubric 不得复用旧快照。预算中断前已发现的路线相关支持线索会随待续研候选保存，不必指望下一轮重新发现。每个模型阶段都核对输入/输出身份与基数；漏回、外来对象或最终 Rubric 未闭合只会让对应对象回到 `pending`/`pending_deep`，批次异常会二分隔离，健康同批对象继续提交。
+研究检查点与报告交付是两个状态：综合、人物和路线草稿分别保存清洗检查点，完整研究后才进入 outbox。活动批次中的同版本综合/人物结果可以跨周复用，批次外仍采用 48 小时有效期；来源、相关支持证据、Rubric/提示词或模型配置变化使相应结果失效。普通资格预筛逐原点、人物轨迹逐已核验身份保存成功结果；单份报告每个机制也在慢同伴完成前提交。临时社区正文仍不持久化，外部增强未进入综合检查点时须重取。所有阶段核对输入/输出身份与基数，失败对象保留 pending，不丢健康结果。
+
+研究批次在首次发现时冻结原窗口和种子，连同历史积压建立只增不减的任务清单；续跑复用发现快照，只重试失败来源，不重新刷新已经检查过的历史路线。保存的研究时钟不随运行日期漂移，指标观测仍使用真实观测时刻。 `--resume-research` 不建新批次，自动续跑默认关闭；启用后也仅在状态上传成功、纯预算延期且次数/时间/已确认 tokens 未达限时排队。真实接口故障与未知用量不会无限自动重试。细节及授权成本边界见 [云端运维](docs/CLOUD_AUTOMATION.md)。
 
 报告渲染采用有界重试：冻结快照缺少当前人物/一手来源输入契约，或完整制品在内置修订后仍违反确定性交付契约时，立即 `quarantined`；网络、超时等其他渲染失败默认累计 3 次后隔离。隔离记录保留在数据库供审计，其候选与证据在同一事务中退回 `pending_deep`，不再永久占住 outbox 队首。SMTP 故障与渲染故障分账：已验证报告继续留在 outbox，开启 `EMAIL_PUSH_REQUIRED` 时本轮仍明确失败，绝不提前登记已投递。成功恢复历史交付后，当前进程退出并由 GitHub Actions 在状态上传后排队完整研究 run；若恢复任务被隔离，则当前进程直接继续新研究。若本轮新生成的报告被隔离，状态会先安全保存，但当前 Workflow 仍失败，因为本轮没有完成报告/邮件交付；下次运行不会再被该坏任务卡住。SMTP 接受邮件后若进程在数据库确认前硬退出，系统按同一 `Message-ID` 至少一次重试，无法承诺所有邮箱服务商上的绝对 exactly-once。所有计划材料均完成判断后，如果没有候选跨过联合门槛，会正常发送一份空雷达。正式交付只允许研究事务与已配置信源覆盖全部闭合：有待分析、待深挖、人物/链接缺口、执行失败或覆盖缺口时，任务明确失败，只保存内部检查点，不生成或发送阶段性报告。完整空雷达表示本期约定范围内没有合格路线，而不是全局没有 AI 创新。
 
@@ -83,11 +85,12 @@ cp .env.example .env
 LessWrong、Alignment Forum 与内置 KOL 博客全部使用公开 RSS/Atom，默认开启且不需要 Secret。目录位于 `research_watchlist.py`：有稳定 Feed 的作者会自动读取；无 Feed 的作者仍保留个人主页与可选 X handle 供身份核验。`TWITTER_BEARER_TOKEN` 未配置时不会请求 X，不影响个人博客召回。
 
 ```bash
-python main.py             # 立即执行一次
+python main.py             # 有未完成研究批次则恢复，否则建立新批次
+python main.py --resume-research # 只恢复原窗口；没有活动批次时失败，不创建新研究
 python main.py --schedule  # 每周五按配置持续运行
 python main.py --report    # 优先续投 outbox；否则不重新抓取，调用总编辑重建最近报告并发信
 python main.py --status    # 查看模型配置
-python main.py --inspect-state # 只读查看数据库与 outbox 健康度
+python main.py --inspect-state # 查看队列、批次与 outbox，不调用网络/研究模型
 python main.py --doctor    # 零网络检查配置是否齐全
 python main.py --smoke-test # 小成本真实检查接口；SMTP 只登录、不发邮件
 ```
@@ -116,8 +119,14 @@ PARADIGM_REPORT_ROUTE_CONCURRENCY=2
 PARADIGM_REPORT_MAX_RENDER_ATTEMPTS=3
 PARADIGM_ANALYSIS_BATCH_SIZE=6
 PARADIGM_ORIGIN_PREFILTER_ENABLED=true
+PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE=24
 PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE=2
 PARADIGM_DEEP_BATCH_SIZE=1
+PARADIGM_DEEP_CONCURRENCY=2
+PARADIGM_AUTO_RESUME_ENABLED=false
+PARADIGM_AUTO_RESUME_MAX_RUNS=4
+PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS=14400
+PARADIGM_AUTO_RESUME_MAX_TOKENS=4000000
 SCHEDULE_DAY_OF_WEEK=fri
 SCHEDULE_HOUR=9
 SCHEDULE_MINUTE=15
@@ -178,6 +187,9 @@ sources/
   reddit_evidence_source.py
   priority_research_source.py
 database/paradigm_store.py
+database/research_campaign.py  固定批次、任务/尝试账本和逐阶段结果缓存
+scripts/replay_research.py     无网络容量/恢复回放
+scripts/research_resume.py     默认关闭的有界自动续跑决策
 reports/paradigm_generator.py
 agents/paradigm_orchestrator.py
 skills/weekly_research_memo/SKILL.md

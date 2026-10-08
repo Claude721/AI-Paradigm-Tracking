@@ -122,6 +122,8 @@ class ParadigmStore:
         self.db_path = Path(db_path) if db_path else config.PARADIGM_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        from database.research_campaign import CampaignStore
+        self.campaigns = CampaignStore(self)
 
     @contextmanager
     def _connect(self):
@@ -273,6 +275,8 @@ class ParadigmStore:
                     "ALTER TABLE report_outbox ADD COLUMN quarantined_at TEXT"
                 )
             origin_state.initialize(conn)
+            from database.research_campaign import initialize as initialize_campaigns
+            initialize_campaigns(conn)
 
     def is_bootstrap_required(self) -> bool:
         """空状态或覆盖地图升级时使用较长发现窗口。"""
@@ -581,6 +585,16 @@ class ParadigmStore:
                 break
         return results
 
+    def load_origin_snapshots(self, fingerprints):
+        keys = list(dict.fromkeys(fingerprints))
+        results = []
+        with self._connect() as conn:
+            for offset in range(0, len(keys), 500):
+                group = keys[offset:offset + 500]
+                rows = conn.execute("SELECT payload_json FROM evidence_state WHERE fingerprint IN (" + ",".join("?" for _ in group) + ") AND last_analyzed_at IS NULL", group).fetchall()
+                results.extend(technical_evidence_from_dict(json.loads(row[0])) for row in rows)
+        return results
+
     def prepare_report(
         self, candidates: list[ParadigmCandidate]
     ) -> list[ParadigmCandidate]:
@@ -632,7 +646,19 @@ class ParadigmStore:
             })
             if any(not self.candidate_inputs_current(item) for item in candidates):
                 raise ResearchNotCompleteError(["候选一手来源版本与当前研究记录不一致"])
-            return self._enqueue_completed_report(candidates, stats, report_date=report_date)
+            campaign_id = (stats.get("research_campaign") or {}).get("campaign_id")
+            active_campaign = self.campaigns.active(load_discovery=False)
+            if active_campaign and campaign_id != active_campaign.campaign_id:
+                raise ResearchNotCompleteError(["报告缺少当前活动研究批次的完成凭据"])
+            if campaign_id:
+                self.campaigns.require_ready(campaign_id, candidates)
+                ledger = self.campaigns.reconcile(campaign_id)
+                if ledger["pending_total_count"]:
+                    raise ResearchNotCompleteError(["研究批次任务清单未闭合"])
+            job = self._enqueue_completed_report(candidates, stats, report_date=report_date)
+            if campaign_id:
+                self.campaigns.bind_delivery(campaign_id, job.delivery_key, delivered=job.status == "delivered")
+            return job
 
     def _enqueue_completed_report(
         self, candidates: list[ParadigmCandidate], stats: dict, *, report_date: str,
@@ -933,12 +959,15 @@ class ParadigmStore:
                 for value in json.loads(row[0])
             ]
             for candidate in candidates:
-                if not requeue_candidates and conn.execute(
-                    "SELECT 1 FROM paradigms WHERE paradigm_key=?", (candidate.key,)
-                ).fetchone() is not None:
+                current = conn.execute("SELECT payload_json FROM paradigms WHERE paradigm_key=?", (candidate.key,)).fetchone()
+                if not requeue_candidates and current is not None:
                     # Retiring an old partial delivery must not overwrite newer
                     # research. Recreate only an otherwise missing snapshot.
                     continue
+                if current is not None:
+                    # Delivery failure can request revalidation, but an old
+                    # frozen job never owns a newer research snapshot.
+                    candidate = _persistable_candidate(candidate_from_dict(json.loads(current[0])))
                 candidate.status = "pending_deep"
                 payload = json.dumps(
                     candidate.to_dict(),
@@ -990,6 +1019,10 @@ class ParadigmStore:
                 (safe_error, failure_kind, now, now, delivery_key),
             )
             conn.execute(
+                "UPDATE research_campaigns SET status='researching', delivery_key='', updated_at=? WHERE delivery_key=? AND status != 'delivered'",
+                (now, delivery_key),
+            )
+            conn.execute(
                 "DELETE FROM report_render_fragments WHERE delivery_key=?",
                 (delivery_key,),
             )
@@ -1031,6 +1064,10 @@ class ParadigmStore:
                 WHERE delivery_key=?
                 """,
                 (now, now, delivery_key),
+            )
+            conn.execute(
+                "UPDATE research_campaigns SET status='delivered', updated_at=? WHERE delivery_key=?",
+                (now, delivery_key),
             )
             conn.execute(
                 "DELETE FROM report_render_fragments WHERE delivery_key=?",
@@ -1314,7 +1351,7 @@ class ParadigmStore:
                 or _deep_checkpoint_input_signature(snapshot) != signature
                 or snapshot.deep_checkpoint_synthesis_rubric.get("decision")
                 not in {"report", "observe", "reject"}
-                or not _deep_checkpoint_is_recent(snapshot.deep_checkpoint_created_at)
+                or not self._checkpoint_reusable(snapshot)
                 or not _deep_origin_revisions_current(conn, snapshot)
                 or (
                     snapshot.deep_checkpoint_stage == "research_complete"
@@ -1328,6 +1365,18 @@ class ParadigmStore:
             # from the frozen technical answers, not that downstream verdict.
             snapshot.rubric_assessment = snapshot.deep_checkpoint_synthesis_rubric.copy()
             return snapshot
+
+    def _checkpoint_reusable(self, candidate):
+        if _deep_checkpoint_is_recent(candidate.deep_checkpoint_created_at):
+            return True
+        try:
+            created = datetime.fromisoformat(candidate.deep_checkpoint_created_at)
+            if created.tzinfo is None or created > datetime.now(timezone.utc):
+                return False
+        except ValueError:
+            return False
+        campaign = self.campaigns.active(load_discovery=False)
+        return bool(campaign and candidate.key in self.campaigns.candidate_keys(campaign.campaign_id))
 
     def save_synthesized_checkpoint(
         self, original: ParadigmCandidate, synthesized: ParadigmCandidate
@@ -1379,7 +1428,7 @@ class ParadigmStore:
             synthesized.key != completed.key
             or synthesized.deep_checkpoint_stage != "synthesized"
             or not synthesized.deep_checkpoint_support_signature
-            or not _deep_checkpoint_is_recent(synthesized.deep_checkpoint_created_at)
+            or not self._checkpoint_reusable(synthesized)
             or completed.rubric_assessment.get("decision")
             not in {"report", "observe", "reject"}
         ):
@@ -1845,6 +1894,9 @@ def _deep_checkpoint_input_signature(candidate: ParadigmCandidate) -> str:
         ),
         "screening_rubric": candidate.screening_rubric,
     }
+    from agents.llm_utils import resolve_model
+    profile = resolve_model("main")
+    payload["model_profile"] = [profile.provider, profile.model, profile.base_url]
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()

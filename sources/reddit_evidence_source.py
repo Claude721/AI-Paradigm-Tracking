@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from runtime_clock import research_now
+from runtime_clock import research_now, research_days
 
 import httpx
 
@@ -68,7 +68,7 @@ class RedditEvidenceClient:
             params={
                 "q": query,
                 "sort": "new",
-                "t": _reddit_period(config.SOURCING_LOOKBACK_DAYS),
+                "t": _reddit_period(research_days()),
                 "limit": 25,
                 "type": "link",
                 "raw_json": 1,
@@ -81,7 +81,7 @@ class RedditEvidenceClient:
             )
             return []
         cutoff = research_now() - timedelta(
-            days=config.SOURCING_LOOKBACK_DAYS
+            days=research_days()
         )
         matches = []
         for child in ((response.json().get("data") or {}).get("children") or []):

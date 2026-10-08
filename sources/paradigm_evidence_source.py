@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from runtime_clock import research_now
+from runtime_clock import research_now, research_days
 from difflib import SequenceMatcher
 from urllib.parse import quote
 
@@ -19,6 +19,7 @@ from paradigms.models import (
     EvidenceType,
     ParadigmCandidate,
     TechnicalEvidence,
+    _evidence_datetime,
 )
 from sources.reddit_evidence_source import RedditEvidenceClient
 from sources.social_web_search_source import SocialWebSearchClient
@@ -64,7 +65,7 @@ class CommunityEvidenceClient:
                 )
                 continue
             results.extend(batch)
-        return results
+        return [item for item in results if not (date := _evidence_datetime(item.published_at)) or date <= research_now()]
 
     def coverage(self) -> dict[str, str]:
         return {
@@ -168,7 +169,7 @@ class CommunityEvidenceClient:
                     title=full_name,
                     url=repo.get("html_url", ""),
                     summary=repo.get("description") or "",
-                    published_at=str(updated_at or repo.get("created_at") or ""),
+                    published_at=str(repo.get("created_at") or ""),
                     authors=[(repo.get("owner") or {}).get("login", "")],
                     metrics={
                         "stars": repo.get("stargazers_count", 0) or 0,
@@ -196,7 +197,7 @@ class CommunityEvidenceClient:
         self, client: httpx.AsyncClient, candidate: ParadigmCandidate
     ) -> list[TechnicalEvidence]:
         cutoff = int(
-            (research_now() - timedelta(days=config.SOURCING_LOOKBACK_DAYS)).timestamp()
+            (research_now() - timedelta(days=research_days())).timestamp()
         )
         query = candidate.name
         response = await client.get(

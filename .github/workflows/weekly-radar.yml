@@ -28,6 +28,11 @@ on:
         required: true
         default: true
         type: boolean
+      resume_campaign_id:
+        description: 可选：只续跑指定研究批次；须同时关闭 smoke_only，不启动新期发现
+        required: false
+        default: ""
+        type: string
   schedule:
     # 避开整点的 Actions 高峰；使用上海时区，无需手算 UTC。
     - cron: "15 9 * * 5"
@@ -115,6 +120,13 @@ jobs:
       PARADIGM_REPORT_MAX_RENDER_ATTEMPTS: ${{ vars.PARADIGM_REPORT_MAX_RENDER_ATTEMPTS || '3' }}
       PARADIGM_ANALYSIS_BATCH_SIZE: ${{ vars.PARADIGM_ANALYSIS_BATCH_SIZE || '6' }}
       PARADIGM_ORIGIN_PREFILTER_ENABLED: ${{ vars.PARADIGM_ORIGIN_PREFILTER_ENABLED || 'true' }}
+      PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE: ${{ vars.PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE || '24' }}
+      PARADIGM_DEEP_CONCURRENCY: ${{ vars.PARADIGM_DEEP_CONCURRENCY || '2' }}
+      # Extra paid research runs require explicit owner opt-in; capped per campaign.
+      PARADIGM_AUTO_RESUME_ENABLED: ${{ vars.PARADIGM_AUTO_RESUME_ENABLED || 'false' }}
+      PARADIGM_AUTO_RESUME_MAX_RUNS: ${{ vars.PARADIGM_AUTO_RESUME_MAX_RUNS || '4' }}
+      PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS: ${{ vars.PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS || '14400' }}
+      PARADIGM_AUTO_RESUME_MAX_TOKENS: ${{ vars.PARADIGM_AUTO_RESUME_MAX_TOKENS || '4000000' }}
       PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE: ${{ vars.PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE || '2' }}
       PARADIGM_DEEP_BATCH_SIZE: ${{ vars.PARADIGM_DEEP_BATCH_SIZE || '1' }}
       EMAIL_PUSH_ENABLED: "true"
@@ -239,8 +251,14 @@ jobs:
       - name: 抓取、分析并在研究全部闭合后发送邮件
         id: pipeline
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
+        env:
+          RESUME_CAMPAIGN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.resume_campaign_id || '' }}
         run: |
-          python main.py
+          if [ -n "$RESUME_CAMPAIGN_ID" ]; then
+            python main.py --resume-research --expected-campaign-id "$RESUME_CAMPAIGN_ID"
+          else
+            python main.py
+          fi
           recovered_only="$(jq -r '.recovered_delivery_only // false' logs/pipeline_result.json)"
           echo "recovered_delivery_only=$recovered_only" >> "$GITHUB_OUTPUT"
 
@@ -301,6 +319,28 @@ jobs:
             -f smoke_only=false
           echo "历史待交付已完成并持久化；已排队新的完整研究 run"
 
+      - name: 预算续跑控制（默认关闭）
+        id: research_continuation
+        if: ${{ always() && steps.pipeline.outcome == 'failure' && steps.upload_state.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          exec > >(tee logs/research_continuation.log) 2>&1
+          python scripts/research_resume.py --state-saved > logs/research_continuation.json
+          decision="$(jq -r '.dispatch' logs/research_continuation.json)"
+          if [ "$decision" != 'true' ]; then
+            jq -r '.reason' logs/research_continuation.json
+            exit 0
+          fi
+          campaign_id="$(jq -r '.campaign_id' logs/research_continuation.json)"
+          gh workflow run weekly-radar.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF_NAME" \
+            -f resume_campaign_id="$campaign_id" \
+            -f reset_state=false \
+            -f smoke_only=false
+          echo "仅排队原窗口批次 $campaign_id；未生成或发送阶段性报告"
+
       - name: 保存运行日志与筛选审计
         id: upload_audit
         if: always()
@@ -317,6 +357,8 @@ jobs:
             logs/state_restore.log
             logs/state_prepare.log
             logs/continuation.log
+            logs/research_continuation.log
+            logs/research_continuation.json
             logs/run_audit_latest.md
             logs/run_audit_latest.json
             logs/pipeline_result.json
@@ -341,5 +383,6 @@ jobs:
           UPLOAD_REPORT_STEP_OUTCOME: ${{ steps.upload_report.outcome || 'not-run' }}
           UPLOAD_AUDIT_STEP_OUTCOME: ${{ steps.upload_audit.outcome || 'not-run' }}
           CONTINUATION_STEP_OUTCOME: ${{ steps.continuation.outcome || 'not-run' }}
+          RESEARCH_CONTINUATION_STEP_OUTCOME: ${{ steps.research_continuation.outcome || 'not-run' }}
           AUDIT_ARTIFACT_NAME: paradigm-radar-audit-${{ github.run_id }}
         run: python main.py --notify-failure

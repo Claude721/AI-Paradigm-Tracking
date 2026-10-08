@@ -384,7 +384,7 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
 PARADIGM_KEY_RESEARCHER_LIMIT: int = max(
     1, min(_env_int("PARADIGM_KEY_RESEARCHER_LIMIT", 3), 6)
 )
-PARADIGM_STATE_SCHEMA_VERSION: int = 7
+PARADIGM_STATE_SCHEMA_VERSION: int = 8
 
 # 云端任务必须在 GitHub 的硬超时之前主动收尾。该预算只决定本轮执行到
 # backlog 的哪个位置，不参与 Rubric、排序分数或研究去留；未处理项会持久化
@@ -429,6 +429,11 @@ PARADIGM_ANALYSIS_BATCH_SIZE: int = max(
 PARADIGM_ORIGIN_PREFILTER_ENABLED: bool = _env_bool(
     "PARADIGM_ORIGIN_PREFILTER_ENABLED", True
 )
+# Only the short eligibility schema is batched more widely. Full mechanism
+# requests retain their concurrency and per-origin checkpoint boundaries.
+PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE: int = max(
+    1, min(_env_int("PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE", 24), 32)
+)
 # Technical Report 的机制数量不设总上限，但每次从原点队列取出时只评估
 # 有界数量，并把索引与已完成机制写回 evidence checkpoint。这样调度公平性
 # 以实际模型调用为单位，而不是让一份长报告在一次出队中独占预算。
@@ -439,6 +444,15 @@ PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE: int = max(
 PARADIGM_DEEP_BATCH_SIZE: int = max(
     1, min(_env_int("PARADIGM_DEEP_BATCH_SIZE", 1), 6)
 )
+PARADIGM_DEEP_CONCURRENCY: int = max(
+    1, min(_env_int("PARADIGM_DEEP_CONCURRENCY", 2), 4)
+)
+# Extra cloud runs require the owner's explicit opt-in. These are process/chain
+# limits, never research eligibility limits. Hitting them withholds the report.
+PARADIGM_AUTO_RESUME_ENABLED: bool = _env_bool("PARADIGM_AUTO_RESUME_ENABLED", False)
+PARADIGM_AUTO_RESUME_MAX_RUNS: int = max(1, min(_env_int("PARADIGM_AUTO_RESUME_MAX_RUNS", 4), 20))
+PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS: int = max(60, _env_int("PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS", 14400))
+PARADIGM_AUTO_RESUME_MAX_TOKENS: int = max(1, _env_int("PARADIGM_AUTO_RESUME_MAX_TOKENS", 4000000))
 
 # 定时任务（默认每周五 09:15，Asia/Shanghai；与 GitHub Actions 一致）
 SCHEDULE_DAY_OF_WEEK: str = os.getenv("SCHEDULE_DAY_OF_WEEK", "fri")

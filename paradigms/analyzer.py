@@ -6,11 +6,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
+import sqlite3
 from dataclasses import fields
 
 import config
-from agents.llm_utils import build_client, parse_json_object
+from agents.llm_utils import build_client, parse_json_object, resolve_model
 from run_audit import run_audit
 from skills.loader import SkillLoader
 
@@ -23,6 +25,7 @@ from .models import (
     key_researcher_profiles,
 )
 from .evidence_validation import certify_synthesis_discussion
+from .async_utils import gather_scoped
 from .rubric import (
     evaluate_rubric,
     legacy_dimension_scores,
@@ -31,6 +34,14 @@ from .rubric import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _stage_cache_signature(role, model, prompt, identity):
+    resolved = resolve_model(role)
+    value = {"version": 1, "role": role, "model": model or resolved.model,
+             "provider": resolved.provider, "base_url": resolved.base_url,
+             "prompt": prompt, "identity": identity}
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
 class ParadigmAnalyzer:
@@ -42,6 +53,8 @@ class ParadigmAnalyzer:
         *,
         enable_batch_prefilter: bool = False,
         technical_report_mechanism_slice: int = 0,
+        stage_cache=None,
+        checkpoint_callback=None,
     ):
         self.concurrency = max(concurrency, 1)
         self.client = client
@@ -51,6 +64,8 @@ class ParadigmAnalyzer:
             int(technical_report_mechanism_slice or 0), 0
         )
         self.skill_loader = SkillLoader()
+        self.stage_cache = stage_cache
+        self.checkpoint_callback = checkpoint_callback
 
     def _get_client(self):
         if self.client is None:
@@ -112,6 +127,8 @@ class ParadigmAnalyzer:
             async with semaphore:
                 try:
                     values = await self.extract(item)
+                except (sqlite3.DatabaseError, OSError):
+                    raise
                 except Exception as exc:
                     # ``extract`` already converts ordinary LLM/JSON failures
                     # into a retryable placeholder. This outer boundary catches
@@ -147,6 +164,35 @@ class ParadigmAnalyzer:
     async def _screen_origin_batch(
         self,
         evidence: list[TechnicalEvidence],
+    ) -> dict[str, tuple[str, str]]:
+        """Reuse per-origin receipts even if later full reviews time out."""
+        cache = getattr(self, "stage_cache", None)
+        if cache is None:
+            return await self._screen_uncached_origin_batch(evidence)
+        signatures, decisions, missing = {}, {}, []
+        for item in evidence:
+            prompt = self.skill_loader.render("origin_eligibility", origin_records=json.dumps([{
+                "fingerprint": item.fingerprint, "source": item.source[:80],
+                "title": item.title[:300], "summary": item.summary[:2400],
+                "origin_kind": str(item.raw.get("origin_kind", "research_paper")),
+                "frontier_domains": item.raw.get("frontier_domains", []),
+            }], ensure_ascii=False))
+            signature = _stage_cache_signature("sub", self.model, prompt, item.source_revision)
+            signatures[item.fingerprint] = signature
+            result = cache.cache_get("origin_eligibility", signature)
+            if result is not None and result.get("decision") in {"full_review", "screen_out"} and isinstance(result.get("reason"), str) and (result["decision"] != "screen_out" or result["reason"]):
+                decisions[item.fingerprint] = (result["decision"], result["reason"])
+            else:
+                missing.append(item)
+        fresh = await self._screen_uncached_origin_batch(missing)
+        for fingerprint, (decision, reason) in fresh.items():
+            cache.cache_save("origin_eligibility", signatures[fingerprint], {"decision": decision, "reason": reason})
+        if decisions:
+            run_audit.event("origin_eligibility_cache", "reused", f"复用 {len(decisions)} 条同版本资格预筛，不重做已确认判断")
+        return {**decisions, **fresh}
+
+    async def _screen_uncached_origin_batch(
+        self, evidence: list[TechnicalEvidence],
     ) -> dict[str, tuple[str, str]]:
         """Conservatively identify records that clearly need no full Rubric.
 
@@ -199,6 +245,7 @@ class ParadigmAnalyzer:
                 if not isinstance(rows, list):
                     raise ValueError("缺少 decisions 数组")
                 decisions: dict[str, tuple[str, str]] = {}
+                seen, duplicate = set(), set()
                 foreign = 0
                 for row in rows:
                     if not isinstance(row, dict):
@@ -207,15 +254,19 @@ class ParadigmAnalyzer:
                     if fingerprint not in allowed:
                         foreign += 1
                         continue
+                    if fingerprint in seen:
+                        duplicate.add(fingerprint)
+                        continue
+                    seen.add(fingerprint)
                     verdict = str(row.get("decision", "")).strip()
                     reason = str(row.get("reason", "")).strip()
                     if verdict not in {"full_review", "screen_out"}:
                         continue
                     if verdict == "screen_out" and not reason:
                         continue
-                    if fingerprint in decisions:
-                        raise ValueError("同一 fingerprint 返回多次")
                     decisions[fingerprint] = (verdict, reason)
+                for fingerprint in duplicate:
+                    decisions.pop(fingerprint, None)
                 if foreign:
                     run_audit.event(
                         "origin_eligibility_contract",
@@ -469,6 +520,10 @@ class ParadigmAnalyzer:
                 evidence.raw["technical_report_mechanism_seeds"] = mechanisms
                 evidence.raw["technical_report_completed_mechanisms"] = {}
                 evidence.raw["technical_report_mechanism_failure_counts"] = {}
+                evidence.raw["technical_report_committed_candidates"] = {}
+                if self.checkpoint_callback is not None:
+                    evidence.raw["technical_report_slice_pending"] = True
+                    self.checkpoint_callback(evidence, None, "")
         if not mechanisms:
             if not index_error and disposition_reason:
                 return [
@@ -540,19 +595,30 @@ class ParadigmAnalyzer:
                 )
                 return key, extraction, error
 
-        assessed = await asyncio.gather(
-            *(guarded(key, index, seed) for key, index, seed in selected)
-        )
+        tasks = [asyncio.create_task(guarded(key, index, seed)) for key, index, seed in selected]
         failures = []
         newly_completed: list[ParadigmExtraction] = []
-        for key, extraction, error in assessed:
-            if extraction is None:
-                failure_counts[key] = int(failure_counts.get(key, 0) or 0) + 1
-                failures.append(f"{key[:10]}: {error}")
-                continue
-            completed_payloads[key] = _report_extraction_payload(extraction)
-            failure_counts.pop(key, None)
-            newly_completed.append(extraction)
+        try:
+            for task in asyncio.as_completed(tasks):
+                key, extraction, error = await task
+                if extraction is None:
+                    failure_counts[key] = int(failure_counts.get(key, 0) or 0) + 1
+                    failures.append(f"{key[:10]}: {error}")
+                    continue
+                extraction.mechanism_id = f"report-{evidence.fingerprint[:16]}-{key}"
+                completed_payloads[key] = _report_extraction_payload(extraction)
+                failure_counts.pop(key, None)
+                newly_completed.append(extraction)
+                if self.checkpoint_callback is not None:
+                    evidence.raw["technical_report_completed_mechanisms"] = completed_payloads
+                    evidence.raw["technical_report_mechanism_failure_counts"] = failure_counts
+                    evidence.raw["technical_report_slice_pending"] = True
+                    self.checkpoint_callback(evidence, extraction, key)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         evidence.raw["technical_report_completed_mechanisms"] = completed_payloads
         evidence.raw["technical_report_mechanism_failure_counts"] = failure_counts
 
@@ -563,6 +629,7 @@ class ParadigmAnalyzer:
                 continue
             restored = _report_extraction_from_payload(evidence, payload)
             if restored is not None:
+                restored.mechanism_id = f"report-{evidence.fingerprint[:16]}-{key}"
                 successful.append(restored)
 
         remaining = len(mechanisms) - len(successful)
@@ -944,11 +1011,12 @@ def _author_prompt_summary(authors: list[str]) -> str:
 class ResearcherTrajectoryAnalyzer:
     """用代表作验证研究连续性，不推测作者创业意愿。"""
 
-    def __init__(self, concurrency: int = 4, client=None, model: str = ""):
+    def __init__(self, concurrency: int = 4, client=None, model: str = "", *, stage_cache=None):
         self.concurrency = max(concurrency, 1)
         self.client = client
         self.model = model
         self.skill_loader = SkillLoader()
+        self.stage_cache = stage_cache
 
     def _get_client(self):
         if self.client is None:
@@ -964,16 +1032,21 @@ class ResearcherTrajectoryAnalyzer:
             async with semaphore:
                 await self._analyze_one(candidate, profile)
 
-        await asyncio.gather(
-            *(
-                analyze(candidate, profile)
+        tasks = [
+                asyncio.create_task(analyze(candidate, profile))
                 for candidate in candidates
                 for profile in key_researcher_profiles(
                     candidate.researchers,
                     config.PARADIGM_KEY_RESEARCHER_LIMIT,
                 )
-            )
-        )
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         return candidates
 
     async def _analyze_one(
@@ -997,15 +1070,33 @@ class ResearcherTrajectoryAnalyzer:
         )
         response = None
         try:
-            client, model = self._get_client()
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=1100,
-                response_format={"type": "json_object"},
-            )
-            payload = parse_json_object(response.choices[0].message.content or "{}")
+            signature = _stage_cache_signature("main", self.model, prompt, {
+                "candidate": candidate.key, "person_identifiers": profile.identifiers,
+                "origins": sorted((item.fingerprint, item.source_revision) for item in candidate.evidence if item.evidence_type in {EvidenceType.PRIMARY_PAPER, EvidenceType.TECHNICAL_BLOG, EvidenceType.CONCEPT_ESSAY, EvidenceType.ORIGINAL_IMPLEMENTATION}),
+            })
+            cache = getattr(self, "stage_cache", None)
+            payload = cache.cache_get("researcher_trajectory", signature) if cache else None
+            model = self.model or resolve_model("main").model
+            if payload is None:
+                client, model = self._get_client()
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    max_tokens=1100,
+                    response_format={"type": "json_object"},
+                )
+                payload = parse_json_object(response.choices[0].message.content or "{}")
+            for key in ("background_summary", "trajectory_summary", "key_person_reason", "current_role_note"):
+                if not isinstance(payload.get(key), str) or (key != "current_role_note" and not payload[key].strip()):
+                    raise ValueError("人物分析 JSON 字段未闭合：" + key)
+                if key != "current_role_note" and not re.search(r"[\u4e00-\u9fff]", payload[key]):
+                    raise ValueError("人物解释字段必须使用中文：" + key)
+            consistency = payload.get("trajectory_consistency")
+            if isinstance(consistency, bool) or not isinstance(consistency, (int, float)) or not math.isfinite(consistency) or not 0 <= consistency <= 10:
+                raise ValueError("人物连续性计数无效")
+            if cache and response is not None:
+                cache.cache_save("researcher_trajectory", signature, payload)
             background = str(payload.get("background_summary", "")).strip()
             if background:
                 profile.background_summary = background
@@ -1027,13 +1118,13 @@ class ResearcherTrajectoryAnalyzer:
                 profile.research_trajectory = (
                     f"{profile.research_trajectory} 当前状态：{note}"
                 ).strip()
-            run_audit.record_llm(
-                stage="researcher_trajectory",
-                role="main",
-                model=model,
-                subject=f"{candidate.name} / {profile.name}",
-                response=response,
-            )
+            if response is not None:
+                run_audit.record_llm(
+                    stage="researcher_trajectory", role="main", model=model,
+                    subject=f"{candidate.name} / {profile.name}", response=response,
+                )
+            else:
+                run_audit.event("researcher_trajectory_cache", "reused", f"复用 {profile.name} 同身份、同材料与规则版本的人物研究")
         except Exception as exc:
             logger.warning("研究轨迹分析失败 [%s]: %s", profile.name, exc)
             run_audit.record_llm(
@@ -1073,7 +1164,7 @@ class ParadigmSynthesizer:
             async with semaphore:
                 await self._synthesize_one(item)
 
-        await asyncio.gather(*(synthesize(item) for item in candidates))
+        await gather_scoped(*(synthesize(item) for item in candidates))
         return candidates
 
     async def _synthesize_one(self, candidate: ParadigmCandidate) -> None:

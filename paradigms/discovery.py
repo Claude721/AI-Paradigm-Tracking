@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
+import json
 import logging
 import re
 import time
@@ -12,7 +15,8 @@ from runtime_clock import research_now
 from urllib.parse import urlparse
 
 import config
-from sources.arxiv_source import ArxivSource
+from research_watchlist import KOL_SOURCES, default_kol_x_accounts
+from sources.arxiv_source import ArxivSource, TECHNICAL_REPORT_QUERY
 from sources.base import RawProject
 from sources.curated_intelligence_source import (
     CuratedKOLSource,
@@ -29,12 +33,16 @@ from sources.official_repository_release_source import (
 from sources.priority_research_source import PriorityResearchPageSource
 from sources.research_feed_source import ResearchFeedSource
 
-from .landscape import classify_frontier_domains, coverage_report
+from .landscape import (
+    arxiv_priority_author_query_plan, arxiv_query_plan,
+    classify_frontier_domains, coverage_report,
+)
 from .models import (
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
     TechnicalEvidence,
     nonnegative_number,
+    _evidence_datetime,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,17 +124,46 @@ class ParadigmDiscovery:
             self.kol_x,
         ]
 
-    async def run(self) -> DiscoveryBatch:
-        sources = [
+    def _sources(self):
+        return [
             self.arxiv,
             self.hf,
             self.follow_builders,
             *self.evidence_sources,
             self.official_repositories,
         ]
-        fetched = await asyncio.gather(
-            *(self._bounded_fetch(source) for source in sources),
-        )
+
+    def _plan_signatures(self):
+        # Credentials and runtime/concurrency counters are deliberately absent.
+        settings = {
+            "research-blog": [config.RESEARCH_FEED_URLS],
+            "curated-kol-feeds": [config.KOL_SOURCE_ENABLED, config.KOL_CUSTOM_FEED_URLS,
+                [(item["id"], item.get("feed_urls", ()), item.get("origin_policy", "")) for item in KOL_SOURCES]],
+            "high-signal-forums": [config.LESSWRONG_SOURCE_ENABLED, config.ALIGNMENT_FORUM_SOURCE_ENABLED, config.LESSWRONG_KARMA_THRESHOLD],
+            "curated-kol-x": [config.KOL_X_SOURCE_ENABLED, config.TWITTER_WATCH_ACCOUNTS, default_kol_x_accounts()],
+            "arxiv": [config.PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED, arxiv_query_plan(),
+                arxiv_priority_author_query_plan(config.PRIORITY_RESEARCHERS), TECHNICAL_REPORT_QUERY],
+            "follow-builders": [config.FOLLOW_BUILDERS_ENABLED],
+        }
+        plans = {}
+        for source in self._sources():
+            value = {field: getattr(source, field) for field in ("lookback_days", "high_signal_lookback_days", "seed_arxiv_ids", "venues", "searches", "pages", "organizations", "feed_base_url") if hasattr(source, field)}
+            if isinstance(source, HighSignalForumSource):
+                value["feeds"] = source._feeds()
+            value["settings"] = settings.get(source.source_name, [])
+            plans[source.source_name] = hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        return plans
+
+    async def run(self, *, source_names: set[str] | None = None) -> DiscoveryBatch:
+        sources = self._sources()
+        known = {source.source_name for source in sources}
+        if source_names is not None and source_names - known:
+            raise ValueError("不能续跑未知发现入口：" + ", ".join(sorted(source_names - known)))
+        async def fetch(source):
+            if source_names is not None and source.source_name not in source_names:
+                return [], {"source": source.source_name, "status": "cached", "results": 0}
+            return await self._bounded_fetch(source)
+        fetched = await asyncio.gather(*(fetch(source) for source in sources))
         batches = [result for result, _ in fetched]
         source_health = {
             str(health["source"]): health for _, health in fetched
@@ -184,6 +221,10 @@ class ParadigmDiscovery:
             repository_batch
         )
 
+        # A resumed source can return today's feed even at an older business
+        # clock. Do not let post-cutoff events expand the frozen campaign.
+        origins = [item for item in origins if not (date := _evidence_datetime(item.published_at)) or date <= research_now() or item.raw.get("explicit_seed")]
+        supporting = [item for item in supporting if not (date := _evidence_datetime(item.published_at)) or date <= research_now()]
         origins = _merge_origins(origins)
         for item in origins:
             if not item.raw.get("frontier_domains"):
@@ -226,6 +267,7 @@ class ParadigmDiscovery:
         )
         coverage["recall_lanes"] = self.arxiv.recall_coverage()
         coverage["source_health"] = source_health
+        coverage["source_plan_signatures"] = self._plan_signatures()
         coverage["official_pages"] = self.priority_pages.coverage()
         coverage["official_repositories"] = self.official_repositories.coverage()
         coverage["curated_kol_sources"] = self.kol_feeds.coverage()
@@ -260,6 +302,54 @@ class ParadigmDiscovery:
             supporting=supporting,
             source_counts=source_counts,
             coverage=coverage,
+        )
+
+    async def retry(self, previous: DiscoveryBatch) -> DiscoveryBatch:
+        """Retry failed capabilities at the original clock; retain healthy lanes.
+
+        Partial receipts never become completed simply because the next process
+        no longer has their source configured. A source set change is explicit
+        incompatibility, not evidence that the original search was performed.
+        """
+        from paradigms.completion import discovery_retry_sources
+        selected = discovery_retry_sources(previous.coverage)
+        if not selected:
+            return previous
+        prior_plans = previous.coverage.get("source_plan_signatures") or {}
+        if prior_plans:
+            current_plans = self._plan_signatures()
+            if any(prior_plans.get(name) != current_plans.get(name) for name in selected):
+                raise RuntimeError("未完成入口的召回范围发生变化；不能把换配置当作原批次覆盖完成")
+        fresh = await self.run(source_names=selected)
+        coverage = copy.deepcopy(previous.coverage)
+        for name in selected:
+            current = fresh.coverage["source_health"][name]
+            prior = (previous.coverage.get("source_health") or {}).get(name, {})
+            if current.get("status") in {"not_configured", "disabled"} and prior.get("status") not in {"not_configured", "disabled"}:
+                current = {**current, "status": "configuration_changed", "error": "original planned capability removed"}
+            coverage.setdefault("source_health", {})[name] = current
+        sections = {
+            "arxiv": ("domains", "recall_lanes", "query_failures", "covered_domains", "total_domains", "landscape_version"),
+            "priority-research-page": ("official_pages",),
+            "official-repository-release": ("official_repositories",),
+            "curated-kol-feeds": ("curated_kol_sources",),
+            "high-signal-forums": ("high_signal_forums",),
+            "curated-kol-x": ("curated_kol_x",),
+        }
+        for name in selected:
+            for section in sections.get(name, ()):
+                coverage[section] = fresh.coverage.get(section, {})
+            if name in {"arxiv", "openalex", "openreview"}:
+                coverage.setdefault("academic_indexes", {})[name] = fresh.coverage["academic_indexes"][name]
+        aliases = {"huggingface-papers": "huggingface_daily_papers", "follow-builders": "follow_builders"}
+        counts = dict(previous.source_counts)
+        for name in selected:
+            alias = aliases.get(name, name)
+            counts[alias] = fresh.source_counts.get(alias, 0)
+        return DiscoveryBatch(
+            origins=_merge_origins([*previous.origins, *fresh.origins]),
+            supporting=list({item.fingerprint: item for item in [*previous.supporting, *fresh.supporting]}.values()),
+            source_counts=counts, coverage=coverage,
         )
 
     async def _bounded_fetch(self, source) -> tuple[list, dict[str, object]]:

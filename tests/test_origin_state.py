@@ -7,9 +7,11 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+import config
 
 from agents.paradigm_orchestrator import ParadigmOrchestrator, _commit_origin_analysis_checkpoint
 from database.paradigm_store import ParadigmStore
@@ -93,7 +95,13 @@ class ResearchClockTests(unittest.TestCase):
             return {"time": research_now()}
         orchestrator._run_research = body
         reference = datetime(2026, 9, 4, tzinfo=timezone.utc)
-        self.assertEqual(asyncio.run(orchestrator.run(reference_time=reference))["time"], reference)
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator.store = ParadigmStore(Path(directory) / "state.db")
+            orchestrator.bootstrap_mode = False
+            orchestrator.ordinary_discovery_lookback_days = 7
+            orchestrator.high_signal_discovery_lookback_days = 30
+            orchestrator.discovery = SimpleNamespace()
+            self.assertEqual(asyncio.run(orchestrator.run(reference_time=reference))["time"], reference)
 
 
 class OriginStateTests(unittest.TestCase):
@@ -209,7 +217,7 @@ class OriginStateTests(unittest.TestCase):
         self.assertEqual(result.rejected_count, 1)
         self.assertEqual([item.title for item in result.accepted], ["good"])
         self.assertEqual([item.title for item in self.store.load_pending_origins()], ["bad"])
-        self.assertEqual(migrate_state(self.path, 7), 7)
+        self.assertEqual(migrate_state(self.path, 7), config.PARADIGM_STATE_SCHEMA_VERSION)
 
     def test_incompatible_index_does_not_replace_progress(self):
         item = self.observe()
@@ -269,7 +277,7 @@ class OriginStateTests(unittest.TestCase):
             payload = json.loads(conn.execute("SELECT payload_json FROM evidence_state").fetchone()[0])
             payload.pop("source_revision", None)
             conn.execute("UPDATE evidence_state SET payload_json=?", (json.dumps(payload),))
-        self.assertEqual(migrate_state(self.path, 6), 7)
+        self.assertEqual(migrate_state(self.path, 6), config.PARADIGM_STATE_SCHEMA_VERSION)
         self.store = ParadigmStore(self.path)
         self.assertEqual(self.state()[3], "legacy_unverified")
         selected, stats, _ = self.store.observe_origins([paper()])

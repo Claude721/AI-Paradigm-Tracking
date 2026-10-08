@@ -13,7 +13,7 @@ from sources.paradigm_evidence_source import CommunityEvidenceClient
 from sources.semantic_scholar_source import SemanticScholarClient
 from sources.researcher_profile_source import ResearcherProfileClient
 from sources.arxiv_document_source import ArxivDocumentClient
-from runtime_clock import research_now
+from runtime_clock import observation_now
 
 from .models import (
     EvidenceType,
@@ -25,6 +25,7 @@ from .models import (
     is_verified_substantive_discussion,
 )
 from .researcher_identity import merge_researcher_profiles
+from .async_utils import gather_scoped
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class EvidenceEnricher:
                 await self._external_enrichment(candidate)
                 return candidate
 
-        return await asyncio.gather(*(enrich_one(candidate) for candidate in candidates))
+        return await gather_scoped(*(enrich_one(candidate) for candidate in candidates))
 
     async def hydrate_priority_origins(
         self, evidence: list[TechnicalEvidence]
@@ -151,7 +152,7 @@ class EvidenceEnricher:
                     ):
                         item.raw["metric_delta"] = delta
                         item.raw["metric_delta_observed_at"] = (
-                            research_now().isoformat()
+                            observation_now().isoformat()
                         )
                         item.raw["metric_baseline"] = {
                             key: nonnegative_number(value)
@@ -164,7 +165,7 @@ class EvidenceEnricher:
                 _attach_social_profiles(candidate)
                 return candidate
 
-        refreshed = await asyncio.gather(*(refresh_one(item) for item in candidates))
+        refreshed = await gather_scoped(*(refresh_one(item) for item in candidates))
         return [item for item in refreshed if item is not None]
 
     async def _external_enrichment(self, candidate: ParadigmCandidate) -> None:

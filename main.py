@@ -6,9 +6,10 @@ Usage:
     python main.py              # 立即执行一次完整的范式研究流水线
     python main.py --setup      # 交互式配置环境变量（首次使用推荐）
     python main.py --status     # 查看当前配置状态
-    python main.py --inspect-state # 只读查看研究/交付队列健康度
+    python main.py --inspect-state # 查看研究/交付队列健康度；不请求外部服务
     python main.py --schedule   # 启动定时任务模式（默认每周五 09:15）
-    python main.py --report     # 仅重新生成今日报告（不重新拉取数据）
+    python main.py --report     # 续投或重建已闭合历史报告（不重新拉取数据）
+    python main.py --resume-research # 只续跑原窗口的未完成批次，不启动新发现
     python main.py --doctor     # 零网络静态配置检查
     python main.py --smoke-test # 小成本真实接口检查，不发送邮件
 """
@@ -414,7 +415,7 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
     return stats
 
 
-async def _run_pipeline_once() -> dict:
+async def _run_pipeline_once(*, resume_only: bool = False, expected_campaign_id: str = "") -> dict:
     """执行一次流水线；研究检查点与正式交付使用独立状态。"""
 
     from run_audit import run_audit
@@ -422,6 +423,10 @@ async def _run_pipeline_once() -> dict:
     run_audit.reset()
     _check_env()
     _print_model_banner()
+    if expected_campaign_id and not resume_only:
+        raise RuntimeError("指定批次身份只能用于严格研究续跑")
+    if resume_only and config.PIPELINE_MODE == "legacy":
+        raise RuntimeError("--resume-research 仅适用于范式研究")
     if config.PIPELINE_MODE == "legacy":
         from agents.orchestrator import Orchestrator
 
@@ -431,10 +436,18 @@ async def _run_pipeline_once() -> dict:
         from reports.paradigm_generator import ParadigmReportGenerator
 
         orchestrator = ParadigmOrchestrator()
+        if resume_only:
+            active = orchestrator.store.campaigns.active(load_discovery=False)
+            if active is None:
+                raise RuntimeError("没有待续跑研究批次；拒绝创建新期或发送其他历史报告")
+            if expected_campaign_id and active.campaign_id != expected_campaign_id:
+                raise RuntimeError("续跑批次身份不匹配；拒绝读取新期或发送其他批次报告")
         generator = ParadigmReportGenerator()
         quarantined_recovery: dict = {}
         pending_job = orchestrator.store.load_pending_report_job()
         if pending_job is not None:
+            if resume_only and (pending_job.stats.get("research_campaign") or {}).get("campaign_id") != active.campaign_id:
+                raise RuntimeError("待投递报告不属于续跑批次；拒绝发送其他历史报告")
             logger.warning(
                 "发现未完成交付 %s（状态=%s），本次只复用研究结果完成报告/邮件",
                 pending_job.delivery_key[:12],
@@ -467,7 +480,12 @@ async def _run_pipeline_once() -> dict:
                 pending_job.delivery_key[:12],
             )
 
-    stats = await orchestrator.run()
+    if resume_only:
+        if config.PIPELINE_MODE == "legacy":
+            raise RuntimeError("--resume-research 仅适用于范式研究")
+        stats = await orchestrator.run(resume_only=True)
+    else:
+        stats = await orchestrator.run()
     if config.PIPELINE_MODE != "legacy" and quarantined_recovery:
         stats.update(quarantined_recovery)
     if config.PIPELINE_MODE != "legacy":
@@ -525,12 +543,12 @@ async def _run_pipeline_once() -> dict:
     return stats
 
 
-async def run_pipeline() -> dict:
+async def run_pipeline(*, resume_only: bool = False, expected_campaign_id: str = "") -> dict:
     """执行流水线；失败时保留研究检查点和未完成交付供下次续跑。"""
 
     try:
         with _pipeline_lock():
-            return await _run_pipeline_once()
+            return await _run_pipeline_once(resume_only=resume_only, expected_campaign_id=expected_campaign_id) if resume_only or expected_campaign_id else await _run_pipeline_once()
     except Exception:
         logger.exception("本次任务失败；保留已完成研究检查点供下次续跑")
         from run_audit import run_audit
@@ -578,6 +596,7 @@ def _write_pipeline_result(result: dict) -> Path:
         "delivery_quarantined": bool(result.get("delivery_quarantined")),
         "delivery_failure_kind": str(result.get("delivery_failure_kind", "")),
         "delivery_blocking_reasons": result.get("delivery_blocking_reasons", []),
+        "research_campaign": result.get("research_campaign", {}),
         "recovered_delivery_quarantined": bool(
             result.get("recovered_delivery_quarantined")
         ),
@@ -585,6 +604,11 @@ def _write_pipeline_result(result: dict) -> Path:
         "email_sent": bool(result.get("email_sent")),
         "report_path": str(result.get("report_path", "")),
     }
+    for field in ("run_budget_exhausted", "analysis_failed_count", "candidate_execution_deferred_count", "candidate_input_deferred_count",
+                  "candidate_research_incomplete_count", "refresh_execution_deferred_count", "evidence_checkpoint_rejected_count",
+                  "delivery_profile_deferred_count", "delivery_source_deferred_count", "analysis_safety_deferred_count",
+                  "candidate_safety_deferred_count", "refresh_safety_deferred_count", "report_safety_deferred_count"):
+        payload[field] = result.get(field, False if field == "run_budget_exhausted" else 0)
     output.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -709,13 +733,18 @@ def main() -> None:
     parser.add_argument(
         "--inspect-state",
         action="store_true",
-        help="只读输出范式数据库和报告 outbox 健康度；不请求网络",
+        help="输出研究批次/队列/outbox 健康度；不请求网络，旧库初始化可迁移",
     )
     parser.add_argument(
         "--report",
         action="store_true",
         help="优先续投失败报告；否则不拉取新数据，重生成最近报告并发送邮件",
     )
+    parser.add_argument(
+        "--resume-research", action="store_true",
+        help="仅续跑已存在的固定研究批次；不启动新期发现，闭合后才交付",
+    )
+    parser.add_argument("--expected-campaign-id", default="", help="续跑链的批次身份保护；仅与 --resume-research 同用")
     parser.add_argument(
         "--doctor",
         action="store_true",
@@ -747,6 +776,10 @@ def main() -> None:
         help="仅发送云端任务失败提醒；不运行研究流水线",
     )
     args = parser.parse_args()
+    if args.expected_campaign_id and not args.resume_research:
+        parser.error("--expected-campaign-id 需要 --resume-research")
+    if args.resume_research and any((args.setup, args.status, args.inspect_state, args.schedule, args.report, args.doctor, args.smoke_test, args.notify_failure)):
+        parser.error("--resume-research 不得与其他执行模式混用")
 
     if args.setup:
         from setup_env import run_setup
@@ -768,6 +801,7 @@ def main() -> None:
                     "database": str(config.PARADIGM_DB_PATH),
                     "stats": store.stats(),
                     "outbox": store.delivery_queue_snapshot(),
+                    "research_campaign": store.campaigns.snapshot(store.campaigns.active().campaign_id) if store.campaigns.active() else None,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -779,6 +813,10 @@ def main() -> None:
     elif args.report:
         setup_logging()
         asyncio.run(regenerate_report())
+    elif args.resume_research:
+        setup_logging()
+        result = asyncio.run(run_pipeline(resume_only=True, expected_campaign_id=args.expected_campaign_id))
+        _write_pipeline_result(result)
     elif args.doctor:
         from healthcheck import blocking_checks, print_checks
 

@@ -42,6 +42,8 @@ class RunAudit:
         first_choice = choices[0] if choices else None
         message = getattr(first_choice, "message", None)
         content = getattr(message, "content", "") or ""
+        total = getattr(usage, "total_tokens", None)
+        usage_reported = type(total) is int and total >= 0 and (not content or total > 0)
         self.llm_calls.append(
             {
                 "stage": stage,
@@ -49,6 +51,7 @@ class RunAudit:
                 "model": model,
                 "subject": _clean(subject, 180),
                 "status": "failed" if error else "passed",
+                "usage_reported": usage_reported,
                 "prompt_tokens": _integer(getattr(usage, "prompt_tokens", 0)),
                 "completion_tokens": _integer(
                     getattr(usage, "completion_tokens", 0)
@@ -137,6 +140,9 @@ class RunAudit:
             by_stage[str(item["stage"])] += _integer(item.get("total_tokens"))
         return {
             "llm_call_count": len(self.llm_calls),
+            "llm_unreported_usage_count": sum(
+                item.get("usage_reported") is not True for item in self.llm_calls
+            ),
             "llm_failed_count": sum(
                 item.get("status") == "failed" for item in self.llm_calls
             ),
@@ -302,6 +308,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
             "## 模型用量",
             "",
             f"- 调用：{llm['llm_call_count']} 次；失败 {llm['llm_failed_count']} 次",
+            f"- 用量未确认：{llm.get('llm_unreported_usage_count', 0)} 次；不能将缺失用量视为测得零",
             f"- 输入 tokens：{llm['llm_prompt_tokens']}",
             f"- 输出 tokens：{llm['llm_completion_tokens']}",
             f"- 其中 reasoning tokens：{llm['llm_reasoning_tokens']}",

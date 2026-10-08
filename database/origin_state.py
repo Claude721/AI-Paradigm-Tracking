@@ -19,6 +19,7 @@ EXECUTION_KEYS = (
     "technical_report_completed_mechanisms", "technical_report_mechanism_failure_counts",
     "technical_report_slice_pending", "technical_report_partial_failure",
     "technical_report_last_run_failure",
+    "technical_report_committed_candidates",
 )
 
 
@@ -87,6 +88,9 @@ def merge_checkpoint(previous, incoming):
         for key, value in incoming.get(failure_key, {}).items():
             failures[key] = max(int(value), int(failures.get(key, 0)))
         result[failure_key] = {key: value for key, value in failures.items() if key not in completed}
+    receipt_key = "technical_report_committed_candidates"
+    if receipt_key in previous or receipt_key in incoming:
+        result[receipt_key] = {**incoming.get(receipt_key, {}), **previous.get(receipt_key, {})}
     seeds = result.get(seeds_key, [])
     if seeds:
         if len(completed) >= len(seeds):
@@ -197,6 +201,9 @@ def validate_checkpoint(checkpoint):
     for key in ("technical_report_completed_mechanisms", "technical_report_mechanism_failure_counts"):
         if key in checkpoint and not isinstance(checkpoint[key], dict):
             raise ValueError("原点机制检查点必须为映射")
+    receipts = checkpoint.get("technical_report_committed_candidates", {})
+    if not isinstance(receipts, dict) or any(not isinstance(keys, list) or any(not isinstance(key, str) or not key for key in keys) for keys in receipts.values()):
+        raise ValueError("机制下游提交凭据必须为候选身份数组")
     for value in checkpoint.get("technical_report_completed_mechanisms", {}).values():
         if not isinstance(value, dict):
             raise ValueError("已完成机制必须为结构化对象")

@@ -29,6 +29,7 @@ _WORKFLOW_STEPS = (
     ("UPLOAD_STATE_STEP_OUTCOME", "upload_state", "上传跨周状态"),
     ("UPLOAD_REPORT_STEP_OUTCOME", "upload_report", "上传报告制品"),
     ("CONTINUATION_STEP_OUTCOME", "continuation", "排队本周新研究"),
+    ("RESEARCH_CONTINUATION_STEP_OUTCOME", "research_continuation", "排队原批次预算续跑"),
     ("UPLOAD_AUDIT_STEP_OUTCOME", "upload_audit", "上传审计制品"),
 )
 
@@ -141,13 +142,16 @@ def _send_sync(
         body = (
             status_line
             + "\n\n"
-            f"回看窗口：最近 {config.SOURCING_LOOKBACK_DAYS} 天\n"
+            f"回看窗口：最近 {stats.get('ordinary_discovery_lookback_days', config.SOURCING_LOOKBACK_DAYS)} 天\n"
             f"扫描论文/技术博客：{stats.get('origin_count', 0)}\n"
             f"首次捕捉范式：{stats.get('new_paradigms', 0)}\n"
             f"实质进展更新：{stats.get('updated_paradigms', 0)}\n\n"
             f"本轮完成机制抽取：{stats.get('analysis_completed_count', stats.get('analysis_count', 0))}/"
             f"{stats.get('planned_analysis_count', 0)}\n"
             "本期计划研究事务已全部闭合。\n\n"
+            + (f"本期累计机制判断：{stats['research_campaign']['origin_completed']}/{stats['research_campaign']['origin_planned']}；"
+               f"研究批次执行 {stats['research_campaign']['attempt_count']} 次。\n\n" if stats.get("research_campaign") else "")
+            +
             f"LLM 调用：{stats.get('llm_call_count', 0)} 次\n"
             f"LLM 合计 tokens：{stats.get('llm_total_tokens', 0)}\n\n"
             "完整证据、人物轨迹、公开专业联系方式和运行审计见附件。"

@@ -23,6 +23,7 @@ from paradigms.researcher_identity import (
     same_verified_researcher,
 )
 from paradigms.reputation import resolve_organization
+from paradigms.async_utils import gather_scoped
 
 logger = logging.getLogger(__name__)
 OPENALEX_AUTHORS = "https://api.openalex.org/authors"
@@ -79,7 +80,7 @@ class ResearcherProfileClient:
             # A same-name historical profile without a shared identifier is
             # kept for the route, but must not be re-identified against this
             # different paper or inherit its contact evidence.
-            await asyncio.gather(
+            await gather_scoped(
                 *(enrich_one(profile) for profile in profiles[:active_count])
             )
         active = profiles[:active_count]

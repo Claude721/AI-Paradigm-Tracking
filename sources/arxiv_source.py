@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import time
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from runtime_clock import research_now
 
 import httpx
@@ -90,6 +93,8 @@ class ArxivSource(BaseSource):
         self.technical_query_false_positives = 0
         self._circuit_open = False
         self.circuit_reason = ""
+        self._last_request_started: float | None = None
+        self._request_lock = asyncio.Lock()
 
     def _now(self) -> datetime:
         """Return one injectable UTC clock for all lookback decisions.
@@ -369,6 +374,7 @@ class ArxivSource(BaseSource):
         page_size = min(result_limit, 500) if result_limit else 500
         start = 0
         results: list[RawProject] = []
+        seen_pages: set[tuple[str, ...]] = set()
         while True:
             remaining = (
                 max(result_limit - len(results), 0)
@@ -381,6 +387,14 @@ class ArxivSource(BaseSource):
             response = await self._request(
                 client, query, request_size, start=start
             )
+            page = _validated_atom_root(response.text)
+            identities = tuple(
+                entry.findtext("atom:id", "", ARXIV_NS)
+                for entry in page.findall("atom:entry", ARXIV_NS)
+            )
+            if identities and identities in seen_pages:
+                raise ValueError("arXiv 分页重复，无法确认召回窗口完整")
+            seen_pages.add(identities)
             parsed = self._parse_atom_feed(
                 response.text,
                 force_technical_report=force_technical_report,
@@ -461,8 +475,16 @@ class ArxivSource(BaseSource):
         last_error: Exception | None = None
         for attempt in range(2):
             try:
-                self.request_count += 1
-                response = await client.get(ARXIV_API, params=params)
+                # API manual requests a three-second interval between calls.
+                # All discovery lanes share this clock, including retries.
+                async with self._request_lock:
+                    if self._last_request_started is not None:
+                        wait = max(3.0 - (time.monotonic() - self._last_request_started), 0.0)
+                        if wait:
+                            await asyncio.sleep(wait)
+                    self._last_request_started = time.monotonic()
+                    self.request_count += 1
+                    response = await client.get(ARXIV_API, params=params)
                 if response.status_code == 429:
                     self.rate_limited_requests += 1
                 response.raise_for_status()
@@ -498,8 +520,23 @@ class ArxivSource(BaseSource):
                 if status == 429:
                     retry_after = exc.response.headers.get("Retry-After", "")
                     try:
-                        delay = min(max(float(retry_after), 0.75), 5.0)
-                    except ValueError:
+                        delay = float(retry_after)
+                        if not math.isfinite(delay):
+                            raise ValueError("invalid Retry-After")
+                    except (TypeError, ValueError):
+                        try:
+                            until = parsedate_to_datetime(retry_after)
+                            delay = (until - datetime.now(timezone.utc)).total_seconds()
+                        except (TypeError, ValueError, OverflowError):
+                            delay = 3.0
+                    delay = max(delay, 3.0)
+                    if delay > 60:
+                        # Do not retry early or occupy the entire source budget.
+                        # Preserve an explicit unresolved lane for a later run.
+                        self._circuit_open = True
+                        self.circuit_reason = "retry_after_exceeds_visit"
+                        raise
+                    if not math.isfinite(delay):
                         delay = 3.0
                 await asyncio.sleep(delay)
         raise RuntimeError("arXiv 请求重试后仍失败") from last_error
@@ -511,7 +548,7 @@ class ArxivSource(BaseSource):
         ignore_lookback: bool = False,
         lookback_days: int | None = None,
     ) -> tuple[int, bool]:
-        root = ET.fromstring(xml_text)
+        root = _validated_atom_root(xml_text)
         entries = root.findall("atom:entry", ARXIV_NS)
         if ignore_lookback:
             return len(entries), False
@@ -535,7 +572,7 @@ class ArxivSource(BaseSource):
         ignore_lookback: bool = False,
         lookback_days: int | None = None,
     ) -> list[RawProject]:
-        root = ET.fromstring(xml_text)
+        root = _validated_atom_root(xml_text)
         effective_lookback = lookback_days or self.lookback_days
         cutoff = self._now() - timedelta(days=effective_lookback)
         results: list[RawProject] = []
@@ -653,6 +690,17 @@ class ArxivSource(BaseSource):
             )
 
         return results
+
+
+def _validated_atom_root(xml_text: str) -> ET.Element:
+    root = ET.fromstring(xml_text)
+    if root.tag != f"{{{ARXIV_NS['atom']}}}feed":
+        raise ValueError("arXiv 响应不是 Atom feed；不能记为成功空结果")
+    for entry in root.findall("atom:entry", ARXIV_NS):
+        identity = entry.findtext("atom:id", "", ARXIV_NS).strip()
+        if not identity or re.search(r"arxiv\.org/api/errors(?:[#/?]|$)", identity):
+            raise ValueError("arXiv 响应含错误或无身份条目；召回未闭合")
+    return root
 
 
 def _latest_entry_date(entry: ET.Element) -> datetime | None:

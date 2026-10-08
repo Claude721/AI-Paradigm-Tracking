@@ -189,7 +189,7 @@ class ParadigmReportGenerator:
         prompt = self.skill_loader.render(
             "weekly_memo_frame",
             date=date,
-            lookback_days=config.SOURCING_LOOKBACK_DAYS,
+            lookback_days=stats.get("ordinary_discovery_lookback_days", config.SOURCING_LOOKBACK_DAYS),
             stats=json.dumps(_public_stats(stats), ensure_ascii=False),
             route_summaries=json.dumps(
                 frame_payload,

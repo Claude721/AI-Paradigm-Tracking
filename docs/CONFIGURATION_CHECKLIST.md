@@ -2,7 +2,7 @@
 
 > 所有密钥只填写到根目录 `.env`，不要粘贴到聊天、截图或提交到 Git。配置模板见 `.env.example`。
 
-2026-09—10 重构没有新增用户配置项，现有 `.env.example` 与 Secrets/Variables 继续适用。状态 schema v7 是代码内部版本，不要手工配置环境变量覆盖；恢复旧状态应保持 `reset_state=false`。10 月版本把原点/深挖串行阶段改为本期研究、历史更新、历史补课按耗时 6:2:1 轮转，使用原有批次、软预算和深挖预留配置。版本升级不等于 V0 验收通过，迁移与回退边界见 `CLOUD_AUTOMATION.md`。
+2026-10-08 工程候选使用 schema v8，自动迁移旧状态且保留历史结果，继续 `reset_state=false`。新增普通预筛批大小、独立路线深挖并发和默认关闭的预算续跑控制，不需要新增 Secret。已有 Variables 不变时使用代码默认值；额外研究 run 会增加 API 消耗，只有所有者明确开启才自动排队。升级不等于生产 V0 验收，迁移、续跑与回退边界见 `CLOUD_AUTOMATION.md`。
 
 ## A. 必须配置
 
@@ -102,7 +102,7 @@ GITHUB_TOKEN=你的GitHub-Token
 RESEARCH_FEED_URLS=https://research.google/blog/rss/,https://bair.berkeley.edu/blog/feed.xml,https://openai.com/news/rss.xml
 ```
 
-只填写 RSS/Atom XML 地址，不能填写普通博客首页。单个 Feed 失效时系统会跳过，不影响其他 Feed。
+只填写 RSS/Atom XML 地址，不能填写普通博客首页。单个 Feed 失效不阻止其他 Feed 继续研究，但已配置入口未闭合会阻断正式交付；不能把跳过等同于完整覆盖。
 
 高信号论坛与个人思想源使用内置、已验证的 RSS/Atom，默认无需任何 Secret：
 
@@ -254,8 +254,14 @@ PARADIGM_REPORT_ROUTE_CONCURRENCY=2
 PARADIGM_REPORT_MAX_RENDER_ATTEMPTS=3
 PARADIGM_ANALYSIS_BATCH_SIZE=6
 PARADIGM_ORIGIN_PREFILTER_ENABLED=true
+PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE=24
 PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE=2
 PARADIGM_DEEP_BATCH_SIZE=1
+PARADIGM_DEEP_CONCURRENCY=2
+PARADIGM_AUTO_RESUME_ENABLED=false
+PARADIGM_AUTO_RESUME_MAX_RUNS=4
+PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS=14400
+PARADIGM_AUTO_RESUME_MAX_TOKENS=4000000
 ```
 
 技术去留由仓库中的 `rubrics/paradigm_rubric.json` 决定；行业覆盖由 `taxonomy/frontier_landscape.json` 决定。前者维护判断问题，后者维护基础模型、推理与软件 Agent、多模态/语音/3D、具身/自动驾驶、World Model、AI4S、系统/端侧/硬件、安全等发现范围。通常两个路径都留空，直接维护仓库内版本并提交。覆盖地图的 `version` 改变后，高信号车道会回看 60 天，新增领域的普通术语车道仍从本次任务窗口建立基线，不在 reset 后引入数万条历史宽匹配。60 天只用于恢复召回，报告中的“本期新发布”仍按 `SOURCING_LOOKBACK_DAYS` 判断。
@@ -273,6 +279,14 @@ GitHub job 的硬超时为 90 分钟，默认研究预算 `3600` 秒、报告上
 `PARADIGM_RESEARCHER_PROFILE_LIMIT` 是兼容性的档案安全上限，`PARADIGM_KEY_RESEARCHER_LIMIT` 才控制每条路线实际核验与写入报告的关键人物数。默认优先一作、官方标注的通讯/负责人、末位资深作者与重点研究者；普通共同作者仍留在论文作者名单中，但不会因缺少联系方式阻断路线交付。写入报告的人物名会排除邮箱、URL、TeX/版式残片、数字与拼接联系方式；OpenAlex 已知 ID 和姓名搜索结果都需要当前论文题目对齐。仅“查过 OpenAlex”的旧记录不够，人物还必须具备最低背景、完成联系入口检索，并有直接身份锚点或当前工作交叉核验。
 
 第一次运行前必须先做专用 smoke test。模型必须按契约回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。探针不导入或调用生产召回器：arXiv 只查一个稳定 ID，GitHub 只发一次 Search，OpenAlex Works/Authors 各请求一页；官方研究页、RSS、Follow Builders 与 OpenReview venue 使用最多 5 个入口的顺序 failover，首个合法响应即停止。它不会执行领域、人物、报告、生产来源解析、详情页、cursor/offset 分页或 SQLite 序列化回环。一个公共站点的 403 会进入该能力的入口失败账本；只有有界样本全部不可用才判定整个能力失败。Smoke 通过后仍必须执行一次 `reset_state=false` 的完整运行，验证来源到持久化再到分析的生产路径。
+
+### 固定批次与预算续跑
+
+首跑冻结窗口、seed 和发现快照，后续 `python main.py` 会先推进这个批次。`python main.py --resume-research` 严格只恢复原批次；不存在时失败，不建立新任务。修改回看窗口不会改变未完成批次的日期。只有交付确认后，下一次正常运行才能建立新窗口；历史 backlog 不从分母移除。
+
+`PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE` 范围 1—32，默认 24，只影响普通资格预筛；高信号完整抽取仍由分析批大小控制。`PARADIGM_DEEP_CONCURRENCY` 范围 1—4，默认 2，控制独立路线端到端研究并发；深挖批大小不再意味着整体只能串行一条。长报告的健康机制分片有进展且仍有预算时会重新排队，不强制等下一轮；每个成功机制先保存下游，再提交父进度。
+
+自动续跑默认 `false`。开启后只处理状态已上传、同一批次的纯预算延期，源故障、执行错误、人工 safety limit、人物/URL 缺口均不自动排队。`MAX_RUNS` 1—20，默认 4（包含首跑）；`TOTAL_BUDGET_SECONDS` 默认 14400，按每次研究软预算保守预留，下一次会越限则不排队；报告/安装时间不计入该研究时间额度。`MAX_TOKENS` 默认 4000000，是已确认累计 tokens 的轮间停止线，不是单请求硬费用上限；一次运行可以越过它。硬中断导致用量未知时自动链停止，需人工核对。详见 [云端自动化](CLOUD_AUTOMATION.md)。
 
 ## E. 时间窗口与自动任务
 
