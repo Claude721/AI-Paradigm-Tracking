@@ -9,6 +9,7 @@ from .models import (
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
     ParadigmCandidate,
+    is_verified_substantive_discussion,
     nonnegative_number,
 )
 from .reputation import resolve_organization, verified_priority_researcher
@@ -58,8 +59,16 @@ def is_reportable(candidate: ParadigmCandidate) -> bool:
 
 def effective_solidity_score(candidate: ParadigmCandidate) -> float:
     types = [item.evidence_type for item in candidate.evidence]
-    independent_replications = types.count(EvidenceType.INDEPENDENT_REPLICATION)
-    implementations = types.count(EvidenceType.IMPLEMENTATION)
+    independent_replications = sum(
+        item.evidence_type == EvidenceType.INDEPENDENT_REPLICATION
+        and item.raw.get("independence") == "independent"
+        for item in candidate.evidence
+    )
+    implementations = sum(
+        item.evidence_type == EvidenceType.IMPLEMENTATION
+        and _counts_as_momentum_evidence(item, route_key=candidate.key)
+        for item in candidate.evidence
+    )
     origins = sum(item in ORIGIN_EVIDENCE_TYPES for item in types)
     review_replies = sum(
         int(_numeric_value(item.metrics.get("review_replies", 0)))
@@ -80,8 +89,7 @@ def _momentum_score(candidate: ParadigmCandidate) -> float:
     countable = [
         item
         for item in candidate.evidence
-        if not item.raw.get("indexed_discovery_only")
-        and item.raw.get("relationship") != "author_self_release"
+        if _counts_as_momentum_evidence(item, route_key=candidate.key)
     ]
     sources = {item.source for item in countable}
     types = {item.evidence_type for item in countable}
@@ -90,23 +98,13 @@ def _momentum_score(candidate: ParadigmCandidate) -> float:
         for item in countable
         if (
             item.evidence_type
-            in {
-                EvidenceType.INDEPENDENT_REPLICATION,
-                EvidenceType.PRODUCT_ADOPTION,
-            }
+            in {EvidenceType.INDEPENDENT_REPLICATION, EvidenceType.PRODUCT_ADOPTION}
+            and item.raw.get("independence") == "independent"
             or (
                 item.evidence_type == EvidenceType.IMPLEMENTATION
                 and item.raw.get("independence") == "independent"
             )
-            or (
-                item.evidence_type
-                in {
-                    EvidenceType.COMMUNITY_DISCUSSION,
-                    EvidenceType.SECONDARY_INTERPRETATION,
-                }
-                and item.source != "huggingface-papers"
-                and item.raw.get("relationship") != "author_self_release"
-            )
+            or is_verified_substantive_discussion(item, route_key=candidate.key)
         )
     )
     engagement = 0.0
@@ -151,7 +149,8 @@ def _researcher_score(candidate: ParadigmCandidate) -> float:
 def _volume_score(candidate: ParadigmCandidate) -> float:
     # 绝对量最多贡献总分 5%，只作佐证，不作门槛。
     countable = sum(
-        not item.raw.get("indexed_discovery_only") for item in candidate.evidence
+        _counts_as_momentum_evidence(item, route_key=candidate.key)
+        for item in candidate.evidence
     )
     return min(math.log2(countable + 1) * 2.5, 10.0)
 
@@ -230,11 +229,10 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
     official_uptake = any(
         item.evidence_type
         in {EvidenceType.IMPLEMENTATION, EvidenceType.ORIGINAL_IMPLEMENTATION}
-        and item.raw.get("independence") in {"official", "publisher", None}
+        and item.raw.get("independence") in {"official", "publisher"}
         and item.raw.get("relationship")
         in {
             "paper_linked_repository",
-            "name_and_mechanism_match",
             "official_release_repository",
             "publisher_original_implementation",
         }
@@ -301,3 +299,25 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
 def _numeric_value(value: object) -> float:
     """External metrics and restored legacy JSON must not crash admission."""
     return nonnegative_number(value)
+
+
+def _counts_as_momentum_evidence(item, *, route_key: str) -> bool:
+    if item.raw.get("indexed_discovery_only"):
+        return False
+    if item.raw.get("relationship") == "author_self_release":
+        return False
+    if item.evidence_type in {
+        EvidenceType.COMMUNITY_DISCUSSION,
+        EvidenceType.SECONDARY_INTERPRETATION,
+    }:
+        return is_verified_substantive_discussion(item, route_key=route_key)
+    if item.evidence_type in {
+        EvidenceType.INDEPENDENT_REPLICATION,
+        EvidenceType.PRODUCT_ADOPTION,
+    }:
+        return item.raw.get("independence") == "independent"
+    if item.evidence_type == EvidenceType.IMPLEMENTATION:
+        return item.raw.get("independence") in {
+            "independent", "official", "publisher"
+        }
+    return True

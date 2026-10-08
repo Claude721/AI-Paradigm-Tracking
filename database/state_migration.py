@@ -86,6 +86,10 @@ _REQUIRED_COLUMNS = {
         "first_linked_at",
     },
     "radar_meta": {"key", "value", "updated_at"},
+    "origin_research_state": {
+        "fingerprint", "source_signature", "source_payload_json",
+        "checkpoint_json", "baseline_status",
+    },
 }
 
 
@@ -99,6 +103,7 @@ def migrate_state(
     a delivery identifier; version 4 added resumable route-level report fragments;
     version 5 adds fair refresh scheduling plus domain-payload validation;
     version 6 adds render-attempt accounting and quarantined delivery recovery.
+    Version 7 separates origin source snapshots from execution checkpoints.
     All additions are backwards-compatible, so opening
     the database with :class:`ParadigmStore` performs the migration.  Future
     versions must extend this function before raising the schema version.
@@ -121,7 +126,7 @@ def migrate_state(
             f"{config.PARADIGM_STATE_SCHEMA_VERSION}"
         )
 
-    _validate_sqlite(path, require_current=False)
+    _validate_sqlite(path, require_current=version >= 7)
 
     # Imported lazily so the module can print the current version without
     # opening or creating the configured production database.
@@ -173,7 +178,7 @@ def _validate_sqlite(path: Path, *, require_current: bool) -> None:
     required = set(_REQUIRED_TABLES)
     if require_current:
         required.update(
-            {"radar_meta", "report_outbox", "report_render_fragments"}
+            {"radar_meta", "report_outbox", "report_render_fragments", "origin_research_state"}
         )
     missing = required - tables
     if missing:
@@ -201,10 +206,12 @@ def _validate_domain_payloads(path: Path) -> None:
 
     import json
 
-    from paradigms.models import candidate_from_dict, technical_evidence_from_dict
+    from database.origin_state import validate as validate_origins
+    from paradigms.models import ORIGIN_EVIDENCE_TYPES, candidate_from_dict, technical_evidence_from_dict
 
     try:
         with sqlite3.connect(path) as connection:
+            validate_origins(connection)
             for fingerprint, payload_json in connection.execute(
                 "SELECT fingerprint, payload_json FROM evidence_state"
             ):
@@ -213,6 +220,10 @@ def _validate_domain_payloads(path: Path) -> None:
                     raise ValueError(
                         f"证据 fingerprint 与 payload 不一致: {fingerprint}"
                     )
+                if evidence.evidence_type in ORIGIN_EVIDENCE_TYPES and connection.execute(
+                    "SELECT 1 FROM origin_research_state WHERE fingerprint=?", (fingerprint,)
+                ).fetchone() is None:
+                    raise ValueError("一手原点缺少来源版本记录")
             for paradigm_key, payload_json in connection.execute(
                 "SELECT paradigm_key, payload_json FROM paradigms"
             ):

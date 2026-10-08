@@ -17,6 +17,7 @@ from runtime_clock import scheduled_date
 logger = logging.getLogger(__name__)
 
 _WORKFLOW_STEPS = (
+    ("PROVENANCE_STEP_OUTCOME", "provenance", "记录代码版本"),
     ("DEPENDENCIES_STEP_OUTCOME", "dependencies", "安装依赖"),
     ("OFFLINE_CHECKS_STEP_OUTCOME", "offline_checks", "离线回归"),
     ("DOCTOR_STEP_OUTCOME", "doctor", "配置体检"),
@@ -363,6 +364,7 @@ def _workflow_failure_context() -> dict[str, object]:
         outcome for step_key, _, outcome in outcomes if step_key == "pipeline"
     )
     preflight_keys = {
+        "provenance",
         "dependencies",
         "offline_checks",
         "restore_state",

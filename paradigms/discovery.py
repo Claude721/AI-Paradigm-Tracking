@@ -8,6 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from runtime_clock import research_now
 from urllib.parse import urlparse
 
 import config
@@ -412,7 +413,7 @@ def _within_lookback(item: RawProject, lookback_days: int) -> bool:
         ).astimezone(timezone.utc)
     except ValueError:
         return True
-    return published >= datetime.now(timezone.utc) - timedelta(
+    return published >= research_now() - timedelta(
         days=max(lookback_days, 1)
     )
 

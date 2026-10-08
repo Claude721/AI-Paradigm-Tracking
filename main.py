@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 
 import config
 from runtime_clock import scheduled_date
+from runtime_provenance import runtime_provenance
 
 
 def _redacted_log_text(value: str) -> str:
@@ -456,7 +457,7 @@ async def _run_pipeline_once() -> dict:
     if config.PIPELINE_MODE != "legacy" and quarantined_recovery:
         stats.update(quarantined_recovery)
     if config.PIPELINE_MODE != "legacy":
-        report_date = scheduled_date()
+        report_date = stats.get("report_date") or scheduled_date()
         job = orchestrator.store.enqueue_report(
             orchestrator.pending_delivery,
             stats,
@@ -529,9 +530,21 @@ def _write_pipeline_result(result: dict) -> Path:
     output = Path("logs/pipeline_result.json")
     output.parent.mkdir(parents=True, exist_ok=True)
     recovered_only = bool(result.get("recovered_delivery_only"))
+    research_executed = not recovered_only
+    research_incomplete = bool(
+        result.get("research_incomplete", result.get("run_incomplete", False))
+    )
+    coverage_incomplete = bool(result.get("coverage_incomplete"))
     payload = {
+        "runtime": runtime_provenance(),
         "recovered_delivery_only": recovered_only,
-        "fresh_research_completed": not recovered_only,
+        "fresh_research_executed": research_executed,
+        "fresh_research_completed": bool(
+            research_executed and not research_incomplete and not coverage_incomplete
+        ),
+        "research_incomplete": research_incomplete,
+        "coverage_incomplete": coverage_incomplete,
+        "pending_work_count": int(result.get("pending_work_count", 0) or 0),
         "delivery_quarantined": bool(result.get("delivery_quarantined")),
         "delivery_failure_kind": str(result.get("delivery_failure_kind", "")),
         "recovered_delivery_quarantined": bool(

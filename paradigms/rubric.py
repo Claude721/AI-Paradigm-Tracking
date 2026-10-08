@@ -17,6 +17,7 @@ from .models import (
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
     ParadigmCandidate,
+    is_verified_substantive_discussion,
     nonnegative_number,
 )
 
@@ -244,7 +245,12 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
         for item in origins
         if item.organization.strip()
     }
-    types = {item.evidence_type for item in candidate.evidence}
+    verified_implementation = any(
+        item.evidence_type == EvidenceType.IMPLEMENTATION
+        and item.raw.get("independence")
+        in {"independent", "official", "publisher"}
+        for item in candidate.evidence
+    )
 
     if candidate.is_formal_technical_report and candidate.publisher_tier == "established":
         publisher = "established_formal_release"
@@ -263,11 +269,10 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
     )
     official_implementation_uptake = any(
         item.evidence_type == EvidenceType.IMPLEMENTATION
-        and item.raw.get("independence") in {"official", "publisher", None}
+        and item.raw.get("independence") in {"official", "publisher"}
         and item.raw.get("relationship")
         in {
             "paper_linked_repository",
-            "name_and_mechanism_match",
             "official_release_repository",
             "publisher_original_implementation",
         }
@@ -277,7 +282,12 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
         )
         for item in candidate.evidence
     )
-    if types & {EvidenceType.INDEPENDENT_REPLICATION, EvidenceType.PRODUCT_ADOPTION}:
+    if any(
+        item.evidence_type
+        in {EvidenceType.INDEPENDENT_REPLICATION, EvidenceType.PRODUCT_ADOPTION}
+        and item.raw.get("independence") == "independent"
+        for item in candidate.evidence
+    ):
         validation = "independent_replication_or_adoption"
     elif independent_implementation:
         validation = "independent_implementation"
@@ -285,7 +295,7 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
         validation = "official_implementation_uptake"
     elif len(origins) >= 2 and len(origin_organizations) >= 2:
         validation = "multiple_primary_works"
-    elif types & {EvidenceType.IMPLEMENTATION, EvidenceType.ORIGINAL_IMPLEMENTATION}:
+    elif verified_implementation:
         validation = "linked_implementation"
     elif origins:
         validation = "primary_claim_only"
@@ -381,24 +391,14 @@ def substantive_secondary(
         if item.evidence_type in {
             EvidenceType.INDEPENDENT_REPLICATION,
             EvidenceType.PRODUCT_ADOPTION,
-        }:
+        } and item.raw.get("independence") == "independent":
             qualifies = True
             independent = True
-        elif (
-            item.evidence_type
-            in {EvidenceType.COMMUNITY_DISCUSSION, EvidenceType.SECONDARY_INTERPRETATION}
-            and item.source != "huggingface-papers"
-            and item.raw.get("relationship") != "author_self_release"
-            and not item.raw.get("indexed_discovery_only")
+        elif is_verified_substantive_discussion(
+            item, route_key=candidate.key
         ):
             qualifies = True
-            if (
-                item.source == "x-title-search"
-                and nonnegative_number(
-                    item.metrics.get("author_followers", 0)
-                ) >= 10_000
-            ):
-                independent = True
+            independent = True
         elif (
             item.evidence_type == EvidenceType.CITATION
             and nonnegative_number(item.metrics.get("citations", 0)) >= 3

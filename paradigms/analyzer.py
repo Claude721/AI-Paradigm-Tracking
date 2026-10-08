@@ -22,6 +22,7 @@ from .models import (
     TechnicalEvidence,
     key_researcher_profiles,
 )
+from .evidence_validation import certify_synthesis_discussion
 from .rubric import (
     evaluate_rubric,
     legacy_dimension_scores,
@@ -57,6 +58,19 @@ class ParadigmAnalyzer:
         return self.client, self.model
 
     async def run(self, evidence: list[TechnicalEvidence]) -> list[ParadigmExtraction]:
+        # Preserve the legacy input-order contract for direct callers. The
+        # orchestrator consumes iter_results and commits in completion order.
+        finished = {}
+        async for item, values in self.iter_results(evidence):
+            finished[id(item)] = values
+        return [value for item in evidence for value in finished.get(id(item), [])]
+
+    async def iter_results(self, evidence: list[TechnicalEvidence]):
+        """Yield finished origins without waiting for the slowest peer.
+
+        The consumer commits each result before requesting another. Cancellation
+        closes all outstanding requests; no task may keep spending after timeout.
+        """
         semaphore = asyncio.Semaphore(self.concurrency)
 
         eligible = list(evidence)
@@ -91,6 +105,9 @@ class ParadigmAnalyzer:
                     full_review.append(item)
             eligible = [*bypassed, *full_review]
 
+        for value in prefiltered:
+            yield value.evidence, [value]
+
         async def guarded(item: TechnicalEvidence) -> list[ParadigmExtraction]:
             async with semaphore:
                 try:
@@ -99,7 +116,7 @@ class ParadigmAnalyzer:
                     # ``extract`` already converts ordinary LLM/JSON failures
                     # into a retryable placeholder. This outer boundary catches
                     # programming/data edge cases so one malformed origin cannot
-                    # cancel healthy peers in asyncio.gather.
+                    # cancel healthy peers in the streaming batch.
                     logger.exception(
                         "范式抽取发生未隔离异常 [%s]；仅保留该原点待重试",
                         item.title[:80],
@@ -114,10 +131,18 @@ class ParadigmAnalyzer:
                     return [self._failed_extraction(item, "抽取结果意外为空")]
                 return values
 
-        batches = await asyncio.gather(*(guarded(item) for item in eligible))
-        return [*prefiltered, *[
-            extraction for batch in batches for extraction in batch
-        ]]
+        async def with_identity(item):
+            return item, await guarded(item)
+
+        tasks = [asyncio.create_task(with_identity(item)) for item in eligible]
+        try:
+            for task in asyncio.as_completed(tasks):
+                yield await task
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _screen_origin_batch(
         self,
@@ -1019,7 +1044,10 @@ class ResearcherTrajectoryAnalyzer:
                 response=response,
                 error=exc,
             )
-            profile.research_trajectory = "研究轨迹自动分析失败；保留代表作供人工复核。"
+            # A failed person lookup is an execution failure, not a completed
+            # profile. The orchestrator isolates this candidate and resumes
+            # from its synthesized checkpoint without redoing technical work.
+            raise RuntimeError("研究轨迹自动分析失败") from exc
 
 
 class ParadigmSynthesizer:
@@ -1189,6 +1217,7 @@ class ParadigmSynthesizer:
         *,
         visible_evidence_indices: set[int],
     ) -> None:
+        previous_mechanism = candidate.mechanism.strip()
         for field_name in (
             "name",
             "route_family",
@@ -1248,38 +1277,30 @@ class ParadigmSynthesizer:
         # topic overlap can never create it by itself.
         for item in candidate.evidence:
             if item.raw.get("substantive_uptake_source") == "synthesis-v1":
+                if (
+                    item.raw.get("substantive_uptake_route_key") == candidate.key
+                    and
+                    item.raw.get("content_scrubbed")
+                    and not item.summary.strip()
+                    and candidate.mechanism.strip() == previous_mechanism
+                ):
+                    # The previous body was intentionally discarded after a
+                    # completed audit. Do not erase its relation merely
+                    # because a later refresh could not re-fetch that body;
+                    # an explicit model exclusion below still removes it.
+                    continue
                 item.raw.pop("substantive_uptake", None)
                 item.raw.pop("substantive_uptake_source", None)
+                item.raw.pop("substantive_uptake_route_key", None)
         substantive_indices = {
             int(value)
             for value in payload.get("substantive_uptake_evidence_indices", [])
             if str(value).isdigit()
         }
-        allowed_relationships = {
-            "independent_commentary",
-            "independent_discussion",
-            "independent_analysis",
-            "mechanism_discussion",
-            "independent_mechanism_analysis",
-        }
         for index in substantive_indices & visible_evidence_indices:
             if not 0 <= index < len(candidate.evidence):
                 continue
-            item = candidate.evidence[index]
-            if (
-                item.evidence_type
-                not in {
-                    EvidenceType.COMMUNITY_DISCUSSION,
-                    EvidenceType.SECONDARY_INTERPRETATION,
-                }
-                or str(item.raw.get("independence", "")).casefold()
-                != "independent"
-                or str(item.raw.get("relationship", "")).casefold()
-                not in allowed_relationships
-            ):
-                continue
-            item.raw["substantive_uptake"] = True
-            item.raw["substantive_uptake_source"] = "synthesis-v1"
+            certify_synthesis_discussion(candidate, candidate.evidence[index])
 
         excluded = {
             int(value)

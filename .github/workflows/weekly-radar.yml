@@ -145,6 +145,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: 记录本轮执行代码版本
+        id: provenance
+        run: python -m runtime_provenance
+
       - name: 安装依赖
         id: dependencies
         run: |
@@ -306,6 +310,7 @@ jobs:
           path: |
             logs/current_run.log
             logs/dependencies.log
+            logs/runtime_provenance.json
             logs/offline_checks.log
             logs/offline_checks.json
             logs/doctor.log
@@ -325,6 +330,7 @@ jobs:
         env:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           DEPENDENCIES_STEP_OUTCOME: ${{ steps.dependencies.outcome || 'not-run' }}
+          PROVENANCE_STEP_OUTCOME: ${{ steps.provenance.outcome || 'not-run' }}
           OFFLINE_CHECKS_STEP_OUTCOME: ${{ steps.offline_checks.outcome || 'not-run' }}
           RESTORE_STATE_STEP_OUTCOME: ${{ steps.restore_state.outcome || 'not-run' }}
           DOCTOR_STEP_OUTCOME: ${{ steps.doctor.outcome || 'not-run' }}

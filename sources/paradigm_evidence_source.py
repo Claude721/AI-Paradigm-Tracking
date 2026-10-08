@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from runtime_clock import research_now
 from difflib import SequenceMatcher
 from urllib.parse import quote
 
@@ -195,7 +196,7 @@ class CommunityEvidenceClient:
         self, client: httpx.AsyncClient, candidate: ParadigmCandidate
     ) -> list[TechnicalEvidence]:
         cutoff = int(
-            (datetime.now(timezone.utc) - timedelta(days=config.SOURCING_LOOKBACK_DAYS)).timestamp()
+            (research_now() - timedelta(days=config.SOURCING_LOOKBACK_DAYS)).timestamp()
         )
         query = candidate.name
         response = await client.get(

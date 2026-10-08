@@ -21,10 +21,13 @@ from paradigms.models import (
     ResearcherProfile,
     TechnicalEvidence,
     delivery_researcher_profiles,
+    nonnegative_number,
     primary_material_url,
     safe_public_contact_target,
+    is_verified_substantive_discussion,
     verified_organization_attribution,
 )
+from paradigms.researcher_identity import same_verified_researcher
 from run_audit import run_audit
 from runtime_clock import scheduled_date
 from skills.loader import SkillLoader
@@ -545,6 +548,13 @@ class ParadigmReportGenerator:
 
 def _candidate_dossier(item: ParadigmCandidate) -> dict:
     primary_sources = _primary_sources(item)
+    momentum_evidence = _momentum_evidence(item)
+    momentum_signals, discussion_summary, trend = _audited_momentum_text(
+        item, momentum_evidence
+    )
+    visible_evidence = {
+        value.fingerprint for value in [*primary_sources, *momentum_evidence]
+    }
     return {
         "name": item.name,
         "route_family": item.route_family,
@@ -561,14 +571,14 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         "why_now": item.why_now,
         "lineage_path": item.lineage_path,
         "evidence_assessment": item.evidence_assessment,
-        "objective_momentum_signals": item.objective_momentum_signals,
+        "objective_momentum_signals": momentum_signals,
         "community_coverage": item.community_coverage,
-        "secondary_discussion_summary": item.secondary_discussion_summary,
-        "trend_interpretation": item.trend_interpretation,
+        "secondary_discussion_summary": discussion_summary,
+        "trend_interpretation": trend,
         # 与完整 evidence 分开提供经过准入语义过滤的扩散证据，避免总编辑
         # 把作者自发帖、搜索引擎索引命中或论文聚合页误写成社区势能。
         "momentum_evidence": [
-            _evidence_dossier(value) for value in _momentum_evidence(item)
+            _evidence_dossier(value) for value in momentum_evidence
         ],
         "open_questions": item.open_questions,
         "publisher_tier": item.publisher_tier,
@@ -586,7 +596,11 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
             }
         ),
         "primary_sources": [_evidence_dossier(value) for value in primary_sources],
-        "evidence": [_evidence_dossier(value) for value in item.evidence[:20]],
+        "evidence": [
+            _evidence_dossier(value)
+            for value in item.evidence
+            if value.fingerprint in visible_evidence
+        ][:20],
         "researchers": [
             _researcher_dossier(value)
             for value in delivery_researcher_profiles(
@@ -634,9 +648,13 @@ def _compact_route_dossier(item: ParadigmCandidate) -> dict:
         _primary_sources(item),
         char_budget=14_000,
     )
+    momentum_items = _momentum_evidence(item)
     momentum, momentum_overflow = _bounded_route_evidence(
-        _momentum_evidence(item),
+        momentum_items,
         char_budget=12_000,
+    )
+    momentum_signals, discussion_summary, trend = _audited_momentum_text(
+        item, momentum_items
     )
 
     return {
@@ -655,10 +673,10 @@ def _compact_route_dossier(item: ParadigmCandidate) -> dict:
         "why_now": item.why_now,
         "lineage_path": item.lineage_path,
         "evidence_assessment": item.evidence_assessment,
-        "objective_momentum_signals": item.objective_momentum_signals[:12],
+        "objective_momentum_signals": momentum_signals[:12],
         "community_coverage": item.community_coverage,
-        "secondary_discussion_summary": item.secondary_discussion_summary,
-        "trend_interpretation": item.trend_interpretation,
+        "secondary_discussion_summary": discussion_summary,
+        "trend_interpretation": trend,
         "open_questions": item.open_questions[:8],
         "publisher_tier": item.publisher_tier,
         "publisher_evidence": item.publisher_evidence[:8],
@@ -955,6 +973,7 @@ def _public_stats(stats: dict) -> dict:
         "analysis_completed_count",
         "analysis_deferred_count",
         "candidate_deferred_count",
+        "candidate_input_deferred_count",
         "candidate_research_incomplete_count",
         "refresh_deferred_count",
         "delivery_profile_deferred_count",
@@ -1116,11 +1135,79 @@ def _momentum_evidence(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
             continue
         if value.raw.get("relationship") == "author_self_release":
             continue
+        if value.evidence_type in {
+            EvidenceType.COMMUNITY_DISCUSSION,
+            EvidenceType.SECONDARY_INTERPRETATION,
+        } and not is_verified_substantive_discussion(
+            value, route_key=candidate.key
+        ):
+            continue
+        if value.evidence_type in {
+            EvidenceType.INDEPENDENT_REPLICATION,
+            EvidenceType.PRODUCT_ADOPTION,
+        } and value.raw.get("independence") != "independent":
+            continue
+        if (
+            value.evidence_type == EvidenceType.IMPLEMENTATION
+            and value.raw.get("independence")
+            not in {"independent", "official", "publisher"}
+        ):
+            continue
         selected.append(value)
     # 不在语义过滤之后再做静默 Top-K。路线写作的上下文上限由
     # `_bounded_route_evidence` 负责，并把未展开部分写进 overflow 账本；
     # 这样既控制请求体，也不会把“没有进入 prompt”伪装成“没有证据”。
     return selected
+
+
+def _audited_momentum_text(
+    candidate: ParadigmCandidate,
+    evidence: list[TechnicalEvidence],
+) -> tuple[list[str], str, str]:
+    """Replace unsupported momentum prose when no independent uptake exists."""
+    independent = any(
+        is_verified_substantive_discussion(value, route_key=candidate.key)
+        or (
+            value.evidence_type in {
+                EvidenceType.INDEPENDENT_REPLICATION,
+                EvidenceType.PRODUCT_ADOPTION,
+                EvidenceType.IMPLEMENTATION,
+                EvidenceType.PEER_REVIEW,
+            }
+            and value.raw.get("independence") == "independent"
+        )
+        for value in evidence
+    )
+    if independent:
+        return (
+            candidate.objective_momentum_signals,
+            candidate.secondary_discussion_summary,
+            candidate.trend_interpretation,
+        )
+    signals = []
+    for value in evidence:
+        if value.evidence_type == EvidenceType.IMPLEMENTATION and value.raw.get(
+            "independence"
+        ) in {"official", "publisher"}:
+            stars = int(nonnegative_number(value.metrics.get("stars", 0)))
+            forks = int(nonnegative_number(value.metrics.get("forks", 0)))
+            signals.append(
+                f"官方实现 {value.url}；stars={stars}，forks={forks}，"
+                "仅说明采用势能，不构成独立复现"
+            )
+        elif value.evidence_type == EvidenceType.CITATION:
+            citations = int(nonnegative_number(value.metrics.get("citations", 0)))
+            signals.append(
+                f"引用索引 {value.url}；citations={citations}，"
+                "仅为引用数量，不能据此推断引用内容"
+            )
+    return (
+        signals,
+        "本轮尚未核验到非作者主体对当前机制的实质二次讨论；"
+        "标题命中与搜索摘要仅作为继续核验的线索。",
+        "目前可确认原点提出及上述有限采用/引用事实，独立社区承接证据仍不足；"
+        "平台覆盖边界以本轮检索记录为准。",
+    )
 
 
 def _momentum_brief_violations(
@@ -1304,14 +1391,16 @@ def _attach_researcher_index(
     for candidate in candidates:
         route = candidate.route_family or candidate.lineage_parent or candidate.name
         bucket = grouped.setdefault(route, [])
-        seen = {profile.name.casefold() for profile in bucket if profile.name}
         for profile in delivery_researcher_profiles(
             candidate.researchers,
             config.PARADIGM_KEY_RESEARCHER_LIMIT,
         ):
-            if profile.name and profile.name.casefold() not in seen:
+            if profile.name and not any(
+                previous == profile
+                or same_verified_researcher(previous, profile)
+                for previous in bucket
+            ):
                 bucket.append(profile)
-                seen.add(profile.name.casefold())
         organization = verified_organization_attribution(candidate)
         if organization:
             organization_bucket = organizations.setdefault(route, [])

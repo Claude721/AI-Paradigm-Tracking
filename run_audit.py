@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import config
+from runtime_provenance import runtime_provenance
 
 
 class RunAudit:
@@ -103,6 +104,7 @@ class RunAudit:
         totals = self.token_totals()
         self.last_stats = _safe_payload(stats or {})
         payload = {
+            "runtime": runtime_provenance(),
             "started_at": self.started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "status": status,
@@ -158,12 +160,15 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     stats = payload["pipeline_stats"]
     llm = payload["llm_summary"]
     source_counts = stats.get("source_counts") or {}
+    runtime = payload.get("runtime") or {}
     lines = [
         "# AI 技术范式雷达｜运行审计",
         "",
         f"> 状态：{payload['status']}  ",
         f"> 开始：{payload['started_at']}  ",
         f"> 结束：{payload['finished_at']}",
+        f"> 代码：{runtime.get('commit_sha', '')}  ",
+        f"> 源码指纹：{runtime.get('source_fingerprint', '')}",
         "",
         "## 本轮漏斗",
         "",
@@ -185,6 +190,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- 用户 safety limit 延后深挖：{stats.get('candidate_safety_deferred_count', 0)}",
         f"- 软时间预算延后深挖：{stats.get('candidate_budget_deferred_count', 0)}",
         f"- 执行异常延后深挖：{stats.get('candidate_execution_deferred_count', 0)}",
+        f"- 上游来源版本待对齐：{stats.get('candidate_input_deferred_count', 0)}",
         f"- 综合/Rubric 契约未闭合、待重试：{stats.get('candidate_research_incomplete_count', 0)}",
         f"- 历史路线刷新延后合计：{stats.get('refresh_deferred_count', 0)}",
         f"- 历史路线完成检查但无实质变化：{stats.get('refresh_unchanged_count', 0)}",
@@ -196,6 +202,9 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- 技术通过但时效证据不足、留在观察池：{stats.get('freshness_deferred_count', 0)}",
         f"- 最终可报告：{stats.get('high_value_count', 0)}",
         f"- 报告 safety limit 延后：{stats.get('report_safety_deferred_count', 0)}",
+        f"- 本期原点完成/计划：{stats.get('current_window_origin_completed_count', 0)}/{stats.get('current_window_origin_planned_count', 0)}",
+        f"- 本期路线最终判断闭合/计划：{stats.get('current_window_deep_completed_count', 0)}/{stats.get('current_window_deep_planned_count', 0)}",
+        f"- 三类工作耗时（秒）：{(stats.get('research_service') or {}).get('seconds', {})}",
         "",
         "## 信源返回量",
         "",

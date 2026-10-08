@@ -154,12 +154,16 @@ class ArxivDocumentClient:
         errors = []
         for url in candidates:
             try:
+                download_url = url
+                parsed_url = urlparse(url)
+                if parsed_url.hostname == "huggingface.co" and "/blob/" in parsed_url.path:
+                    download_url = url.replace("/blob/", "/resolve/", 1)
                 async with httpx.AsyncClient(
                     timeout=45,
                     follow_redirects=True,
                     headers={"User-Agent": "AI-Paradigm-Radar/3.5"},
                 ) as client:
-                    response = await client.get(url)
+                    response = await client.get(download_url)
                     response.raise_for_status()
                 content_type = response.headers.get("content-type", "").casefold()
                 limit = (
@@ -167,13 +171,12 @@ class ArxivDocumentClient:
                     if evidence.raw.get("origin_kind") == "technical_report"
                     else 24_000
                 )
-                if (
-                    "application/pdf" in content_type
-                    or urlparse(str(response.url)).path.casefold().endswith(".pdf")
-                ):
+                if response.content[:1024].lstrip().startswith(b"%PDF-"):
                     excerpt = parse_arxiv_pdf(response.content, limit=limit)
                     source_kind = "official_linked_pdf"
                 else:
+                    if "application/pdf" in content_type:
+                        raise ValueError("PDF 响应不含有效文件头")
                     parser = _GenericDocumentParser()
                     parser.feed(response.text)
                     excerpt = _distributed_text_excerpt(
@@ -184,16 +187,16 @@ class ArxivDocumentClient:
                 if not excerpt:
                     raise ValueError("文档未提取到正文")
                 evidence.raw["document_excerpt"] = excerpt
-                evidence.raw["document_source_url"] = str(response.url)
+                evidence.raw["document_source_url"] = url
                 evidence.raw["document_source_kind"] = source_kind
                 classification = classify_publication(
                     title=evidence.title,
-                    url=str(response.url),
+                    url=url,
                     summary=excerpt,
                     metadata=" ".join(
                         str(item.get("title", ""))
                         for item in linked_documents
-                        if isinstance(item, dict)
+                        if isinstance(item, dict) and str(item.get("url", "")).strip() == url
                     ),
                     authors=evidence.authors,
                     official=True,
@@ -244,6 +247,8 @@ class ArxivDocumentClient:
                     headers={"User-Agent": "AI-Paradigm-Radar/3.4"},
                 )
                 response.raise_for_status()
+            if not response.content[:1024].lstrip().startswith(b"%PDF-"):
+                raise ValueError("arXiv PDF 响应不含有效文件头")
             excerpt = parse_arxiv_pdf(
                 response.content,
                 limit=(

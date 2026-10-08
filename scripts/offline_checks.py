@@ -18,6 +18,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from runtime_provenance import runtime_provenance
 LOG_DIR = ROOT / "logs"
 LOG_PATH = LOG_DIR / "offline_checks.log"
 SUMMARY_PATH = LOG_DIR / "offline_checks.json"
@@ -200,6 +202,7 @@ def main() -> int:
                 "smokecheck.py",
                 "setup_env.py",
                 "runtime_clock.py",
+                "runtime_provenance.py",
                 "research_watchlist.py",
                 "test_hf.py",
                 "test_hf_spaces.py",
@@ -207,6 +210,7 @@ def main() -> int:
         ),
     ]
     summary: dict[str, object] = {
+        "runtime": runtime_provenance(),
         "status": "passed",
         "started_at": started_at,
         "finished_at": "",

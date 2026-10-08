@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from runtime_clock import research_now
 
 import httpx
 
@@ -79,7 +80,7 @@ class RedditEvidenceClient:
                 f"已尝试 Reddit OAuth 搜索，但返回 HTTP {response.status_code}"
             )
             return []
-        cutoff = datetime.now(timezone.utc) - timedelta(
+        cutoff = research_now() - timedelta(
             days=config.SOURCING_LOOKBACK_DAYS
         )
         matches = []

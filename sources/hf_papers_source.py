@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from runtime_clock import research_now
 
 import httpx
 
@@ -46,7 +47,7 @@ class HuggingFacePapersSource(BaseSource):
                     published_dt = datetime.fromisoformat(
                         published.replace("Z", "+00:00")
                     ).astimezone(timezone.utc)
-                    cutoff = datetime.now(timezone.utc) - timedelta(
+                    cutoff = research_now() - timedelta(
                         days=self.lookback_days
                     )
                     if published_dt < cutoff:

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from runtime_clock import research_now
 from email.utils import parsedate_to_datetime
 
 import httpx
@@ -73,7 +74,7 @@ class ResearchFeedSource:
 
     def _parse(self, xml_text: str, feed_url: str) -> list[TechnicalEvidence]:
         root = ET.fromstring(xml_text)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        cutoff = research_now() - timedelta(days=self.lookback_days)
         items = []
         nodes = root.findall(".//item") or root.findall("{http://www.w3.org/2005/Atom}entry")
         for node in nodes:

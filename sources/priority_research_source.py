@@ -10,6 +10,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from runtime_clock import research_now
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
@@ -101,7 +102,7 @@ class PriorityResearchPageSource:
     async def fetch(self) -> list[TechnicalEvidence]:
         self.page_coverage = {}
         headers = {"User-Agent": "AI-Paradigm-Radar/3.1"}
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        cutoff = research_now() - timedelta(days=self.lookback_days)
         semaphore = asyncio.Semaphore(self.concurrency)
 
         async def bounded_get(client: httpx.AsyncClient, url: str):
@@ -222,6 +223,16 @@ class PriorityResearchPageSource:
                 self.page_coverage[index_url]["detail_failures"] = int(
                     self.page_coverage[index_url].get("detail_failures", 0)
                 ) + 1
+                continue
+            if (
+                (urlparse(link.url).path.casefold().endswith(".pdf")
+                 or "application/pdf" in response.headers.get("content-type", "").casefold())
+                and not _is_pdf_response(response, str(response.url))
+            ):
+                self.page_coverage[index_url]["detail_failures"] = int(
+                    self.page_coverage[index_url].get("detail_failures", 0)
+                ) + 1
+                logger.warning("官方报告链接未返回 PDF 文件: %s", link.url)
                 continue
             if link.body_hint:
                 article = _ArticleParser(str(response.url))
@@ -406,10 +417,11 @@ class _ArticleParser(HTMLParser):
         self.modified_at = ""
         self.authors: list[str] = []
         self.site_name = ""
-        self.links: list[tuple[str, str]] = []
+        self._link_records: list[tuple[str, str, bool, bool]] = []
         self._title_parts: list[str] = []
         self._text_parts: list[str] = []
-        self._ignored_depth = 0
+        self._elements: list[tuple[str, bool, bool]] = []
+        self._has_article_body = False
         self._in_title = False
         self._href = ""
         self._link_label: list[str] = []
@@ -418,19 +430,50 @@ class _ArticleParser(HTMLParser):
     def text(self) -> str:
         return " ".join(self._text_parts)
 
+    @property
+    def links(self) -> list[tuple[str, str]]:
+        return [
+            (label, url)
+            for label, url, in_body, metadata in self._link_records
+            if metadata or not self._has_article_body or in_body
+        ]
+
+    def _excluded(self) -> bool:
+        return any(item[1] for item in self._elements)
+
+    def _in_body(self) -> bool:
+        return any(item[2] for item in self._elements)
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.casefold()
         attributes = {key.casefold(): value or "" for key, value in attrs}
-        if lowered in {"script", "style", "svg", "nav", "footer"}:
-            self._ignored_depth += 1
+        labels = set(re.split(r"[\s_-]+", " ".join(
+            [attributes.get("class", ""), attributes.get("id", "")]
+        ).casefold()))
+        excluded = (
+            self._excluded()
+            or lowered in {"script", "style", "svg", "nav", "footer", "header", "aside"}
+            or bool(labels & {"related", "recommendations", "recommended", "sidebar"})
+            or attributes.get("role", "").casefold() in {
+                "navigation", "complementary", "contentinfo", "menubar"
+            }
+        )
+        in_body = not excluded and (
+            lowered in {"main", "article"} or self._in_body()
+        )
+        if lowered in {"main", "article"} and not excluded:
+            self._has_article_body = True
+        if lowered not in {"area", "base", "br", "col", "embed", "hr", "img",
+                           "input", "link", "meta", "param", "source", "track", "wbr"}:
+            self._elements.append((lowered, excluded, in_body))
         if lowered == "title":
             self._in_title = True
-        if lowered == "time" and attributes.get("datetime"):
+        if not excluded and lowered == "time" and attributes.get("datetime"):
             self.published_at = self.published_at or attributes["datetime"]
-        if lowered == "a" and attributes.get("href"):
+        if not excluded and lowered == "a" and attributes.get("href"):
             self._href = urljoin(self.base_url, attributes["href"])
             self._link_label = []
-        if lowered == "link":
+        if not excluded and lowered == "link":
             rel = attributes.get("rel", "").casefold()
             href = attributes.get("href", "")
             if href and (
@@ -438,13 +481,15 @@ class _ArticleParser(HTMLParser):
                 or "canonical" in rel
                 or attributes.get("type", "").casefold() == "application/pdf"
             ):
-                self.links.append(
+                self._link_records.append(
                     (
                         attributes.get("title", "") or rel,
                         urljoin(self.base_url, href),
+                        False,
+                        True,
                     )
                 )
-        if lowered == "meta":
+        if not excluded and lowered == "meta":
             key = (attributes.get("property") or attributes.get("name") or "").casefold()
             if key in {
                 "article:published_time",
@@ -468,35 +513,40 @@ class _ArticleParser(HTMLParser):
                     attributes.get("content", "")
                 )
             if key in {"citation_pdf_url", "pdf_url"} and attributes.get("content"):
-                self.links.append(
+                self._link_records.append(
                     (
                         "citation PDF",
                         urljoin(self.base_url, attributes["content"]),
+                        False,
+                        True,
                     )
                 )
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.casefold()
-        if lowered in {"script", "style", "svg", "nav", "footer"} and self._ignored_depth:
-            self._ignored_depth -= 1
         if lowered == "title":
             self._in_title = False
             self.title = self.title or _compact_text(
                 " ".join(self._title_parts)
             ).split(" | ", 1)[0]
         if lowered == "a" and self._href:
-            self.links.append(
-                (_compact_text(" ".join(self._link_label)), self._href)
+            self._link_records.append(
+                (_compact_text(" ".join(self._link_label)), self._href,
+                 self._in_body(), False)
             )
             self._href = ""
             self._link_label = []
+        for index in range(len(self._elements) - 1, -1, -1):
+            if self._elements[index][0] == lowered:
+                del self._elements[index:]
+                break
 
     def handle_data(self, data: str) -> None:
         if self._in_title:
             self._title_parts.append(data)
         if self._href:
             self._link_label.append(data)
-        if not self._ignored_depth and data.strip():
+        if not self._excluded() and data.strip():
             self._text_parts.append(data.strip())
 
 
@@ -811,10 +861,9 @@ def _compact_text(value: str) -> str:
 
 
 def _is_pdf_response(response: httpx.Response, url: str) -> bool:
-    content_type = response.headers.get("content-type", "").casefold()
-    return "application/pdf" in content_type or urlparse(url).path.casefold().endswith(
-        ".pdf"
-    )
+    # Extension and Content-Type are hints. Download pages and proxies often
+    # return HTML from .pdf URLs; only a PDF file signature enables PDF parsing.
+    return response.content[:1024].lstrip().startswith(b"%PDF-")
 
 
 def _download_url(url: str) -> str:

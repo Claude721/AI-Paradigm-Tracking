@@ -7,6 +7,7 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from runtime_clock import research_now
 
 import httpx
 
@@ -97,7 +98,7 @@ class ArxivSource(BaseSource):
         reference time so CI behavior is independent of the calendar date.
         """
 
-        return self.reference_time or datetime.now(timezone.utc)
+        return self.reference_time or research_now()
 
     async def fetch(self) -> list[RawProject]:
         self.executed_query_groups = set()

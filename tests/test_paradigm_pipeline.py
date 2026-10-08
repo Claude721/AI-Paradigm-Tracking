@@ -367,8 +367,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             ]
         )
         score_candidate(item)
-        self.assertTrue(is_reportable(item))
-        self.assertIn("独立讨论", item.admission_reason)
+        self.assertFalse(is_reportable(item))
+        self.assertIn("缺少实质二次讨论", item.admission_reason)
 
     def test_author_self_release_is_identity_evidence_not_secondary_validation(self) -> None:
         item = candidate()
@@ -1148,8 +1148,9 @@ class ParadigmPipelineTests(unittest.TestCase):
                 title="Direct mechanism analysis",
                 url="https://example.net/direct-analysis",
                 summary="逐项分析训练信号、机制边界和反事实。" * 30,
+                authors=["Independent Analyst"],
                 raw={
-                    "relationship": "independent_mechanism_analysis",
+                    "relationship": "independent_commentary",
                     "independence": "independent",
                 },
             )
@@ -1590,7 +1591,13 @@ class ParadigmPipelineTests(unittest.TestCase):
                             f"{route_index}-{evidence_index}"
                         ),
                         summary="社区对机制边界的中文讨论" * 800,
-                        raw={"relationship": "independent_discussion"},
+                        raw={
+                            "relationship": "independent_discussion",
+                            "independence": "independent",
+                            "substantive_uptake": True,
+                            "substantive_uptake_source": "synthesis-v1",
+                            "substantive_uptake_route_key": item.key,
+                        },
                     )
                 )
 
@@ -1742,7 +1749,13 @@ class ParadigmPipelineTests(unittest.TestCase):
                     title="Independent technical discussion",
                     url="https://reddit.com/r/MachineLearning/comments/independent",
                     metrics={"score": 42, "comments": 13},
-                    raw={"relationship": "independent_discussion"},
+                    raw={
+                        "relationship": "independent_discussion",
+                        "independence": "independent",
+                        "substantive_uptake": True,
+                        "substantive_uptake_source": "synthesis-v1",
+                        "substantive_uptake_route_key": item.key,
+                    },
                 ),
                 TechnicalEvidence(
                     source="x-title-search",
@@ -1757,6 +1770,14 @@ class ParadigmPipelineTests(unittest.TestCase):
                     title="Indexed result only",
                     url="https://example.com/indexed",
                     raw={"indexed_discovery_only": True},
+                ),
+                TechnicalEvidence(
+                    source="hackernews",
+                    evidence_type=EvidenceType.COMMUNITY_DISCUSSION,
+                    title="Title-only search hit",
+                    url="https://news.ycombinator.com/item?id=123",
+                    metrics={"score": 500},
+                    raw={"relationship": "exact_or_mechanism_title_match"},
                 ),
             ]
         )
@@ -1931,6 +1952,8 @@ class ParadigmPipelineTests(unittest.TestCase):
                     "relationship": "independent_mechanism_analysis",
                     "independence": "independent",
                     "substantive_uptake": True,
+                    "substantive_uptake_source": "synthesis-v1",
+                    "substantive_uptake_route_key": item.key,
                 },
             )
         )
@@ -2578,6 +2601,8 @@ class ParadigmPipelineTests(unittest.TestCase):
                         "relationship": "independent_mechanism_analysis",
                         "independence": "independent",
                         "substantive_uptake": True,
+                        "substantive_uptake_source": "synthesis-v1",
+                        "substantive_uptake_route_key": "latent-action-world-models",
                     },
                 ),
             ]
@@ -2609,7 +2634,10 @@ class ParadigmPipelineTests(unittest.TestCase):
             title="Old paper",
             url="https://www.semanticscholar.org/paper/example",
             published_at="2025-01-02T00:00:00+00:00",
-            raw={"metric_delta": {"citations": 1}},
+            raw={
+                "metric_delta": {"citations": 1},
+                "metric_delta_observed_at": "2026-08-14T00:00:00+00:00",
+            },
         )
         item = candidate([primary, citation])
 
@@ -2623,6 +2651,18 @@ class ParadigmPipelineTests(unittest.TestCase):
             item, reference_time=reference, window_days=30
         )
         self.assertEqual(material["decision"], "include")
+
+        # A stored old delta is not a new event when another source changes.
+        citation.raw["metric_delta_observed_at"] = "2026-07-01T00:00:00+00:00"
+        stale_delta = assess_candidate_freshness(
+            item, reference_time=reference, window_days=30
+        )
+        self.assertEqual(stale_delta["decision"], "defer")
+        citation.raw.pop("metric_delta_observed_at")
+        legacy_delta = assess_candidate_freshness(
+            item, reference_time=reference, window_days=30
+        )
+        self.assertEqual(legacy_delta["decision"], "defer")
 
     def test_official_repository_requires_external_primary_material(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -2724,7 +2764,8 @@ class ParadigmPipelineTests(unittest.TestCase):
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         source = OfficialRepositoryReleaseSource(
-            organizations=[{"login": "deepseek-ai", "owner": "deepseek"}]
+            organizations=[{"login": "deepseek-ai", "owner": "deepseek"}],
+            reference_time=datetime(2026, 8, 15, tzinfo=timezone.utc),
         )
         with (
             patch.object(config, "GITHUB_TOKEN", "configured"),

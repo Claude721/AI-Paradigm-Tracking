@@ -29,6 +29,8 @@ from research_watchlist import (
     organization_tier,
 )
 
+from runtime_clock import research_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,8 +44,11 @@ class OfficialRepositoryReleaseSource:
         lookback_days: int = 30,
         organizations: tuple[dict, ...] | list[dict] | None = None,
         concurrency: int = 6,
+        *,
+        reference_time: datetime | None = None,
     ) -> None:
         self.lookback_days = max(lookback_days, 1)
+        self.reference_time = research_now(reference_time) if reference_time is not None else None
         self.organizations = list(
             OFFICIAL_GITHUB_ORGANIZATIONS
             if organizations is None
@@ -124,7 +129,7 @@ class OfficialRepositoryReleaseSource:
             return []
 
     async def fetch(self) -> list[TechnicalEvidence]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        cutoff = research_now(self.reference_time) - timedelta(days=self.lookback_days)
         headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {config.GITHUB_TOKEN}",

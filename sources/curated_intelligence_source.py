@@ -11,6 +11,7 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from runtime_clock import research_now
 from email.utils import parsedate_to_datetime
 from html import unescape
 from urllib.parse import urlencode
@@ -363,7 +364,7 @@ class CuratedKOLXSource:
         batches = [handles[index : index + 8] for index in range(0, len(handles), 8)]
         headers = {"Authorization": f"Bearer {config.TWITTER_BEARER_TOKEN}"}
         start_time = (
-            datetime.now(timezone.utc) - timedelta(days=min(self.lookback_days, 7))
+            research_now() - timedelta(days=min(self.lookback_days, 7))
         ).isoformat(timespec="seconds").replace("+00:00", "Z")
 
         async def request_batch(client: httpx.AsyncClient, batch: list[str]):
@@ -494,7 +495,7 @@ def _parse_feed(
     forum: dict | None,
 ) -> tuple[list[TechnicalEvidence], int]:
     root = ET.fromstring(xml_text)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max(lookback_days, 1))
+    cutoff = research_now() - timedelta(days=max(lookback_days, 1))
     nodes = root.findall(".//item") or root.findall(
         "{http://www.w3.org/2005/Atom}entry"
     )

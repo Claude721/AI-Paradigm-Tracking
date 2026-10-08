@@ -2,6 +2,8 @@
 
 > 所有密钥只填写到根目录 `.env`，不要粘贴到聊天、截图或提交到 Git。配置模板见 `.env.example`。
 
+2026-09—10 重构没有新增用户配置项，现有 `.env.example` 与 Secrets/Variables 继续适用。状态 schema v7 是代码内部版本，不要手工配置环境变量覆盖；恢复旧状态应保持 `reset_state=false`。10 月版本把原点/深挖串行阶段改为本期研究、历史更新、历史补课按耗时 6:2:1 轮转，使用原有批次、软预算和深挖预留配置。版本升级不等于 V0 验收通过，迁移与回退边界见 `CLOUD_AUTOMATION.md`。
+
 ## A. 必须配置
 
 - [ ] `PIPELINE_MODE=paradigm`

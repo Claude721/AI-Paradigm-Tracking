@@ -95,6 +95,10 @@ def _find_similar_group(
     item_parent = normalize_paradigm_name(item.lineage_parent)
     for key, members in groups.items():
         representative = members[0]
+        if (item.normalized_key != key
+                and item.evidence.fingerprint == representative.evidence.fingerprint
+                and item.evidence.raw.get("origin_kind") == "technical_report"):
+            continue
         if item_parent and normalize_paradigm_name(representative.lineage_parent) not in {"", item_parent}:
             continue
         other_words = _keyword_set(representative)

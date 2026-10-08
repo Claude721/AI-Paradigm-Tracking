@@ -384,7 +384,7 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
 PARADIGM_KEY_RESEARCHER_LIMIT: int = max(
     1, min(_env_int("PARADIGM_KEY_RESEARCHER_LIMIT", 3), 6)
 )
-PARADIGM_STATE_SCHEMA_VERSION: int = 6
+PARADIGM_STATE_SCHEMA_VERSION: int = 7
 
 # 云端任务必须在 GitHub 的硬超时之前主动收尾。该预算只决定本轮执行到
 # backlog 的哪个位置，不参与 Rubric、排序分数或研究去留；未处理项会持久化

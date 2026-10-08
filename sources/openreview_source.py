@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from runtime_clock import research_now
 
 import httpx
 
@@ -83,7 +84,7 @@ class OpenReviewSource:
         self._circuit_open = False
         semaphore = asyncio.Semaphore(self.concurrency)
         cutoff_ms = int(
-            (datetime.now(timezone.utc) - timedelta(days=self.lookback_days)).timestamp()
+            (research_now() - timedelta(days=self.lookback_days)).timestamp()
             * 1000
         )
 

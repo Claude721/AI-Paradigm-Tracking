@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
+import json
 import logging
 from difflib import SequenceMatcher
 
@@ -10,6 +13,7 @@ from sources.paradigm_evidence_source import CommunityEvidenceClient
 from sources.semantic_scholar_source import SemanticScholarClient
 from sources.researcher_profile_source import ResearcherProfileClient
 from sources.arxiv_document_source import ArxivDocumentClient
+from runtime_clock import research_now
 
 from .models import (
     EvidenceType,
@@ -17,7 +21,10 @@ from .models import (
     TechnicalEvidence,
     material_metric_signature,
     nonnegative_number,
+    scrub_ephemeral_evidence,
+    is_verified_substantive_discussion,
 )
+from .researcher_identity import merge_researcher_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +97,7 @@ class EvidenceEnricher:
         async def refresh_one(candidate: ParadigmCandidate) -> ParadigmCandidate | None:
             async with semaphore:
                 previous = {
-                    item.fingerprint: (
-                        material_metric_signature(item.metrics),
-                        dict(item.metrics),
-                    )
+                    item.fingerprint: copy.deepcopy(item)
                     for item in candidate.evidence
                 }
                 self._attach_support(candidate, supporting)
@@ -113,29 +117,48 @@ class EvidenceEnricher:
                     raise RuntimeError(
                         f"社区刷新结构性失败: {type(exc).__name__}"
                     ) from exc
-                candidate.evidence = _dedupe_evidence(candidate.evidence)
+                candidate.evidence = _dedupe_evidence(
+                    candidate.evidence, route_key=candidate.key
+                )
                 changed = False
                 for item in candidate.evidence:
                     prior = previous.get(item.fingerprint)
                     if prior is None:
-                        changed = True
+                        # A title-only discussion or same-name repository is
+                        # a lead, not yet a reason to rewrite the route.
+                        if _new_evidence_requires_synthesis(item):
+                            changed = True
                         continue
-                    current_signature = material_metric_signature(item.metrics)
-                    if current_signature == prior[0]:
+                    if item.raw.get("indexed_discovery_only") and not is_verified_substantive_discussion(prior, route_key=candidate.key):
                         continue
-                    delta = {}
-                    for key, value in item.metrics.items():
-                        try:
-                            difference = float(value or 0) - float(
-                                prior[1].get(key, 0) or 0
-                            )
-                        except (TypeError, ValueError):
-                            continue
-                        if difference > 0:
-                            delta[key] = int(difference) if difference.is_integer() else difference
-                    if delta:
+                    if all(
+                        nonnegative_number(item.metrics.get(key, 0))
+                        == nonnegative_number(prior.metrics.get(key, 0))
+                        for key in _UPTAKE_METRIC_KEYS
+                    ):
+                        continue
+                    baseline = prior.raw.get("metric_baseline")
+                    if not isinstance(baseline, dict):
+                        baseline = prior.metrics
+                    delta = _positive_metric_delta(item.metrics, baseline)
+                    item.raw["metric_baseline"] = {
+                        key: nonnegative_number(value)
+                        for key, value in baseline.items()
+                        if key in _UPTAKE_METRIC_KEYS
+                    }
+                    if _material_metric_growth(
+                        item, prior, delta, route_key=candidate.key
+                    ):
                         item.raw["metric_delta"] = delta
-                    changed = True
+                        item.raw["metric_delta_observed_at"] = (
+                            research_now().isoformat()
+                        )
+                        item.raw["metric_baseline"] = {
+                            key: nonnegative_number(value)
+                            for key, value in item.metrics.items()
+                            if key in _UPTAKE_METRIC_KEYS
+                        }
+                        changed = True
                 if not changed:
                     return None
                 _attach_social_profiles(candidate)
@@ -185,8 +208,8 @@ class EvidenceEnricher:
                     f"社区证据总入口发生结构性异常：{type(community).__name__}"
                 ),
             }
-        candidate.evidence = list(
-            {item.fingerprint: item for item in candidate.evidence}.values()
+        candidate.evidence = _dedupe_evidence(
+            candidate.evidence, route_key=candidate.key
         )
         # Semantic Scholar 只有在显式启用且配置获批 Key 时才调用。无论其是否
         # 启用，都用当前论文作者建立人物种子，并通过 OpenAlex/ORCID 补齐身份。
@@ -200,32 +223,7 @@ class EvidenceEnricher:
         """分析完成后不持久化社区用户正文，只保留可复核链接和聚合指标。"""
         for candidate in candidates:
             for evidence in candidate.evidence:
-                if not evidence.raw.get("ephemeral_content"):
-                    continue
-                platform = str(evidence.raw.get("social_platform") or evidence.source)
-                labels = {
-                    "reddit": "Reddit 公开讨论",
-                    "tavily-reddit": "Reddit 公开索引线索",
-                    "x": "X 公开索引线索",
-                    "tavily-x": "X 公开索引线索",
-                    "xiaohongshu": "小红书公开索引线索",
-                    "tavily-xiaohongshu": "小红书公开索引线索",
-                    "web": "独立技术网页索引线索",
-                    "tavily-web": "独立技术网页索引线索",
-                }
-                stable_id = next(iter(evidence.identifiers.values()), "")
-                evidence.title = labels.get(platform, "社区公开讨论")
-                if stable_id:
-                    evidence.title = f"{evidence.title}（{stable_id}）"
-                evidence.summary = ""
-                evidence.authors = []
-                for key in (
-                    "social_author_name",
-                    "social_bio",
-                    "tavily_request_id",
-                ):
-                    evidence.raw.pop(key, None)
-                evidence.raw["content_scrubbed"] = True
+                scrub_ephemeral_evidence(evidence)
         return candidates
 
     @staticmethod
@@ -248,7 +246,7 @@ class EvidenceEnricher:
                 default=0.0,
             )
             if candidate_ids & support_ids or title_match >= 0.9:
-                candidate.evidence.append(item)
+                candidate.evidence.append(copy.deepcopy(item))
                 repository = str(item.raw.get("github_repo", "")).strip()
                 if repository:
                     candidate.evidence.append(
@@ -256,14 +254,52 @@ class EvidenceEnricher:
                     )
                 continue
             if _lexically_related(candidate, item):
-                candidate.evidence.append(item)
+                candidate.evidence.append(copy.deepcopy(item))
+
+    @staticmethod
+    def supporting_signature(
+        candidate: ParadigmCandidate, supporting: list[TechnicalEvidence]
+    ) -> str:
+        """Hash only support that this route would receive, without retaining text.
+
+        A global batch hash would invalidate every deep checkpoint whenever an
+        unrelated feed item appears. This uses the same conservative attachment
+        rule as enrichment, then hashes a bounded factual projection. Temporary
+        community bodies/authors never enter the durable signature.
+        """
+        if not supporting:
+            return hashlib.sha256(b"[]").hexdigest()
+        probe = copy.copy(candidate)
+        probe.evidence = list(candidate.evidence)
+        original_count = len(probe.evidence)
+        EvidenceEnricher._attach_support(probe, supporting)
+        relevant = []
+        for item in probe.evidence[original_count:]:
+            temporary = bool(item.raw.get("ephemeral_content"))
+            relevant.append({
+                "fingerprint": item.fingerprint,
+                "title": "" if temporary else item.title,
+                "url": item.url,
+                "summary": "" if temporary else item.summary,
+                "published_at": item.published_at,
+                "authors": [] if temporary else item.authors,
+                "metrics": material_metric_signature(item.metrics),
+                "relationship": str(item.raw.get("relationship", "")),
+                "independence": str(item.raw.get("independence", "")),
+                "indexed_discovery_only": bool(item.raw.get("indexed_discovery_only")),
+            })
+        # Discovery sources can return the same supporting item in different
+        # orders (or duplicate it). Neither should trigger another LLM run.
+        records = {
+            json.dumps(value, ensure_ascii=False, sort_keys=True)
+            for value in relevant
+        }
+        encoded = json.dumps(sorted(records), ensure_ascii=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _merge_profiles(existing, new):
-    by_name = {profile.name.lower(): profile for profile in existing}
-    for profile in new:
-        by_name[profile.name.lower()] = profile
-    return list(by_name.values())
+    return merge_researcher_profiles(existing, new)
 
 
 def _lexically_related(
@@ -309,8 +345,141 @@ def _official_repository_evidence(
     )
 
 
-def _dedupe_evidence(items: list[TechnicalEvidence]) -> list[TechnicalEvidence]:
-    return list({item.fingerprint: item for item in items}.values())
+def _dedupe_evidence(
+    items: list[TechnicalEvidence], *, route_key: str
+) -> list[TechnicalEvidence]:
+    by_fingerprint: dict[str, TechnicalEvidence] = {}
+    for item in items:
+        previous = by_fingerprint.get(item.fingerprint)
+        if (
+            previous is not None
+            and not previous.raw.get("indexed_discovery_only")
+            and item.raw.get("indexed_discovery_only")
+        ):
+            # A later search hit for the same URL cannot replace an already
+            # verified evidence relationship and its original content.
+            continue
+        if previous is not None:
+            for key in (
+                "metric_baseline", "metric_delta", "metric_delta_observed_at"
+            ):
+                if key in previous.raw and key not in item.raw:
+                    item.raw[key] = copy.deepcopy(previous.raw[key])
+            if is_verified_substantive_discussion(
+                previous, route_key=route_key
+            ) and (
+                previous.source == item.source
+                and previous.url.rstrip("/") == item.url.rstrip("/")
+                and item.raw.get("relationship")
+                not in {"author_self_release", "publisher_self_release"}
+                and item.raw.get("independence")
+                not in {"author", "publisher", "official", "self"}
+            ):
+                for key in (
+                    "relationship", "independence", "substantive_uptake",
+                    "substantive_uptake_source",
+                    "substantive_uptake_route_key",
+                ):
+                    item.raw[key] = previous.raw[key]
+                if (
+                    previous.raw.get("content_scrubbed")
+                    and not item.summary.strip()
+                ):
+                    # An API may stop returning a post body. The prior audit
+                    # remains attributable to this exact URL and route; its
+                    # body was intentionally removed, not discredited.
+                    item.raw["content_scrubbed"] = True
+            elif (
+                previous.evidence_type == EvidenceType.IMPLEMENTATION
+                and previous.raw.get("independence")
+                in {"independent", "official", "publisher"}
+                and previous.source == item.source
+                and previous.url.rstrip("/") == item.url.rstrip("/")
+                and item.raw.get("independence") in {None, "unverified"}
+            ):
+                item.raw["independence"] = previous.raw["independence"]
+                item.raw["relationship"] = previous.raw.get("relationship", "")
+        by_fingerprint[item.fingerprint] = item
+    return list(by_fingerprint.values())
+
+
+_UPTAKE_METRIC_KEYS = frozenset({
+    "citations", "influential_citations", "stars", "forks", "likes",
+    "replies", "comments", "score", "upvotes", "retweets", "reposts",
+})
+
+
+def _positive_metric_delta(current: dict, baseline: dict) -> dict[str, float | int]:
+    delta = {}
+    for key in _UPTAKE_METRIC_KEYS:
+        difference = nonnegative_number(current.get(key, 0)) - nonnegative_number(
+            baseline.get(key, 0)
+        )
+        if difference > 0:
+            delta[key] = int(difference) if difference.is_integer() else difference
+    return delta
+
+
+def _new_evidence_requires_synthesis(item: TechnicalEvidence) -> bool:
+    if item.raw.get("indexed_discovery_only"):
+        return False
+    if item.evidence_type in {
+        EvidenceType.COMMUNITY_DISCUSSION,
+        EvidenceType.SECONDARY_INTERPRETATION,
+    }:
+        return len(item.summary.strip()) >= 40
+    if item.evidence_type == EvidenceType.IMPLEMENTATION:
+        return item.raw.get("independence") in {
+            "independent", "official", "publisher"
+        }
+    if item.evidence_type in {
+        EvidenceType.INDEPENDENT_REPLICATION,
+        EvidenceType.PRODUCT_ADOPTION,
+    }:
+        return item.raw.get("independence") == "independent"
+    if item.evidence_type == EvidenceType.CITATION:
+        return nonnegative_number(item.metrics.get("citations", 0)) >= 3
+    return True
+
+
+def _material_metric_growth(
+    item: TechnicalEvidence,
+    prior: TechnicalEvidence,
+    delta: dict[str, float | int],
+    *,
+    route_key: str,
+) -> bool:
+    amount = lambda key: nonnegative_number(delta.get(key, 0))
+    if item.evidence_type == EvidenceType.CITATION:
+        return amount("citations") >= 3 or amount("influential_citations") >= 1
+    if item.evidence_type in {
+        EvidenceType.IMPLEMENTATION,
+        EvidenceType.INDEPENDENT_REPLICATION,
+        EvidenceType.PRODUCT_ADOPTION,
+    }:
+        independence = item.raw.get("independence")
+        if independence not in {"independent", "official", "publisher"}:
+            return False
+        crossed_official_adoption = bool(
+            item.evidence_type == EvidenceType.IMPLEMENTATION
+            and independence in {"official", "publisher"}
+            and (
+                nonnegative_number(prior.metrics.get("stars", 0)) < 50
+                <= nonnegative_number(item.metrics.get("stars", 0))
+                or nonnegative_number(prior.metrics.get("forks", 0)) < 3
+                <= nonnegative_number(item.metrics.get("forks", 0))
+            )
+        )
+        return crossed_official_adoption or amount("stars") >= 25 or amount("forks") >= 3
+    if item.evidence_type in {
+        EvidenceType.COMMUNITY_DISCUSSION,
+        EvidenceType.SECONDARY_INTERPRETATION,
+    } and is_verified_substantive_discussion(item, route_key=route_key):
+        return (
+            amount("comments") >= 5 or amount("replies") >= 5
+            or amount("likes") >= 20 or amount("score") >= 20
+        )
+    return False
 
 
 def _attach_social_profiles(candidate: ParadigmCandidate) -> None:

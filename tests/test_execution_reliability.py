@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -343,7 +344,9 @@ class ExecutionReliabilityTests(unittest.TestCase):
         orchestrator.analyzer = SimpleNamespace(
             run=AsyncMock(return_value=[_rejected_extraction(first)])
         )
-        orchestrator.store = SimpleNamespace(mark_evidence=Mock())
+        orchestrator.store = SimpleNamespace(
+            mark_evidence=Mock(), save_candidates=Mock(), attach_history=lambda values: values,
+        )
 
         with (
             patch.object(config, "PARADIGM_ANALYSIS_BATCH_SIZE", 1),
@@ -375,7 +378,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(deferred, [second])
         self.assertEqual(completed, [first])
         self.assertEqual(resumable, [])
-        orchestrator.store.mark_evidence.assert_not_called()
+        orchestrator.store.mark_evidence.assert_called_once_with([first], analyzed=True)
 
     def test_unexpected_origin_batch_failure_isolated_and_kept_pending(
         self,
@@ -399,7 +402,9 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 ]
             )
         )
-        orchestrator.store = SimpleNamespace(mark_evidence=Mock())
+        orchestrator.store = SimpleNamespace(
+            mark_evidence=Mock(), save_candidates=Mock(), attach_history=lambda values: values,
+        )
 
         with (
             patch.object(config, "PARADIGM_ANALYSIS_BATCH_SIZE", 1),
@@ -432,7 +437,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(completed, [second])
         self.assertEqual(resumable, [])
         self.assertEqual(first.raw["analysis_failure_count"], 1)
-        orchestrator.store.mark_evidence.assert_called_once_with(
+        orchestrator.store.mark_evidence.assert_any_call(
             [first], analyzed=False
         )
 
@@ -451,7 +456,9 @@ class ExecutionReliabilityTests(unittest.TestCase):
         orchestrator.analyzer = SimpleNamespace(
             run=AsyncMock(return_value=[_rejected_extraction(first)])
         )
-        orchestrator.store = SimpleNamespace(mark_evidence=Mock())
+        orchestrator.store = SimpleNamespace(
+            mark_evidence=Mock(), save_candidates=Mock(), attach_history=lambda values: values,
+        )
 
         with (
             patch.object(config, "PARADIGM_ANALYSIS_BATCH_SIZE", 2),
@@ -483,11 +490,11 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(completed, [first])
         self.assertEqual(resumable, [])
         self.assertEqual(second.raw["analysis_failure_count"], 1)
-        orchestrator.store.mark_evidence.assert_called_once_with(
+        orchestrator.store.mark_evidence.assert_any_call(
             [second], analyzed=False
         )
 
-    def test_report_slice_checkpoint_waits_for_outer_candidate_commit(self) -> None:
+    def test_report_slice_checkpoint_commits_before_next_origin(self) -> None:
         report = _origin("2608.00023")
         report.raw.update(
             {
@@ -508,7 +515,9 @@ class ExecutionReliabilityTests(unittest.TestCase):
         orchestrator.analyzer = SimpleNamespace(
             run=AsyncMock(return_value=[_rejected_extraction(report)])
         )
-        orchestrator.store = SimpleNamespace(mark_evidence=Mock())
+        orchestrator.store = SimpleNamespace(
+            mark_evidence=Mock(), save_candidates=Mock(), attach_history=lambda values: values,
+        )
 
         with (
             patch.object(config, "PARADIGM_ANALYSIS_BATCH_SIZE", 1),
@@ -537,8 +546,8 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertEqual(deferred, [])
         self.assertEqual(completed, [])
         self.assertEqual(resumable, [report])
-        # ``run`` saves candidate snapshots first, then persists this list.
-        orchestrator.store.mark_evidence.assert_not_called()
+        orchestrator.store.save_candidates.assert_called_once_with([])
+        orchestrator.store.mark_evidence.assert_any_call([report], analyzed=False)
 
     def test_unexpected_deep_failure_does_not_abort_peer_candidate(self) -> None:
         first = ParadigmCandidate(
@@ -858,7 +867,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             changed = _origin("2608.00004")
             changed.summary = "version two with a new mechanism"
             planned, _ = store.plan_origins([changed])
-            store.mark_evidence(planned, analyzed=False)
+            store.mark_evidence(planned, analyzed=False, source_observation=True)
 
             backlog = store.load_pending_origins()
 
@@ -1328,7 +1337,28 @@ class ExecutionReliabilityTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
         self.assertTrue(payload["recovered_delivery_only"])
+        self.assertFalse(payload["fresh_research_executed"])
         self.assertFalse(payload["fresh_research_completed"])
+
+    def test_pipeline_result_does_not_call_partial_research_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            try:
+                import os
+
+                os.chdir(directory)
+                marker = app_main._write_pipeline_result({
+                    "research_incomplete": True,
+                    "coverage_incomplete": True,
+                    "pending_work_count": 12,
+                    "result_kind": "research_incomplete",
+                })
+                payload = json.loads(marker.read_text(encoding="utf-8"))
+            finally:
+                os.chdir(previous)
+        self.assertTrue(payload["fresh_research_executed"])
+        self.assertFalse(payload["fresh_research_completed"])
+        self.assertEqual(payload["pending_work_count"], 12)
 
     def test_email_failure_reuses_validated_report_without_rerunning_research(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1640,6 +1670,50 @@ class ExecutionReliabilityTests(unittest.TestCase):
         ordered = _origin_execution_order(reports, ordinary)
         self.assertEqual(ordered[:4], [reports[0], *ordinary[:3]])
         self.assertCountEqual(ordered, [*reports, *ordinary])
+
+    def test_current_publications_get_bounded_service_amid_large_backfill(self) -> None:
+        reference = datetime(2026, 9, 23, tzinfo=timezone.utc)
+        backlog = [_origin(f"old-{index}") for index in range(1000)]
+        recent = [_origin(f"current-{index}") for index in range(12)]
+        for item in recent:
+            item.published_at = "2026-09-21T00:00:00+00:00"
+        recent[0].raw["origin_kind"] = "technical_report"
+        recent[0].raw["origin_priority"] = 3
+        ordered = _origin_execution_order(
+            backlog, recent, reference_time=reference, window_days=7
+        )
+        self.assertEqual(len(ordered), len(backlog) + len(recent))
+        self.assertEqual(
+            sum(item in recent for item in ordered[:16]), 12
+        )
+        self.assertEqual(
+            sum(item in backlog for item in ordered[:16]), 4
+        )
+
+    def test_modified_date_and_future_date_do_not_gain_current_priority(self) -> None:
+        reference = datetime(2026, 9, 23, tzinfo=timezone.utc)
+        old_modified = _origin("old-modified", priority=3)
+        old_modified.raw["date_modified"] = "2026-09-22T00:00:00Z"
+        future = _origin("future", priority=3)
+        future.published_at = "2026-09-30T00:00:00Z"
+        current = _origin("current")
+        current.published_at = "2026-09-22T00:00:00Z"
+        ordered = _origin_execution_order(
+            [old_modified, future], [current],
+            reference_time=reference, window_days=7,
+        )
+        self.assertIs(ordered[0], current)
+
+    def test_equal_priority_high_backlog_keeps_first_seen_fifo(self) -> None:
+        oldest = _origin("oldest-report", priority=3)
+        newer = _origin("newer-report", priority=3)
+        for item in (oldest, newer):
+            item.raw["origin_kind"] = "technical_report"
+        oldest.published_at = "2026-08-01T00:00:00+00:00"
+        newer.published_at = "2026-09-01T00:00:00+00:00"
+        self.assertEqual(
+            _origin_execution_order([oldest, newer], []), [oldest, newer]
+        )
 
     def test_legacy_query_only_report_is_reclassified_before_expensive_analysis(self) -> None:
         stale = _origin("Publications from Example Lab", priority=3)

@@ -18,6 +18,7 @@ from enum import Enum
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from runtime_clock import research_now
 
 class EvidenceType(str, Enum):
     PRIMARY_PAPER = "primary_paper"
@@ -196,9 +197,30 @@ def _evidence_datetime(value: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _material_uptake_delta(evidence: "TechnicalEvidence") -> bool:
-    """Require a visible magnitude change, not any floating counter tick."""
+def _material_uptake_delta(
+    evidence: "TechnicalEvidence",
+    *,
+    reference_time: datetime | None = None,
+    window_days: int = 30,
+) -> bool:
+    """Require a dated observation and a visible magnitude change.
 
+    A persisted delta without an observation time is legacy context, not a
+    perpetual event that can reactivate an old route every subsequent week.
+    """
+
+    delta = evidence.raw.get("metric_delta")
+    if not isinstance(delta, dict):
+        return False
+    observed = _evidence_datetime(evidence.raw.get("metric_delta_observed_at"))
+    now = research_now(reference_time)
+    if not observed or not now - timedelta(days=max(window_days, 1)) <= observed <= now + timedelta(days=1):
+        return False
+
+    return _material_metric_delta_amount(evidence)
+
+
+def _material_metric_delta_amount(evidence: "TechnicalEvidence") -> bool:
     delta = evidence.raw.get("metric_delta")
     if not isinstance(delta, dict):
         return False
@@ -219,15 +241,81 @@ def _material_uptake_delta(evidence: "TechnicalEvidence") -> bool:
         EvidenceType.SECONDARY_INTERPRETATION,
     }:
         return (
-            amount("comments") >= 5
-            or amount("replies") >= 5
-            or amount("likes") >= 20
-            or amount("score") >= 20
+            amount("comments") >= 5 or amount("replies") >= 5
+            or amount("likes") >= 20 or amount("score") >= 20
         )
     return False
 
 
-def _qualifying_current_uptake(evidence: "TechnicalEvidence") -> tuple[bool, str]:
+def material_metric_event_signature(
+    evidence: "TechnicalEvidence", *, route_key: str
+) -> tuple:
+    """Stable event identity even when two counts lie in the same bucket."""
+    if evidence.evidence_type in {
+        EvidenceType.COMMUNITY_DISCUSSION,
+        EvidenceType.SECONDARY_INTERPRETATION,
+    } and not is_verified_substantive_discussion(evidence, route_key=route_key):
+        return ()
+    if evidence.evidence_type in {
+        EvidenceType.IMPLEMENTATION,
+        EvidenceType.INDEPENDENT_REPLICATION,
+        EvidenceType.PRODUCT_ADOPTION,
+    } and evidence.raw.get("independence") not in {
+        "independent", "official", "publisher"
+    }:
+        return ()
+    if not _material_metric_delta_amount(evidence):
+        return ()
+    observed_at = str(evidence.raw.get("metric_delta_observed_at", ""))
+    if not _evidence_datetime(observed_at):
+        return ()
+    delta = evidence.raw["metric_delta"]
+    return (
+        observed_at,
+        tuple(sorted(
+            (str(key), nonnegative_number(value))
+            for key, value in delta.items()
+            if nonnegative_number(value) > 0
+        )),
+    )
+
+
+DISCUSSION_RELATIONSHIPS = frozenset({
+    "independent_commentary",
+    "independent_discussion",
+    "independent_analysis",
+    "mechanism_discussion",
+    "independent_mechanism_analysis",
+})
+
+
+def is_verified_substantive_discussion(
+    evidence: "TechnicalEvidence", *, route_key: str
+) -> bool:
+    raw = evidence.raw or {}
+    return bool(
+        evidence.evidence_type in {
+            EvidenceType.COMMUNITY_DISCUSSION,
+            EvidenceType.SECONDARY_INTERPRETATION,
+        }
+        and not raw.get("indexed_discovery_only")
+        and raw.get("substantive_uptake") is True
+        and raw.get("substantive_uptake_source") == "synthesis-v1"
+        and bool(route_key)
+        and raw.get("substantive_uptake_route_key") == route_key
+        and str(raw.get("independence", "")).casefold() == "independent"
+        and str(raw.get("relationship", "")).casefold()
+        in DISCUSSION_RELATIONSHIPS
+    )
+
+
+def _qualifying_current_uptake(
+    evidence: "TechnicalEvidence",
+    *,
+    route_key: str,
+    reference_time: datetime | None = None,
+    window_days: int = 30,
+) -> tuple[bool, str]:
     """Return whether one secondary record can reactivate an old route.
 
     Search hits and generic recent commentary are intentionally insufficient.
@@ -240,6 +328,14 @@ def _qualifying_current_uptake(evidence: "TechnicalEvidence") -> tuple[bool, str
         return False, "仅为搜索索引命中"
     relationship = str(raw.get("relationship", "")).casefold()
     independence = str(raw.get("independence", "")).casefold()
+    if evidence.evidence_type == EvidenceType.IMPLEMENTATION and independence in {
+        "official", "publisher"
+    }:
+        if _material_uptake_delta(
+            evidence, reference_time=reference_time, window_days=window_days
+        ):
+            return True, "官方实现采用指标出现量级变化；不等于独立复现"
+        return False, "官方实现自身活动或微小指标变化不足以构成本期进展"
     if relationship in {
         "author_self_release",
         "official_release_repository",
@@ -274,7 +370,9 @@ def _qualifying_current_uptake(evidence: "TechnicalEvidence") -> tuple[bool, str
     if evidence_type == EvidenceType.CITATION:
         return (
             (True, "引用指标出现可核验量级变化")
-            if _material_uptake_delta(evidence)
+            if _material_uptake_delta(
+                evidence, reference_time=reference_time, window_days=window_days
+            )
             else (False, "引用总量或微小变化不足以构成本期进展")
         )
     if evidence_type in {
@@ -285,15 +383,13 @@ def _qualifying_current_uptake(evidence: "TechnicalEvidence") -> tuple[bool, str
             return False, "讨论者独立性未核验"
         if raw.get("substantive_uptake") is not True:
             return False, "尚未核验为直接讨论本机制的实质承接"
-        if relationship not in {
-            "independent_commentary",
-            "independent_discussion",
-            "independent_analysis",
-            "mechanism_discussion",
-            "independent_mechanism_analysis",
-        }:
+        if relationship not in DISCUSSION_RELATIONSHIPS:
             return False, "讨论与本机制的关系类型未闭合"
-        return True, "独立且直接关联本机制的实质讨论"
+        return (
+            (True, "独立且直接关联本机制的实质讨论")
+            if is_verified_substantive_discussion(evidence, route_key=route_key)
+            else (False, "讨论核验状态未闭合")
+        )
     return False, "证据类型不构成历史路线更新"
 
 
@@ -309,10 +405,7 @@ def assess_candidate_freshness(
     turn an old, undated official page into a current-week breakthrough.
     """
 
-    now = reference_time or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        raise ValueError("reference_time must be timezone-aware")
-    now = now.astimezone(timezone.utc)
+    now = research_now(reference_time)
     cutoff = now - timedelta(days=max(window_days, 1))
     primary_types = ORIGIN_EVIDENCE_TYPES
     uptake_types = {
@@ -338,11 +431,19 @@ def assess_candidate_freshness(
         if evidence.evidence_type not in uptake_types:
             continue
         published = _evidence_datetime(evidence.published_at)
-        qualifying, _ = _qualifying_current_uptake(evidence)
+        qualifying, _ = _qualifying_current_uptake(
+            evidence, route_key=candidate.key,
+            reference_time=now, window_days=window_days
+        )
         current_date = bool(
             published and cutoff <= published <= now + timedelta(days=1)
         )
-        if qualifying and (current_date or _material_uptake_delta(evidence)):
+        if qualifying and (
+            current_date
+            or _material_uptake_delta(
+                evidence, reference_time=now, window_days=window_days
+            )
+        ):
             current_uptake.append(evidence)
 
     recent_primary = [
@@ -393,7 +494,10 @@ def assess_candidate_freshness(
                 "relationship": str(value.raw.get("relationship", "")),
                 "independence": str(value.raw.get("independence", "")),
                 "metric_delta": value.raw.get("metric_delta", {}),
-                "qualification_reason": _qualifying_current_uptake(value)[1],
+                "qualification_reason": _qualifying_current_uptake(
+                    value, route_key=candidate.key,
+                    reference_time=now, window_days=window_days
+                )[1],
             }
             for value in current_uptake
             if safe_public_contact_target("source", value.url)
@@ -416,6 +520,8 @@ class TechnicalEvidence:
     identifiers: dict[str, str] = field(default_factory=dict)
     keywords: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    # Bound by persistence before hydration; empty on fresh source observations.
+    source_revision: str = ""
 
     def __post_init__(self) -> None:
         """Normalize nullable external fields before they reach persistence.
@@ -465,6 +571,74 @@ class TechnicalEvidence:
         result = asdict(self)
         result["evidence_type"] = self.evidence_type.value
         return result
+
+
+EPHEMERAL_PERSISTABLE_RAW_KEYS = frozenset({
+    "relationship", "independence", "indexed_discovery_only",
+    "metrics_unavailable", "coverage", "ephemeral_content",
+    "social_platform", "social_profile_url", "subreddit",
+    "retention_policy", "substantive_uptake", "substantive_uptake_source",
+    "substantive_uptake_route_key",
+    "historical", "content_scrubbed", "metric_delta", "metric_baseline",
+    "metric_delta_observed_at",
+})
+_EPHEMERAL_METRIC_DELTA_KEYS = frozenset({
+    "citations", "influential_citations", "stars", "forks", "likes",
+    "replies", "comments", "score", "upvotes", "retweets", "reposts",
+})
+
+
+def scrub_ephemeral_evidence(evidence: TechnicalEvidence) -> None:
+    """Remove user-authored content before any research-state persistence."""
+    if not evidence.raw.get("ephemeral_content"):
+        return
+    platform = str(evidence.raw.get("social_platform") or evidence.source)
+    labels = {
+        "reddit": "Reddit 公开讨论",
+        "tavily-reddit": "Reddit 公开索引线索",
+        "x": "X 公开索引线索",
+        "tavily-x": "X 公开索引线索",
+        "xiaohongshu": "小红书公开索引线索",
+        "tavily-xiaohongshu": "小红书公开索引线索",
+        "web": "独立技术网页索引线索",
+        "tavily-web": "独立技术网页索引线索",
+    }
+    stable_id = next(iter(evidence.identifiers.values()), "")
+    evidence.title = labels.get(platform, "社区公开讨论")
+    if stable_id:
+        evidence.title = f"{evidence.title}（{stable_id}）"
+    evidence.summary = ""
+    evidence.authors = []
+    evidence.raw = {
+        key: value
+        for key, value in evidence.raw.items()
+        if key in EPHEMERAL_PERSISTABLE_RAW_KEYS
+    }
+    delta = evidence.raw.get("metric_delta")
+    if isinstance(delta, dict):
+        evidence.raw["metric_delta"] = {
+            key: number
+            for key, value in delta.items()
+            if key in _EPHEMERAL_METRIC_DELTA_KEYS
+            if (number := nonnegative_number(value)) > 0
+        }
+    else:
+        evidence.raw.pop("metric_delta", None)
+    baseline = evidence.raw.get("metric_baseline")
+    if isinstance(baseline, dict):
+        evidence.raw["metric_baseline"] = {
+            key: nonnegative_number(value)
+            for key, value in baseline.items()
+            if key in _EPHEMERAL_METRIC_DELTA_KEYS
+        }
+    else:
+        evidence.raw.pop("metric_baseline", None)
+    observed = _evidence_datetime(evidence.raw.get("metric_delta_observed_at"))
+    if observed:
+        evidence.raw["metric_delta_observed_at"] = observed.isoformat()
+    else:
+        evidence.raw.pop("metric_delta_observed_at", None)
+    evidence.raw["content_scrubbed"] = True
 
 
 @dataclass
@@ -600,7 +774,7 @@ def key_researcher_profiles(
     def add(profile: ResearcherProfile) -> None:
         if (
             len(selected) < target
-            and all(item.name.casefold() != profile.name.casefold() for item in selected)
+            and profile not in selected
         ):
             selected.append(profile)
 
@@ -771,6 +945,14 @@ class ParadigmCandidate:
     # 一个反复触发外部异常的候选长期占据同优先级队首。
     execution_failure_count: int = 0
     last_execution_failure_at: str = ""
+    # Only a fully closed synthesis may be reused. The input signature is
+    # derived from source-owned origin revisions, not transient community text.
+    deep_checkpoint_stage: str = ""
+    deep_checkpoint_input_signature: str = ""
+    deep_checkpoint_support_signature: str = ""
+    deep_checkpoint_created_at: str = ""
+    deep_checkpoint_trajectory_signature: str = ""
+    deep_checkpoint_synthesis_rubric: dict[str, Any] = field(default_factory=dict)
 
     @property
     def evidence_sources(self) -> set[str]:
@@ -791,7 +973,14 @@ class ParadigmCandidate:
                 (
                     item.fingerprint,
                     material_metric_signature(item.metrics),
-                    str(item.raw.get("relationship", "")),
+                    material_metric_event_signature(item, route_key=self.key),
+                    str(item.raw.get("relationship", "")) + (
+                        ":route-certified"
+                        if is_verified_substantive_discussion(
+                            item, route_key=self.key
+                        )
+                        else ""
+                    ),
                     str(item.raw.get("independence", "")),
                 )
                 for item in self.evidence
@@ -874,7 +1063,9 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
             "application_value", "secondary_discussion_summary", "publisher_tier",
             "admission_reason", "marketing_overclaim_risk", "novelty_type",
             "lineage_parent", "status", "report_kind", "rejection_reason",
-            "last_execution_failure_at",
+            "last_execution_failure_at", "deep_checkpoint_stage",
+            "deep_checkpoint_input_signature", "deep_checkpoint_support_signature",
+            "deep_checkpoint_created_at", "deep_checkpoint_trajectory_signature",
         },
         lists={
             "open_questions", "objective_momentum_signals", "publisher_evidence",
@@ -884,6 +1075,7 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
         mappings={
             "mental_model", "community_coverage", "screening_rubric",
             "rubric_assessment", "freshness_assessment",
+            "deep_checkpoint_synthesis_rubric",
         },
         numbers={
             "novelty_score", "solidity_score", "scope_score", "momentum_score",
@@ -921,7 +1113,7 @@ def technical_evidence_from_dict(payload: dict[str, Any]) -> TechnicalEvidence:
         "证据状态",
         strings={
             "source", "evidence_type", "title", "url", "summary",
-            "published_at", "organization",
+            "published_at", "organization", "source_revision",
         },
         lists={"authors", "keywords"},
         mappings={"metrics", "identifiers", "raw"},

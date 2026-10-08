@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from runtime_clock import research_now
 
 import httpx
 
@@ -67,7 +68,7 @@ class OpenAlexSource:
         self.failed_queries = 0
         self.completed_queries = 0
         self.result_count = 0
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        cutoff = research_now() - timedelta(days=self.lookback_days)
         date_filter = f"from_publication_date:{cutoff.date().isoformat()}"
         headers = {"User-Agent": "AI-Paradigm-Radar/3.2"}
         semaphore = asyncio.Semaphore(self.concurrency)

@@ -18,6 +18,10 @@ from paradigms.models import (
     TechnicalEvidence,
     plausible_researcher_name,
 )
+from paradigms.researcher_identity import (
+    merge_researcher_profiles,
+    same_verified_researcher,
+)
 from paradigms.reputation import resolve_organization
 
 logger = logging.getLogger(__name__)
@@ -43,6 +47,7 @@ class ResearcherProfileClient:
             config.PARADIGM_RESEARCHER_PROFILE_LIMIT,
             config.PARADIGM_KEY_RESEARCHER_LIMIT,
         )
+        active_count = len(_seed_profiles(evidence, [], limit))
         profiles = _seed_profiles(evidence, existing, limit)
 
         async with httpx.AsyncClient(
@@ -71,8 +76,29 @@ class ResearcherProfileClient:
                         _note(profile, "未获得可核验的 ORCID")
                     await self._homepage_contacts(client, profile)
 
-            await asyncio.gather(*(enrich_one(profile) for profile in profiles))
-        return profiles
+            # A same-name historical profile without a shared identifier is
+            # kept for the route, but must not be re-identified against this
+            # different paper or inherit its contact evidence.
+            await asyncio.gather(
+                *(enrich_one(profile) for profile in profiles[:active_count])
+            )
+        active = profiles[:active_count]
+        historical = profiles[active_count:]
+        resolved = []
+        for profile in active:
+            if _current_work_identity_confirmed(profile):
+                matches = [
+                    item for item in historical
+                    if same_verified_researcher(profile, item)
+                ]
+                if matches:
+                    profile = merge_researcher_profiles([profile], matches)[0]
+                    historical = [
+                        item for item in historical
+                        if item not in matches
+                    ]
+            resolved.append(profile)
+        return [*resolved, *historical]
 
     async def _openalex(
         self,
@@ -354,11 +380,10 @@ def _seed_profiles(
     existing: list[ResearcherProfile],
     limit: int,
 ) -> list[ResearcherProfile]:
-    by_name = {
-        profile.name.casefold(): profile
-        for profile in existing
-        if plausible_researcher_name(profile.name)
-    }
+    # Current-work author metadata must not silently inherit a same-name
+    # historical person's verified contact or identifier. Build fresh seeds,
+    # then reconcile only on a shared public identity claim.
+    by_name: dict[str, ResearcherProfile] = {}
     roles = {
         str(name): str(role)
         for name, role in (evidence.raw.get("author_roles") or {}).items()
@@ -564,7 +589,35 @@ def _seed_profiles(
             )
             _note(profile, "已从论文官方项目页获得公开职业邮箱")
         _note(profile, "已从当前论文作者列表建立身份种子")
-    return list(by_name.values())[:limit]
+    current = list(by_name.values())
+    historical = [
+        profile for profile in existing
+        if plausible_researcher_name(profile.name)
+    ]
+    # Do not join a new author's unconfirmed OpenAlex mapping to a previous
+    # person's contacts before the current-paper work check has run.
+    profiles = [*current, *historical]
+    selected_names = {name.casefold() for name in selected}
+    relevant = [
+        profile for profile in profiles
+        if profile.name.casefold() in selected_names
+    ]
+    other = [
+        profile for profile in profiles
+        if profile.name.casefold() not in selected_names
+    ]
+    # ``limit`` bounds current-paper lookups, not the durable route dossier.
+    # Historical people may be distinct or may be the route's earlier lead;
+    # silently truncating them would erase verified contacts across weeks.
+    return [*relevant, *other]
+
+
+def _current_work_identity_confirmed(profile: ResearcherProfile) -> bool:
+    return any(
+        "当前论文题目与 OpenAlex 作者实体交叉核验通过" in note
+        or "已从论文官方 HTML 的作者链接获得公开主页" in note
+        for note in profile.contact_search_notes
+    )
 
 
 def _is_collective_author(name: str) -> bool:
