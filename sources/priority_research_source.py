@@ -34,6 +34,7 @@ class _ResearchLink:
     url: str
     published_at: str = ""
     body_hint: str = ""
+    original_url: str = ""
 
 
 class PriorityResearchPageSource:
@@ -47,6 +48,7 @@ class PriorityResearchPageSource:
         per_page: int | None = None,
         pages: list[str] | None = None,
         concurrency: int | None = None,
+        client_factory=None,
     ):
         self.lookback_days = max(lookback_days, 1)
         configured = config.PRIORITY_RESEARCH_LINK_SAFETY_LIMIT
@@ -68,6 +70,7 @@ class PriorityResearchPageSource:
             1,
         )
         self.page_coverage: dict[str, dict[str, object]] = {}
+        self.client_factory = client_factory
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
         if not self.pages:
@@ -80,7 +83,7 @@ class PriorityResearchPageSource:
             root_failures = int(coverage.get("request_failed", 0) or 0) + int(
                 coverage.get("parse_zero_links", 0) or 0
             )
-            detail_failures = int(coverage.get("detail_failures", 0) or 0)
+            detail_failures = int(coverage.get("detail_failures", 0) or 0) + int(coverage.get("unresolved_citations", 0) or 0)
             checked = int(coverage.get("checked_pages", 0) or 0)
             total = int(coverage.get("total_pages", 0) or 0)
             if total and root_failures >= total:
@@ -109,11 +112,11 @@ class PriorityResearchPageSource:
             async with semaphore:
                 return await client.get(url)
 
-        async with httpx.AsyncClient(
+        async with (self.client_factory or httpx.AsyncClient)(
             timeout=30, follow_redirects=True, headers=headers
         ) as client:
             index_responses = await asyncio.gather(
-                *(bounded_get(client, url) for url in self.pages),
+                *(bounded_get(client, urljoin(url, (source_record(url) or {}).get("index_path", ""))) for url in self.pages),
                 return_exceptions=True,
             )
             discovered: list[tuple[str, _ResearchLink]] = []
@@ -140,8 +143,47 @@ class PriorityResearchPageSource:
                     }
                     logger.warning("官方研究入口返回失败 %s: %s", index_url, exc)
                     continue
-                links = _discover_index_links(response.text, str(response.url))
+                links = _discover_index_links(response.text, str(response.url), source_url=index_url)
                 metadata = source_record(index_url) or {}
+                unresolved_citations = 0
+                bibliography_diagnostics = {}
+                if metadata.get("bibliography_arxiv"):
+                    citation_links, unresolved_citations = _discover_bibliographic_publications(response.text, cutoff=cutoff, diagnostics=bibliography_diagnostics)
+                    links.extend(citation_links)
+                script_urls = _publication_script_urls(response.text, str(response.url), metadata)
+                script_failures = 0
+                for script_url in script_urls:
+                    try:
+                        script = await bounded_get(client, script_url)
+                        script.raise_for_status()
+                        if urlparse(str(script.url)).netloc != urlparse(str(response.url)).netloc:
+                            raise ValueError("Publication data script redirected off origin")
+                        if len(script.content) > 2_000_000:
+                            raise ValueError("Publication data script exceeds adapter size limit")
+                        if metadata.get("publication_module_pattern"):
+                            modules = _publication_module_urls(script.text, str(response.url), metadata)
+                            if len(modules) != 1:
+                                raise ValueError("Registered publication module identity is missing or ambiguous")
+                            module = await bounded_get(client, modules[0])
+                            module.raise_for_status()
+                            if urlparse(str(module.url)).netloc != urlparse(str(response.url)).netloc or len(module.content) > 2_000_000:
+                                raise ValueError("Publication module violates origin/size contract")
+                            script_links = _discover_literal_publications(module.text, str(response.url), schema=metadata.get("publication_script_schema", "gear"))
+                        else:
+                            script_links = _discover_literal_publications(script.text, str(response.url))
+                        if not script_links:
+                            raise ValueError("Publication data script has no valid publication cards")
+                        links.extend(script_links)
+                    except Exception as exc:
+                        script_failures += 1
+                        logger.warning("官方索引数据未闭合 %s: %s", index_url, type(exc).__name__)
+                if metadata.get("index_script_pattern") and not script_urls:
+                    script_failures += 1
+                links = list({link.url: link for link in links}.values())
+                if metadata.get("page_mode") == "article":
+                    article = _ArticleParser(str(response.url))
+                    article.feed(response.text)
+                    links = [_ResearchLink(title=article.title, url=index_url, published_at=article.published_at)] if article.title and len(article.text) >= 120 else []
                 if metadata.get("page_mode") == "changelog":
                     latest = _discover_latest_changelog_entry(
                         response.text,
@@ -178,8 +220,14 @@ class PriorityResearchPageSource:
                     "recent_links": len(recent_links),
                     "selected_links": len(selected_links),
                     "selection_limit_origin": self.limit_origin,
-                    "detail_failures": 0,
+                    "detail_failures": script_failures,
+                    "index_data_urls": script_urls,
+                    "index_data_failures": script_failures,
+                    "detail_outside_window": 0,
+                    "detail_parsed": 0,
                     "evidence": 0,
+                    "unresolved_citations": unresolved_citations,
+                    "bibliography_diagnostics": bibliography_diagnostics,
                 }
                 if self.per_page > 0 and len(recent_links) > self.per_page:
                     message = (
@@ -249,6 +297,7 @@ class PriorityResearchPageSource:
                     title, body, authors = _extract_pdf_document(response.content)
                 except Exception as exc:
                     logger.warning("官方 Technical Report PDF 解析失败 %s: %s", link.url, exc)
+                    self.page_coverage[index_url]["detail_failures"] += 1
                     continue
                 site_name = ""
                 published = link.published_at
@@ -278,14 +327,18 @@ class PriorityResearchPageSource:
                         for item in linked_documents
                     }.values()
                 )
+            title = title or link.title
+            if not title or len(body) < 120:
+                self.page_coverage[index_url]["detail_failures"] += 1
+                continue
+            self.page_coverage[index_url]["detail_parsed"] += 1
             published_dt = _parse_date(published)
             if published_dt and published_dt < cutoff:
+                self.page_coverage[index_url]["detail_outside_window"] += 1
                 continue
             modified_dt = _parse_date(modified)
             if not published_dt and modified_dt and modified_dt < cutoff:
-                continue
-            title = title or link.title
-            if not title or len(body) < 120:
+                self.page_coverage[index_url]["detail_outside_window"] += 1
                 continue
             # PDF 元数据标题有时只写模型名；保留索引页锚文本，避免把明确标注的
             # “Technical Report”误判成普通模型发布。
@@ -322,7 +375,7 @@ class PriorityResearchPageSource:
                     # Expires/Signature 的临时 CDN 下载地址。
                     url=link.url,
                     summary=body[:summary_limit],
-                    published_at=(published_dt.isoformat() if published_dt else published),
+                    published_at=(published_dt.isoformat() if published_dt else ""),
                     authors=list(dict.fromkeys(authors)),
                     # 内置入口使用已核验 owner；用户自定义入口只保留域名，避免
                     # 网页伪造 og:site_name 后继承知名机构身份。
@@ -337,6 +390,7 @@ class PriorityResearchPageSource:
                         "publisher_evidence": publisher_evidence,
                         "research_index_url": index_url,
                         "canonical_source_url": link.url,
+                        "index_discovered_url": link.original_url or link.url,
                         "source_published_at": published,
                         "source_modified_at": modified,
                         "date_basis": (
@@ -374,6 +428,7 @@ class PriorityResearchPageSource:
             "detail_failures": sum(
                 int(item.get("detail_failures", 0) or 0) for item in statuses
             ),
+            "unresolved_citations": sum(int(item.get("unresolved_citations", 0)) for item in statuses),
             "evidence": sum(int(item.get("evidence", 0) or 0) for item in statuses),
             "pages": self.page_coverage,
         }
@@ -386,11 +441,20 @@ class _AnchorParser(HTMLParser):
         self._href = ""
         self._label = ""
         self._text: list[str] = []
+        self._elements: list[tuple[str, bool]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.casefold() != "a":
-            return
         attributes = dict(attrs)
+        lowered = tag.casefold()
+        excluded = (any(value for _, value in self._elements)
+                    or lowered in {"nav", "footer", "script", "style"}
+                    or attributes.get("role") in {"navigation", "menubar", "contentinfo", "banner"})
+        if lowered not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            self._elements.append((lowered, excluded))
+        if lowered == "img" and self._href and attributes.get("alt"):
+            self._text.append(attributes["alt"])
+        if lowered != "a" or excluded:
+            return
         self._href = attributes.get("href") or ""
         self._label = attributes.get("aria-label") or attributes.get("title") or ""
         self._text = []
@@ -406,6 +470,10 @@ class _AnchorParser(HTMLParser):
             self._href = ""
             self._label = ""
             self._text = []
+        for index in range(len(self._elements) - 1, -1, -1):
+            if self._elements[index][0] == tag.casefold():
+                del self._elements[index:]
+                break
 
 
 class _ArticleParser(HTMLParser):
@@ -447,13 +515,18 @@ class _ArticleParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.casefold()
         attributes = {key.casefold(): value or "" for key, value in attrs}
-        labels = set(re.split(r"[\s_-]+", " ".join(
-            [attributes.get("class", ""), attributes.get("id", "")]
-        ).casefold()))
+        container_names = set((attributes.get("class", "") + " " + attributes.get("id", "")).casefold().split())
+        # WordPress body/layout classes such as content-sidebar and
+        # content-sidebar-wrap describe a grid, not a sidebar subtree.
+        # Exclude dedicated sidebar/related containers, not the whole article.
+        auxiliary = lowered not in {"body", "main", "article"} and any(
+            name == marker or name.startswith(marker + "-") or name.startswith(marker + "_")
+            for name in container_names for marker in {"related", "recommendations", "recommended", "sidebar"}
+        )
         excluded = (
             self._excluded()
             or lowered in {"script", "style", "svg", "nav", "footer", "header", "aside"}
-            or bool(labels & {"related", "recommendations", "recommended", "sidebar"})
+            or auxiliary
             or attributes.get("role", "").casefold() in {
                 "navigation", "complementary", "contentinfo", "menubar"
             }
@@ -496,6 +569,7 @@ class _ArticleParser(HTMLParser):
                 "date",
                 "datepublished",
                 "citation_publication_date",
+                "citation_date",
             }:
                 self.published_at = self.published_at or attributes.get("content", "")
             if key in {"article:modified_time", "datemodified", "last-modified"}:
@@ -577,17 +651,73 @@ class _StructuredDataParser(HTMLParser):
             self._parts = []
 
 
-def _discover_index_links(html_text: str, base_url: str) -> list[_ResearchLink]:
+class _BibliographicParser(_ArticleParser):
+    """Only collect explicit citation paragraphs, honoring body exclusions."""
+    def __init__(self):
+        super().__init__()
+        self.paragraphs = []
+        self._citation = None
+
+    def handle_starttag(self, tag, attrs):
+        super().handle_starttag(tag, attrs)
+        if tag.casefold() == "p" and not self._excluded():
+            self._citation = []
+
+    def handle_data(self, data):
+        super().handle_data(data)
+        if self._citation is not None and not self._excluded():
+            self._citation.append(data)
+
+    def handle_endtag(self, tag):
+        if tag.casefold() == "p" and self._citation is not None:
+            self.paragraphs.append(_compact_text(" ".join(self._citation)))
+            self._citation = None
+        super().handle_endtag(tag)
+
+
+def _discover_bibliographic_publications(html_text, *, cutoff=None, diagnostics=None):
+    parser = _BibliographicParser()
+    parser.feed(html_text)
+    links, unresolved, total, outside_years = {}, 0, 0, 0
+    for text in parser.paragraphs:
+        # A citation year is not a publication timestamp. Resolve the explicit
+        # arXiv ID through its canonical landing page and normal detail parser.
+        year = re.search(r"\((20\d{2})\)", text)
+        if not year or not re.search(r'[“"]', text):
+            continue
+        total += 1
+        # A known earlier calendar year cannot overlap this fixed window.
+        # This is an exclusion bound, NOT a guessed publication date. Keep
+        # same-year/undated inputs unknown and verify their primary metadata.
+        if cutoff is not None and int(year.group(1)) < cutoff.year:
+            outside_years += 1
+            continue
+        identifier = re.search(r"\barXiv\s*:\s*(\d{4}\.\d{4,5}(?:v\d+)?)\b", text, re.I)
+        title = re.search(r'[“"]([^”"]{5,800})[”"]', text)
+        if not identifier or not title:
+            unresolved += 1
+            continue
+        url = "https://arxiv.org/abs/" + identifier.group(1)
+        links[url] = _ResearchLink(title=_compact_text(title.group(1)), url=url)
+    if diagnostics is not None:
+        diagnostics.update(citation_records=total, outside_window_by_year=outside_years,
+                           resolved_arxiv_urls=len(links), unresolved_in_window=unresolved)
+    return list(links.values()), unresolved
+
+
+def _discover_index_links(html_text: str, base_url: str, *, source_url: str | None = None) -> list[_ResearchLink]:
     parser = _AnchorParser()
     parser.feed(html_text)
     by_url: dict[str, _ResearchLink] = {}
+    metadata = source_record(source_url or base_url) or {}
     raw_links = list(parser.anchors)
     # Next.js 等站点常把发布日期放在卡片外部，只在 hydration 数据里保留
     # title/href/date。读取这份公开结构化数据，避免“链接抓到了但日期丢失”。
     raw_links.extend(
         (item.title, item.url, item.published_at)
-        for item in _discover_embedded_publications(html_text, base_url)
+        for item in _discover_embedded_publications(html_text, base_url, path_cards=metadata.get("embedded_path_cards", False))
     )
+    detail_pattern = metadata.get("detail_path_pattern", "")
     for raw_link in raw_links:
         if len(raw_link) == 2:
             title, href = raw_link
@@ -595,7 +725,18 @@ def _discover_index_links(html_text: str, base_url: str) -> list[_ResearchLink]:
         else:
             title, href, embedded_date = raw_link
         url = urljoin(base_url, href)
-        if not _looks_like_research_link(title, url):
+        if url.rstrip("/") == base_url.rstrip("/") or href.startswith("#"):
+            continue
+        if _generic_index_label(title):
+            continue
+        # Empty Webflow image anchors still carry a real article URL. Use its
+        # explicit slug only as a discovery label; detail parsing verifies the
+        # actual article title/body before a candidate can be created.
+        if not title and re.search(r"/(?:research|articles?|news)/[^/]+/?$", urlparse(url).path):
+            title = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1].replace("-", " ")
+        known_catalog_detail = bool(detail_pattern and urlparse(url).hostname == urlparse(base_url).hostname
+                                    and re.fullmatch(detail_pattern, urlparse(url).path) and len(title) >= 8)
+        if not _looks_like_research_link(title, url) and not known_catalog_detail:
             continue
         date = embedded_date or _date_from_text(title)
         cleaned_title = re.sub(
@@ -621,6 +762,87 @@ def _discover_index_links(html_text: str, base_url: str) -> list[_ResearchLink]:
         key=lambda item: (bool(item.published_at), item.published_at),
         reverse=True,
     )
+
+
+def _publication_script_urls(html_text: str, base_url: str, metadata: dict) -> list[str]:
+    """Only fetch a registered, same-origin publication data script, not JS bundles in general."""
+    pattern = metadata.get("index_script_pattern")
+    if not pattern:
+        return []
+    urls = []
+    for href in re.findall(r'<script[^>]+src=["\']([^"\']+)', html_text, re.I):
+        url = urljoin(base_url, html_lib.unescape(href))
+        parsed = urlparse(url)
+        if (parsed.scheme in {"https", "http"} and parsed.netloc == urlparse(base_url).netloc
+                and re.fullmatch(pattern, parsed.path) and not parsed.query):
+            if url not in urls:
+                urls.append(url)
+    if len(urls) > 1:
+        # The caller records the missing registered data source as a failure.
+        # One changed index must not discard healthy peers in the same fetch.
+        return []
+    return urls
+
+
+def _publication_module_urls(script_text: str, base_url: str, metadata: dict) -> list[str]:
+    """Registered public lazy module only; no evaluation or general JS crawling."""
+    pattern = metadata.get("publication_module_pattern")
+    if not pattern:
+        return []
+    urls = set()
+    for literal in re.findall(r'"((?:\\.|[^"\\])*)"', script_text):
+        try:
+            path = json.loads('"' + literal + '"')
+        except ValueError:
+            continue
+        # Vite's dependency map uses root-relative "assets/..." literals.
+        path = "/" + path if path.startswith("assets/") else path
+        if re.fullmatch(pattern, path):
+            urls.add(urljoin(base_url, path))
+    return sorted(urls)
+
+
+def _discover_literal_publications(script_text: str, base_url: str, *, schema: str = "gear") -> list[_ResearchLink]:
+    """Read explicit publication-card string literals; NEVER execute/eval remote JS.
+
+    NVIDIA GEAR embeds title/paperLink/projectLink cards in its page bundle.
+    Conference dates are not publication dates. A card only discovers a URL;
+    its first-party project detail must still pass the normal body/date parser.
+    """
+    results = {}
+    fields = {"title": "title", "paperLink": "paperLink", "projectLink": "projectLink"}
+    if schema == "tencent_arc":
+        fields = {"paper_title": "title", "paper_titleEn": "title", "paper_pdf": "paperLink"}
+    elif schema != "gear":
+        raise ValueError("Unregistered publication script schema")
+    for chunk in re.findall(r"\{[^{}]{0,20000}\}", script_text):
+        values = {}
+        for key, target in fields.items():
+            match = re.search(r'(?:^|[,{])\s*(?:"' + key + r'"|' + key + r')\s*:\s*("(?:\\.|[^"\\])*")', chunk)
+            if match:
+                try:
+                    values[target] = json.loads(match.group(1))
+                except ValueError:
+                    continue
+        title = _compact_text(values.get("title", ""))
+        project_url = urljoin(base_url, values.get("projectLink", ""))
+        # A project on an unverified outside host must not swallow the card's
+        # accessible primary paper. Existing source-owner rules still apply.
+        href = values.get("projectLink") if values.get("projectLink") and source_link_allowed(base_url, project_url) else values.get("paperLink")
+        if title and href:
+            url = urljoin(base_url, href)
+            if urlparse(url).scheme in {"http", "https"}:
+                original_url = url
+                # Explicit arXiv identifiers have a stable canonical landing
+                # page. Verify metadata/abstract first instead of downloading
+                # a large PDF just to learn its date. Preserve the discovered
+                # URL; full report hydration remains a separate research stage.
+                parsed = urlparse(url)
+                identifier = re.fullmatch(r"/pdf/(\d{4}\.\d{4,5}(?:v\d+)?)(?:\.pdf)?/?", parsed.path)
+                if schema == "tencent_arc" and parsed.hostname == "arxiv.org" and identifier and not parsed.query:
+                    url = "https://arxiv.org/abs/" + identifier.group(1)
+                results[url] = _ResearchLink(title=title, url=url, original_url=original_url)
+    return list(results.values())
 
 
 def _discover_latest_changelog_entry(
@@ -665,6 +887,7 @@ def _discover_latest_changelog_entry(
 def _discover_embedded_publications(
     html_text: str,
     base_url: str,
+    *, path_cards: bool = False,
 ) -> list[_ResearchLink]:
     """从 JSON-LD 与公开 hydration 数据提取 title/href/date 卡片。"""
     normalized = html_lib.unescape(html_text)
@@ -687,7 +910,7 @@ def _discover_embedded_publications(
             flags=re.IGNORECASE,
         )
         href_match = re.search(
-            r'"(?:href|url|link)"\s*:\s*"((?:\\.|[^"])*)"',
+            r'"(?:href|url|link' + ('|path' if path_cards else '') + r')"\s*:\s*"((?:\\.|[^"])*)"',
             chunk,
             flags=re.IGNORECASE,
         )
@@ -700,6 +923,8 @@ def _discover_embedded_publications(
             continue
         title = _compact_text(title_match.group(1))
         url = urljoin(base_url, href_match.group(1))
+        if path_cards and not re.fullmatch(r"/research/(?:en|zh)/[^/]+/?", urlparse(url).path):
+            continue
         date = _normalize_date(date_match.group(1)) if date_match else ""
         if not title or not url.startswith(("http://", "https://")):
             continue
@@ -740,7 +965,6 @@ def _walk_structured_publications(
         payload.get("datePublished")
         or payload.get("dateCreated")
         or payload.get("uploadDate")
-        or payload.get("dateModified")
     )
     if title and url.startswith(("http://", "https://")):
         results.append(
@@ -765,8 +989,14 @@ def _looks_like_research_link(title: str, url: str) -> bool:
         return False
     lowered_title = title.casefold()
     lowered_path = urlparse(url).path.casefold()
-    if lowered_title.strip() in {"research", "blog", "news", "get more", "learn more"}:
+    if _generic_index_label(title):
         return False
+    if re.search(r"/research/(?:tools|academic-programs|events-conferences|focus-area|research-area|lab|people)(?:/|$)", lowered_path):
+        return False
+    if re.search(r"/(?:abs|pdf)/\d{4}\.\d{4,5}(?:v\d+)?(?:\.pdf)?/?$", lowered_path) and urlparse(url).hostname in {"arxiv.org", "export.arxiv.org"}:
+        return True
+    if urlparse(url).hostname == "openreview.net" and lowered_path == "/forum" and "id=" in urlparse(url).query:
+        return True
     title_signal = bool(
         re.search(r"\d{4}-\d{2}-\d{2}", title)
         or any(
@@ -799,10 +1029,12 @@ def _looks_like_research_link(title: str, url: str) -> bool:
             "/blog/",
             "/research/",
             "/publication",
+            "/pubs/",
             "/paper",
             "/report",
             "/news/",
             "/article/",
+            "/articles/",
             "/detail/",
             "/achievement/",
             ".pdf",
@@ -810,18 +1042,27 @@ def _looks_like_research_link(title: str, url: str) -> bool:
     )
     publication_path = any(
         marker in lowered_path
-        for marker in ("/publication/", "/publications/", "/paper/", "/report/", ".pdf")
+        for marker in ("/publication/", "/publications/", "/pubs/", "/paper/", "/report/", ".pdf")
     )
     blog_detail = bool(re.search(r"/blog/[^/]+/?$", lowered_path))
     structured_detail = bool(
         re.search(
-            r"/(?:research|news|article|articles|detail|achievement)/[^/]+/?$",
+            r"/(?:research|news|article|articles|detail|achievement|pubs)/[^/]+/?$",
             lowered_path,
         )
     )
     return path_signal and (
         title_signal or publication_path or blog_detail or structured_detail
     )
+
+
+def _generic_index_label(title: str) -> bool:
+    return title.casefold().strip() in {
+        "research", "blog", "news", "get more", "learn more", "publications",
+        "all publications", "view all publications", "research publications",
+        "technical reports", "privacy policy", "terms of service",
+        "microsoft research blog", "privacy", "terms", "contact us",
+    }
 
 
 def _origin_kind(title: str, url: str) -> str:
@@ -834,7 +1075,24 @@ def _origin_kind(title: str, url: str) -> str:
 
 def _date_from_text(value: str) -> str:
     match = re.search(r"\b(20\d{2}[-/.]\d{2}[-/.]\d{2})\b", value)
-    return _normalize_date(match.group(1)) if match else ""
+    if match:
+        return _normalize_date(match.group(1))
+    # Publication cards can contain an explicit day/month/year (e.g. TRI).
+    # A conference year or a bare year remains unknown. No locale dependency.
+    months = {name: i for i, name in enumerate(("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"), 1)}
+    names = "|".join(months)
+    match = re.search(r"\b(\d{1,2})\s+(" + names + r")\s+(20\d{2})\b", value, re.I)
+    if match:
+        day, month, year = match.groups()
+    else:
+        match = re.search(r"\b(" + names + r")\s+(\d{1,2}),?\s+(20\d{2})\b", value, re.I)
+        if not match:
+            return ""
+        month, day, year = match.groups()
+    try:
+        return datetime(int(year), months[month.casefold()], int(day)).date().isoformat()
+    except ValueError:
+        return ""
 
 
 def _normalize_date(value: str) -> str:

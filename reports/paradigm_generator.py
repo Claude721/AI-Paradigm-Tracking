@@ -251,7 +251,7 @@ class ParadigmReportGenerator:
                     if attempt == 0
                     else "\n\n上一次请求未完成。请保持事实密度，压缩重复表达并直接输出完整 Markdown。"
                 )
-                response = await client.chat.completions.create(
+                response = await run_audit.chat_completion(client, stage=stage, role="main", subject=subject,
                     model=model,
                     messages=[
                         {"role": "user", "content": prompt + retry_note}

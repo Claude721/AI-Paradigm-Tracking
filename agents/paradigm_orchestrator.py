@@ -10,6 +10,7 @@ import time
 from collections import deque
 from collections import Counter
 from contextlib import aclosing, nullcontext
+from itertools import islice
 from datetime import datetime, timedelta, timezone
 
 import config
@@ -62,6 +63,7 @@ class ParadigmOrchestrator:
         self.discovery = ParadigmDiscovery(
             broad_lookback_days=self.ordinary_discovery_lookback_days,
             high_signal_lookback_days=self.high_signal_discovery_lookback_days,
+            stage_cache=self.store.campaigns,
         )
         self.analyzer = ParadigmAnalyzer(
             enable_batch_prefilter=config.PARADIGM_ORIGIN_PREFILTER_ENABLED,
@@ -101,6 +103,7 @@ class ParadigmOrchestrator:
                 self.discovery = ParadigmDiscovery(
                     broad_lookback_days=active.ordinary_days,
                     high_signal_lookback_days=active.high_signal_days,
+                    stage_cache=self.store.campaigns,
                 )
                 self.discovery.arxiv.seed_arxiv_ids = active.seeds
             return await self._run_research()
@@ -231,6 +234,7 @@ class ParadigmOrchestrator:
             official_coverage.get("request_failed")
             or official_coverage.get("parse_zero_links")
             or official_coverage.get("detail_failures")
+            or official_coverage.get("unresolved_citations")
         )
         run_audit.event(
             "official_page_coverage",
@@ -241,6 +245,7 @@ class ParadigmOrchestrator:
                 f"请求失败 {official_coverage.get('request_failed', 0)}；"
                 f"解析零链接 {official_coverage.get('parse_zero_links', 0)}；"
                 f"详情失败 {official_coverage.get('detail_failures', 0)}；"
+                f"未解析书目 {official_coverage.get('unresolved_citations', 0)}；"
                 f"形成原点 {official_coverage.get('evidence', 0)}"
             ),
         )
@@ -611,6 +616,7 @@ class ParadigmOrchestrator:
             refresh_attempted,
         ) = service["refresh_result"]
         stats["refresh_analysis_count"] = refresh_attempted
+        stats["refresh_input_redirected_count"] = service.get("refresh_input_redirected_count", 0)
         stats["refresh_safety_deferred_count"] = len(refresh_safety_deferred)
         stats["refresh_budget_deferred_count"] = len(refresh_budget_deferred)
         stats["refresh_execution_deferred_count"] = len(
@@ -1035,6 +1041,8 @@ class ParadigmOrchestrator:
         in-memory outcome and queues the newly committed input for research.
         """
         now = research_now()
+        if hasattr(self.analyzer, "_eligibility_prefetch_failures"):
+            self.analyzer._eligibility_prefetch_failures.clear()
         window = self.ordinary_discovery_lookback_days
         lane_for = lambda item: (
             "current" if _candidate_has_current_primary(
@@ -1085,6 +1093,7 @@ class ParadigmOrchestrator:
         refreshed, unchanged, refresh_failed = {}, {}, {}
         refresh_budget = []
         refresh_attempted = 0
+        refresh_input_redirected = set()
         visited_deep_keys = set()
         visited_origins = set()
         origin_completed, origin_partial, origin_failed, origin_budget_by_key = {}, {}, set(), {}
@@ -1162,6 +1171,28 @@ class ParadigmOrchestrator:
             )
             visit_started = monotonic()
             if stage == "origin":
+                # Eligibility batching is independent of the small full-review
+                # visit. Interleaved protected origins must not force every
+                # ordinary qualification request down to ~4-6 records.
+                prefetch = getattr(self.analyzer, "prefetch_origin_eligibility", None)
+                if (getattr(self.analyzer, "enable_batch_prefilter", False)
+                        and getattr(self.analyzer, "stage_cache", None) is not None
+                        and callable(prefetch)):
+                    lookahead = list(islice(origin_queues[lane], config.PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE * 2))
+                    needs_eligibility = lambda item: _should_prefilter_origin(item) and item.raw.get("origin_eligibility_decision") not in {"full_review", "screen_out"}
+                    ordinary = ([item for item in lookahead if needs_eligibility(item)][:config.PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE]
+                                if any(needs_eligibility(item) for item in lookahead[:config.PARADIGM_ANALYSIS_BATCH_SIZE]) else [])
+                    if ordinary:
+                        try:
+                            decisions = await asyncio.wait_for(prefetch(ordinary), timeout=_remaining_seconds(visit_deadline))
+                            for item in ordinary:
+                                if item.fingerprint in decisions:
+                                    item.raw["origin_eligibility_decision"], item.raw["origin_eligibility_reason"] = decisions[item.fingerprint]
+                        except asyncio.TimeoutError:
+                            # No completion receipt is inferred; healthy cached
+                            # decisions survive, all origins remain in the queue.
+                            scheduler.account(lane, visit_started, stage=stage)
+                            continue
                 batch_size = config.PARADIGM_ANALYSIS_BATCH_SIZE
                 if getattr(self.analyzer, "enable_batch_prefilter", False) and all(
                     _should_prefilter_origin(item) for item in list(origin_queues[lane])[:config.PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE]
@@ -1273,6 +1304,20 @@ class ParadigmOrchestrator:
                     item = refresh_queue.popleft()
                     if item.key in refresh_keys:
                         refresh_keys.remove(item.key)
+                        if not self.store.candidate_inputs_current(item):
+                            snapshot = copy.deepcopy(item)
+                            snapshot.status = "pending_deep"
+                            # Downstream executable snapshot BEFORE the parent
+                            # is redirected; the refresh manifest stays pending.
+                            with self.store.transaction():
+                                self.store.save_candidates([snapshot])
+                                if campaign_key:
+                                    from database.paradigm_store import _deep_checkpoint_input_signature
+                                    self.store.campaigns.include(campaign_key, "deep", [(snapshot.key, _deep_checkpoint_input_signature(snapshot), snapshot.to_dict())])
+                            queue_committed({snapshot.key})
+                            refresh_input_redirected.add(snapshot.key)
+                            run_audit.event("refresh_input_dependency", "deferred", f"{snapshot.key[:80]}：一手来源换版，保留刷新父任务并转入可恢复深挖；未调用过期输入的社区/模型接口")
+                            continue
                         group.append(item)
                 if group:
                     attempts = start_attempts("refresh", group)
@@ -1350,6 +1395,7 @@ class ParadigmOrchestrator:
                                [item for item in refresh_budget if item.key not in deep_plan],
                                list(refresh_failed.values()), refresh_attempted),
             "refresh_safety_deferred": [item for item in refresh_safety if item.key not in deep_plan],
+            "refresh_input_redirected_count": len(refresh_input_redirected),
             "research_service": service,
         }
 

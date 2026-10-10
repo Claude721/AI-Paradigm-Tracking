@@ -1,8 +1,14 @@
 # AI 技术范式雷达：完整配置 Checklist
 
-> 所有密钥只填写到根目录 `.env`，不要粘贴到聊天、截图或提交到 Git。配置模板见 `.env.example`。
+> 本地生产密钥填写到根目录 `.env`；GitHub 部署填写到 Actions Secrets。不要粘贴到聊天、截图或提交到 Git。独立验收脚本忽略 `.env`。配置模板见 `.env.example`。
 
-2026-10-08 工程候选使用 schema v8，自动迁移旧状态且保留历史结果，继续 `reset_state=false`。新增普通预筛批大小、独立路线深挖并发和默认关闭的预算续跑控制，不需要新增 Secret。已有 Variables 不变时使用代码默认值；额外研究 run 会增加 API 消耗，只有所有者明确开启才自动排队。升级不等于生产 V0 验收，迁移、续跑与回退边界见 `CLOUD_AUTOMATION.md`。
+2026-10-09 工程候选使用 schema v8，自动迁移旧状态且保留历史结果，继续 `reset_state=false`。新增逐入口 `source_check_only` 手动模式，不需要新增 Secret/Variable；它优先于 `smoke_only`，不运行模型、邮件或恢复生产数据库。已有预算续跑仍默认关闭，额外研究 run 会增加 API 消耗，只有所有者明确开启才自动排队。升级不等于生产 V0 验收，迁移、续跑与回退边界见 `CLOUD_AUTOMATION.md`。
+
+本地逐入口检查使用 `python scripts/source_audit.py`，脚本**忽略 `.env`**，只读取显式进程环境；`--list` 只列去敏清单，不联网。`--include-authenticated` 只允许有界 OpenAlex/GitHub 请求，不授权 Tavily、X、Reddit 或模型/SMTP。没有凭据的入口保留 `not_configured`，不会记为通过；局部 `--entry` / `--kind` 选择始终标为不完整验收。具体边界和云端步骤见 [逐入口验收](SOURCE_ACCEPTANCE.md)。
+
+2026-10-10 新增 `--include-platforms` / 手动 input `source_platform_checks=true` 的独立授权检查；默认关闭，可能消耗 Tavily/X 额度，仅测试已启用平台，不触发模型或邮件，也不是新增生产 Variable。不要盲目轮换 Key；依照 [云端凭据复验指南](SOURCE_API_KEY_VERIFICATION.md) 区分未注入、401、403、429、套餐权限和公开页面访问挑战。
+
+成对制品的容量诊断使用 `python scripts/inspect_capacity.py --database /解压路径/paradigm_radar.db --audit /同run路径/run_audit_latest.json`，仅 mode=ro 查询、不迁移、不读取 .env/密钥、不联网。模型请求取消现在记为未知用量并阻止自动预算链；客户端取消不证明服务端没有执行/收费。预筛前填/过期刷新转交不需要新 Variable，也没有改变模型或思考模式。
 
 ## A. 必须配置
 

@@ -28,6 +28,16 @@ on:
         required: true
         default: true
         type: boolean
+      source_check_only:
+        description: 逐入口信源验收（优先于 smoke_only；不跑研究、不恢复状态、不发邮件）
+        required: true
+        default: false
+        type: boolean
+      source_platform_checks:
+        description: 仅信源验收：授权每个已启用平台一次最小请求（Tavily/X 可能消耗额度；不调用模型或邮件）
+        required: false
+        default: false
+        type: boolean
       resume_campaign_id:
         description: 可选：只续跑指定研究批次；须同时关闭 smoke_only，不启动新期发现
         required: false
@@ -174,13 +184,14 @@ jobs:
 
       - name: 配置体检
         id: doctor
+        if: ${{ !inputs.source_check_only }}
         run: |
           mkdir -p logs
           set -o pipefail
           python main.py --doctor 2>&1 | tee logs/doctor.log
 
       - name: 恢复上一次去重状态
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
+        if: ${{ !inputs.source_check_only && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         id: restore_state
         env:
           GH_TOKEN: ${{ github.token }}
@@ -245,12 +256,31 @@ jobs:
 
       - name: 小成本真实接口冒烟
         id: smoke
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_only }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_only && !inputs.source_check_only }}
         run: python main.py --smoke-test
+
+      - name: 逐入口信源解析与临时状态验收（无模型、无邮件）
+        id: source_audit
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source_check_only }}
+        env:
+          SOURCE_PLATFORM_CHECKS: ${{ inputs.source_platform_checks && 'true' || 'false' }}
+          AI_RADAR_SKIP_DOTENV: "true"
+          EMAIL_PUSH_ENABLED: "false"
+          EMAIL_PUSH_REQUIRED: "false"
+          SMTP_PASSWORD: ""
+          LLM_API_KEY: ""
+          SUB_AGENT_API_KEY: ""
+          MAIN_AGENT_API_KEY: ""
+        run: |
+          mkdir -p logs
+          set -o pipefail
+          audit_args=(--include-authenticated --budget-seconds 900 --max-requests 300)
+          if [ "$SOURCE_PLATFORM_CHECKS" = "true" ]; then audit_args+=(--include-platforms); fi
+          python scripts/source_audit.py "${audit_args[@]}" 2>&1 | tee logs/source_audit.log
 
       - name: 抓取、分析并在研究全部闭合后发送邮件
         id: pipeline
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
+        if: ${{ !inputs.source_check_only && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         env:
           RESUME_CAMPAIGN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.resume_campaign_id || '' }}
         run: |
@@ -264,7 +294,7 @@ jobs:
 
       - name: 记录状态对应的代码版本
         id: prepare_state
-        if: ${{ always() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
+        if: ${{ always() && !inputs.source_check_only && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         run: |
           mkdir -p logs
           exec > >(tee logs/state_prepare.log) 2>&1
@@ -293,7 +323,7 @@ jobs:
 
       - name: 保存本期报告
         id: upload_report
-        if: ${{ always() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) && hashFiles('reports/output/*.md') != '' }}
+        if: ${{ always() && !inputs.source_check_only && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) && hashFiles('reports/output/*.md') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: paradigm-radar-report-${{ github.run_id }}
@@ -363,11 +393,14 @@ jobs:
             logs/run_audit_latest.json
             logs/pipeline_result.json
             logs/smoke_test_latest.json
+            logs/source_audit_latest.json
+            logs/source_audit_latest.md
+            logs/source_audit.log
           retention-days: 90
           if-no-files-found: warn
 
       - name: 任一生产步骤失败邮件提醒
-        if: ${{ always() && failure() && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
+        if: ${{ always() && failure() && !inputs.source_check_only && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         continue-on-error: true
         env:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

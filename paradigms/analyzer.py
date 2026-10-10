@@ -66,6 +66,7 @@ class ParadigmAnalyzer:
         self.skill_loader = SkillLoader()
         self.stage_cache = stage_cache
         self.checkpoint_callback = checkpoint_callback
+        self._eligibility_prefetch_failures = set()
 
     def _get_client(self):
         if self.client is None:
@@ -171,6 +172,8 @@ class ParadigmAnalyzer:
             return await self._screen_uncached_origin_batch(evidence)
         signatures, decisions, missing = {}, {}, []
         for item in evidence:
+            if (item.fingerprint, item.source_revision) in self._eligibility_prefetch_failures:
+                continue
             prompt = self.skill_loader.render("origin_eligibility", origin_records=json.dumps([{
                 "fingerprint": item.fingerprint, "source": item.source[:80],
                 "title": item.title[:300], "summary": item.summary[:2400],
@@ -190,6 +193,19 @@ class ParadigmAnalyzer:
         if decisions:
             run_audit.event("origin_eligibility_cache", "reused", f"复用 {len(decisions)} 条同版本资格预筛，不重做已确认判断")
         return {**decisions, **fresh}
+
+    async def prefetch_origin_eligibility(self, evidence):
+        """Fill durable qualification receipts without immediately retrying bad rows.
+
+        Missing/invalid prefetched rows remain pending at their full visit. The
+        run-local failure set is reset for each campaign process, not persisted.
+        """
+        decisions = await self._screen_origin_batch(evidence)
+        self._eligibility_prefetch_failures.update(
+            (item.fingerprint, item.source_revision) for item in evidence
+            if item.fingerprint not in decisions
+        )
+        return decisions
 
     async def _screen_uncached_origin_batch(
         self, evidence: list[TechnicalEvidence],
@@ -231,7 +247,7 @@ class ParadigmAnalyzer:
                     if attempt == 0
                     else "\n上一轮身份或 JSON 契约无效。逐条原样返回全部 fingerprint。"
                 )
-                response = await client.chat.completions.create(
+                response = await run_audit.chat_completion(client, stage="origin_eligibility", role="sub", subject=f"{len(evidence)} origins",
                     model=model,
                     messages=[{"role": "user", "content": prompt + repair_note}],
                     temperature=0.0,
@@ -379,7 +395,7 @@ class ParadigmAnalyzer:
                     else "\n上一轮 JSON 或 Rubric 回答不完整。请重新输出完整 JSON，"
                     "确保 common 与所选 innovation_types 的每一道题都出现一次。"
                 )
-                response = await client.chat.completions.create(
+                response = await run_audit.chat_completion(client, stage="paradigm_extraction", role="sub", subject=evidence.title,
                     model=model,
                     messages=[{"role": "user", "content": prompt + repair_note}],
                     temperature=0.1,
@@ -681,7 +697,7 @@ class ParadigmAnalyzer:
                     if attempt == 0
                     else "\n上一轮结构无效。请缩短每个字段，只返回一个合法 JSON 对象。"
                 )
-                response = await client.chat.completions.create(
+                response = await run_audit.chat_completion(client, stage="technical_report_index", role="sub", subject=evidence.title,
                     model=model,
                     messages=[{"role": "user", "content": prompt + repair_note}],
                     temperature=0.1,
@@ -784,7 +800,7 @@ class ParadigmAnalyzer:
                     if attempt == 0
                     else "\n上一轮 JSON 或 Rubric 不完整。只修正本机制，输出合法 JSON。"
                 )
-                response = await client.chat.completions.create(
+                response = await run_audit.chat_completion(client, stage="technical_report_mechanism", role="sub", subject=f"{evidence.title} / mechanism-{index}",
                     model=model,
                     messages=[{"role": "user", "content": prompt + repair_note}],
                     temperature=0.1,
@@ -1069,6 +1085,7 @@ class ResearcherTrajectoryAnalyzer:
             prior_affiliations=profile.prior_affiliations,
         )
         response = None
+        response_recorded = False
         try:
             signature = _stage_cache_signature("main", self.model, prompt, {
                 "candidate": candidate.key, "person_identifiers": profile.identifiers,
@@ -1077,24 +1094,36 @@ class ResearcherTrajectoryAnalyzer:
             cache = getattr(self, "stage_cache", None)
             payload = cache.cache_get("researcher_trajectory", signature) if cache else None
             model = self.model or resolve_model("main").model
+            if payload is not None:
+                try:
+                    payload = _validated_trajectory_payload(payload)
+                except (TypeError, ValueError):
+                    payload = None
             if payload is None:
                 client, model = self._get_client()
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.1,
-                    max_tokens=1100,
-                    response_format={"type": "json_object"},
-                )
-                payload = parse_json_object(response.choices[0].message.content or "{}")
-            for key in ("background_summary", "trajectory_summary", "key_person_reason", "current_role_note"):
-                if not isinstance(payload.get(key), str) or (key != "current_role_note" and not payload[key].strip()):
-                    raise ValueError("人物分析 JSON 字段未闭合：" + key)
-                if key != "current_role_note" and not re.search(r"[\u4e00-\u9fff]", payload[key]):
-                    raise ValueError("人物解释字段必须使用中文：" + key)
-            consistency = payload.get("trajectory_consistency")
-            if isinstance(consistency, bool) or not isinstance(consistency, (int, float)) or not math.isfinite(consistency) or not 0 <= consistency <= 10:
-                raise ValueError("人物连续性计数无效")
+                messages = [{"role": "user", "content": prompt}]
+                for attempt in range(2):
+                    response, response_recorded = None, False
+                    response = await run_audit.chat_completion(client, stage="researcher_trajectory", role="main", subject=f"{candidate.name} / {profile.name}",
+                        model=model, messages=messages, temperature=0.1,
+                        max_tokens=1100, response_format={"type": "json_object"},
+                    )
+                    content = response.choices[0].message.content or "{}"
+                    try:
+                        payload = _validated_trajectory_payload(parse_json_object(content))
+                    except (TypeError, ValueError) as exc:
+                        run_audit.record_llm(stage="researcher_trajectory", role="main", model=model,
+                                             subject=f"{candidate.name} / {profile.name}", response=response, error=exc)
+                        response_recorded = True
+                        if attempt:
+                            raise
+                        messages += [{"role": "assistant", "content": content}, {"role": "user", "content":
+                            "上一份结果的结构不合规，请只修复 JSON 字段和表示格式，保留原有事实与未知边界，不新增身份或履历。"
+                            "必须包含 background_summary、trajectory_summary、key_person_reason、current_role_note 四个中文字符串，"
+                            "trajectory_consistency 必须为 0 到 10 的有限 JSON 数字，不可用百分比、分数、null、布尔值或评级。"
+                            "如果依据不足，明确写资料不足；只返回完整 JSON 对象。"}]
+                        continue
+                    break
             if cache and response is not None:
                 cache.cache_save("researcher_trajectory", signature, payload)
             background = str(payload.get("background_summary", "")).strip()
@@ -1123,22 +1152,38 @@ class ResearcherTrajectoryAnalyzer:
                     stage="researcher_trajectory", role="main", model=model,
                     subject=f"{candidate.name} / {profile.name}", response=response,
                 )
+                response_recorded = True
             else:
                 run_audit.event("researcher_trajectory_cache", "reused", f"复用 {profile.name} 同身份、同材料与规则版本的人物研究")
         except Exception as exc:
             logger.warning("研究轨迹分析失败 [%s]: %s", profile.name, exc)
-            run_audit.record_llm(
-                stage="researcher_trajectory",
-                role="main",
-                model=self.model,
-                subject=f"{candidate.name} / {profile.name}",
-                response=response,
-                error=exc,
-            )
+            if not response_recorded:
+                run_audit.record_llm(
+                    stage="researcher_trajectory", role="main", model=self.model,
+                    subject=f"{candidate.name} / {profile.name}", response=response, error=exc,
+                )
             # A failed person lookup is an execution failure, not a completed
             # profile. The orchestrator isolates this candidate and resumes
             # from its synthesized checkpoint without redoing technical work.
             raise RuntimeError("研究轨迹自动分析失败") from exc
+
+
+def _validated_trajectory_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("人物分析必须返回 JSON 对象")
+    for key in ("background_summary", "trajectory_summary", "key_person_reason", "current_role_note"):
+        if not isinstance(payload.get(key), str) or (key != "current_role_note" and not payload[key].strip()):
+            raise ValueError("人物分析 JSON 字段未闭合：" + key)
+        if key != "current_role_note" and not re.search(r"[\u4e00-\u9fff]", payload[key]):
+            raise ValueError("人物解释字段必须使用中文：" + key)
+    consistency = payload.get("trajectory_consistency")
+    # A plain JSON numeric string has an unambiguous, lossless representation.
+    # Do not guess a value for words, percentages, fractions, null or booleans.
+    if isinstance(consistency, str) and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", consistency.strip()):
+        consistency = float(consistency)
+    if isinstance(consistency, bool) or not isinstance(consistency, (int, float)) or not math.isfinite(consistency) or not 0 <= consistency <= 10:
+        raise ValueError("人物连续性计数无效")
+    return {**payload, "trajectory_consistency": consistency}
 
 
 class ParadigmSynthesizer:
@@ -1241,7 +1286,7 @@ class ParadigmSynthesizer:
                         "坐标与低分辨率运行图，再用至少两个 resolution_ladder 节点"
                         "逐层纠偏和提高分辨率。"
                     )
-                response = await client.chat.completions.create(
+                response = await run_audit.chat_completion(client, stage=stage, role="main", subject=candidate.name,
                     model=model,
                     messages=[{"role": "user", "content": request_prompt}],
                     temperature=0.1,
@@ -1507,6 +1552,9 @@ def _bounded_synthesis_evidence(
             "historical": bool(item.raw.get("historical")),
             "relationship_hint": str(item.raw.get("relationship", ""))[:120],
         }
+        # Omit empty optional fields, not facts. This removes repeated schema
+        # scaffolding without shrinking the evidence budget or its denominator.
+        detailed = {key: value for key, value in detailed.items() if value not in ("", [], {}, None)}
         encoded_length = len(json.dumps(detailed, ensure_ascii=False))
         if used + encoded_length <= char_budget:
             records.append(detailed)
@@ -1525,6 +1573,7 @@ def _bounded_synthesis_evidence(
             "relationship_hint": str(item.raw.get("relationship", ""))[:80],
             "detail_deferred_due_to_context": True,
         }
+        compact = {key: value for key, value in compact.items() if value not in ("", [], {}, None)}
         compact_length = len(json.dumps(compact, ensure_ascii=False))
         if used + compact_length <= char_budget:
             records.append(compact)

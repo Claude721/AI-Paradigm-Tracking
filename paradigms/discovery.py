@@ -15,7 +15,7 @@ from runtime_clock import research_now
 from urllib.parse import urlparse
 
 import config
-from research_watchlist import KOL_SOURCES, default_kol_x_accounts
+from research_watchlist import KOL_SOURCES, default_kol_x_accounts, source_record
 from sources.arxiv_source import ArxivSource, TECHNICAL_REPORT_QUERY
 from sources.base import RawProject
 from sources.curated_intelligence_source import (
@@ -70,6 +70,7 @@ class ParadigmDiscovery:
         *,
         broad_lookback_days: int | None = None,
         high_signal_lookback_days: int | None = None,
+        stage_cache=None,
     ):
         # lookback_days 保留为旧调用方式；新编排器显式传入两层窗口。
         legacy = lookback_days or config.SOURCING_LOOKBACK_DAYS
@@ -103,7 +104,7 @@ class ParadigmDiscovery:
             lookback_days=self.broad_lookback_days
         )
         self.openreview = OpenReviewSource(
-            lookback_days=self.broad_lookback_days
+            lookback_days=self.broad_lookback_days, stage_cache=stage_cache,
         )
         self.kol_feeds = CuratedKOLSource(
             lookback_days=self.high_signal_lookback_days
@@ -148,6 +149,10 @@ class ParadigmDiscovery:
         plans = {}
         for source in self._sources():
             value = {field: getattr(source, field) for field in ("lookback_days", "high_signal_lookback_days", "seed_arxiv_ids", "venues", "searches", "pages", "organizations", "feed_base_url") if hasattr(source, field)}
+            if isinstance(source, PriorityResearchPageSource):
+                # An adapter/catalog correction must invalidate its discovery
+                # receipt; unchanged sources and durable task scope survive.
+                value["catalog_adapters"] = [source_record(url) for url in source.pages]
             if isinstance(source, HighSignalForumSource):
                 value["feeds"] = source._feeds()
             value["settings"] = settings.get(source.source_name, [])

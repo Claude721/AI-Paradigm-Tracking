@@ -30,12 +30,21 @@ class HuggingFacePapersSource(BaseSource):
             resp.raise_for_status()
             data = resp.json()
 
+        return self._parse(data)
+
+    def _parse(self, data: object) -> list[RawProject]:
+        if not isinstance(data, list):
+            raise ValueError("Hugging Face daily papers must be a list")
         results: list[RawProject] = []
         for item in data:
+            if not isinstance(item, dict) or not isinstance(item.get("paper"), dict):
+                raise ValueError("Hugging Face daily paper is missing paper object")
             paper = item.get("paper", {})
             paper_id = paper.get("id", "")
             title = paper.get("title", "")
             summary = paper.get("summary", "")
+            if not paper_id or not title or not summary:
+                raise ValueError("Hugging Face daily paper is missing id/title/summary")
 
             authors = paper.get("authors", [])
             author_names = [a.get("name", "") for a in authors if a.get("name")]

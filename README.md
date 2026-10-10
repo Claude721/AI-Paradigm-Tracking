@@ -1,6 +1,6 @@
 # AI 技术范式雷达
 
-> 当前状态（2026-10-08）：V0 工程候选，尚未通过生产可用性验收。schema v8 固定研究批次、窗口与发现快照，跨进程只推进未完成任务；万条合成原点在延迟模型中经三次运行闭合，再通过真实报告器与模拟邮件确认。未执行真实 API/邮件验收，已知 403/404 信源也未被删除或假装恢复。验收证据与阻碍见 [工程体检](docs/PROJECT_HEALTH_REPORT.md)，设计范围见 [V0 重构计划](docs/V0_REBUILD_PLAN.md)。
+> 当前状态（2026-10-10）：V0 工程候选，尚未通过生产验收。最新云端 `9031490` 研究/覆盖未闭合，正确中止报告；补充 state/audit 后已修复刷新版本、预筛批次和取消记账。本地完整入口清单复验：160 项、110 样本通过、8 失败、40 本地缺凭据、2 关闭；531 项离线测试通过。已修复目录/正文适配不等于长期稳定，云端 Key、详细覆盖和真实吞吐仍待验收。没有删源、清 backlog 或恢复阶段性邮件。详见 [入口归因](docs/SOURCE_ACCEPTANCE_20261010.md)、[Key 复验操作](docs/SOURCE_API_KEY_VERIFICATION.md)、[工程体检](docs/PROJECT_HEALTH_REPORT.md)、[容量复核](docs/RUN_37899070924_CAPACITY_REVIEW.md) 与 [研究设计](docs/PARADIGM_RADAR_DESIGN.md)。
 
 这个项目不再以 GitHub 项目或 Product Hunt 产品为基本单位，而是每周捕捉正在形成的 AI 技术范式，并从技术反向锁定关键研究者。
 

@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 import httpx
 
 import config
+from sources.feed_contract import feed_nodes, feed_text, feed_link
 from paradigms.models import EvidenceType, TechnicalEvidence, nonnegative_number
 from research_watchlist import KOL_SOURCES, KOL_SOURCE_VERSION
 
@@ -494,16 +495,13 @@ def _parse_feed(
     record: dict | None,
     forum: dict | None,
 ) -> tuple[list[TechnicalEvidence], int]:
-    root = ET.fromstring(xml_text)
     cutoff = research_now() - timedelta(days=max(lookback_days, 1))
-    nodes = root.findall(".//item") or root.findall(
-        "{http://www.w3.org/2005/Atom}entry"
-    )
+    nodes = feed_nodes(xml_text)
     results: list[TechnicalEvidence] = []
     filtered = 0
     for node in nodes:
         title = _text(node, "title")
-        link = _link(node)
+        link = feed_link(node, feed_url)
         body = (
             _text(node, "encoded")
             or _text(node, "content")
@@ -514,7 +512,6 @@ def _parse_feed(
         published_text = (
             _text(node, "pubDate")
             or _text(node, "published")
-            or _text(node, "updated")
         )
         published = _parse_date(published_text)
         if published and published < cutoff:
@@ -626,6 +623,9 @@ def _parse_feed(
                 if post_id_match
                 else {}
             )
+        raw["source_modified_at"] = _text(node, "updated")
+        raw["source_published_at"] = published_text
+        raw["date_basis"] = "published" if published else "unknown"
         results.append(
             TechnicalEvidence(
                 source=source,
@@ -633,7 +633,7 @@ def _parse_feed(
                 title=title,
                 url=link,
                 summary=summary,
-                published_at=published.isoformat() if published else published_text,
+                published_at=published.isoformat() if published else "",
                 authors=[author] if author else [],
                 organization=organization,
                 metrics=metrics,
@@ -696,25 +696,11 @@ def _plain_text(value: str) -> str:
 
 
 def _text(node: ET.Element, local_name: str) -> str:
-    for child in node.iter():
-        if child.tag.rsplit("}", 1)[-1] != local_name:
-            continue
-        return "".join(child.itertext()).strip()
-    return ""
+    return feed_text(node, local_name)
 
 
 def _link(node: ET.Element) -> str:
-    for child in node.iter():
-        if child.tag.rsplit("}", 1)[-1] != "link":
-            continue
-        rel = str(child.get("rel", "alternate"))
-        if rel not in {"", "alternate"}:
-            continue
-        if child.get("href"):
-            return str(child.get("href", "")).strip()
-        if child.text:
-            return child.text.strip()
-    return ""
+    return feed_link(node)
 
 
 def _parse_date(value: str) -> datetime | None:

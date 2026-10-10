@@ -110,6 +110,7 @@ class FollowBuildersSource(BaseSource):
                     # base URL 配错，不能伪装成一次成功的零命中。
                     self.missing_feeds += 1
                 else:
+                    self.validate_feed(payload, filename)
                     self.completed_feeds += 1
             except Exception as exc:
                 self.failed_feeds += 1
@@ -134,6 +135,14 @@ class FollowBuildersSource(BaseSource):
             f"blogs={len(self._parse_blog_feed(feed_blogs)) if feed_blogs else 0})"
         )
         return projects
+
+    @staticmethod
+    def validate_feed(payload: object, filename: str) -> None:
+        key = {"feed-x.json": "x", "feed-podcasts.json": "podcasts", "feed-blogs.json": "blogs"}[filename]
+        if not isinstance(payload, dict) or not isinstance(payload.get(key), list):
+            raise ValueError("Follow Builders feed is missing the expected list")
+        if any(not isinstance(item, dict) for item in payload[key]):
+            raise ValueError("Follow Builders feed item must be an object")
 
     @retry(
         wait=wait_exponential(multiplier=1, min=2, max=10),

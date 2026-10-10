@@ -24,8 +24,7 @@ class Check:
 def collect_checks() -> list[Check]:
     sub, main = resolve_all()
     checks = [
-        _raw_environment_syntax_check(),
-        _source_endpoint_syntax_check(),
+        *configuration_syntax_checks(),
         _model_check("论文范式抽取模型", sub),
         _model_check("范式综合/人物模型", main),
         _rubric_check(),
@@ -325,14 +324,22 @@ def _raw_environment_syntax_check() -> Check:
     )
 
 
+def configuration_syntax_checks() -> list[Check]:
+    """Zero network and no required model/mail credentials, also for source-only acceptance."""
+    return [_raw_environment_syntax_check(), _source_endpoint_syntax_check()]
+
+
 def _source_endpoint_syntax_check() -> Check:
     """Reject malformed endpoint Variables before a real HTTP client sees them."""
 
     invalid: list[str] = []
 
     def valid_http(value: str) -> bool:
-        parsed = urlparse(value.strip())
-        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+        try:
+            parsed = urlparse(value.strip())
+            return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+        except ValueError:
+            return False
 
     if any(not valid_http(value) for value in config.PRIORITY_RESEARCH_PAGES):
         invalid.append("PRIORITY_RESEARCH_PAGES")
@@ -342,10 +349,13 @@ def _source_endpoint_syntax_check() -> Check:
         invalid.append("KOL_CUSTOM_FEED_URLS")
     follow_base = config.FOLLOW_BUILDERS_FEED_URL.strip()
     if config.FOLLOW_BUILDERS_ENABLED:
-        parsed_follow = urlparse(follow_base)
-        follow_valid = valid_http(follow_base) or (
-            parsed_follow.scheme == "file" and bool(parsed_follow.path)
-        )
+        try:
+            parsed_follow = urlparse(follow_base)
+            follow_valid = valid_http(follow_base) or (
+                parsed_follow.scheme == "file" and bool(parsed_follow.path)
+            )
+        except ValueError:
+            follow_valid = False
         if not follow_valid:
             invalid.append("FOLLOW_BUILDERS_FEED_URL")
     if any(

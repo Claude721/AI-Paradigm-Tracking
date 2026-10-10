@@ -2139,6 +2139,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             {
                 "broad_lookback_days": 7,
                 "high_signal_lookback_days": 60,
+                "stage_cache": store.campaigns,
             },
         )
 

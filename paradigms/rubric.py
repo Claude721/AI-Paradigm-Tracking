@@ -539,8 +539,8 @@ def _decision_reason(
 ) -> str:
     if decision == "incomplete":
         return (
-            f"Rubric 回答覆盖率 {coverage:.0%}，低于结构完整性要求 "
-            f"{minimum_coverage:.0%}；应重试而不是据此淘汰"
+            f"Rubric 回答覆盖率 {coverage:.2%}，低于结构完整性要求 "
+            f"{minimum_coverage:.2%}；应重试而不是据此淘汰"
         )
     if decision in {"deep_dive", "report"}:
         return f"Rubric 确定性得分 {score:.1f}，达到本阶段阈值 {threshold:.1f}"

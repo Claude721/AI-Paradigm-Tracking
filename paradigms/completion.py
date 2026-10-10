@@ -141,7 +141,7 @@ def research_completion_violations(stats: dict) -> list[str]:
                     issues.append("学术查询计划计数无效")
     for section, planned, checked, failure_keys in (
         ("official_pages", "total_pages", "checked_pages",
-         ("request_failed", "parse_zero_links", "detail_failures")),
+         ("request_failed", "parse_zero_links", "detail_failures", "unresolved_citations")),
         ("official_repositories", "configured_organizations", "checked_organizations",
          ("failed_organizations", "repository_page_failures", "unverified_primary_releases")),
     ):
@@ -200,7 +200,7 @@ def discovery_retry_sources(frontier: dict) -> set[str]:
     ):
         selected.add("arxiv")
     for section, source, checked, total, failures in (
-        ("official_pages", "priority-research-page", "checked_pages", "total_pages", ("request_failed", "parse_zero_links", "detail_failures")),
+        ("official_pages", "priority-research-page", "checked_pages", "total_pages", ("request_failed", "parse_zero_links", "detail_failures", "unresolved_citations")),
         ("official_repositories", "official-repository-release", "checked_organizations", "configured_organizations", ("failed_organizations", "repository_page_failures", "unverified_primary_releases")),
     ):
         value = frontier.get(section) or {}

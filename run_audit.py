@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import time
 import os
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -24,6 +26,29 @@ class RunAudit:
         self.candidate_decisions: list[dict[str, Any]] = []
         self.events: list[dict[str, Any]] = []
         self.last_stats: dict[str, Any] = {}
+        self._request_timings: dict[int, float] = {}
+        self._error_timings: dict[int, float] = {}
+
+    async def chat_completion(self, client, *, stage: str, role: str, subject: str, **kwargs):
+        """Preserve SDK semantics; cancellation is unknown usage, never measured zero.
+
+        Successful/ordinary failed calls are still recorded by their validator,
+        so representation repairs keep their existing single-call accounting.
+        Only numeric timing is retained here, not requests or response bodies.
+        """
+        started = time.monotonic()
+        try:
+            response = await client.chat.completions.create(**kwargs)
+        except asyncio.CancelledError:
+            self.record_llm(stage=stage, role=role, model=str(kwargs.get("model", "")),
+                            subject=subject, error="request_cancelled_usage_unknown",
+                            elapsed_seconds=time.monotonic() - started)
+            raise
+        except Exception as exc:
+            self._error_timings[id(exc)] = time.monotonic() - started
+            raise
+        self._request_timings[id(response)] = time.monotonic() - started
+        return response
 
     def record_llm(
         self,
@@ -34,7 +59,13 @@ class RunAudit:
         subject: str,
         response=None,
         error: Exception | str | None = None,
+        elapsed_seconds: float | None = None,
     ) -> None:
+        timing = self._request_timings.pop(id(response), None) if response is not None else None
+        if timing is None and isinstance(error, Exception):
+            timing = self._error_timings.pop(id(error), None)
+        if elapsed_seconds is None:
+            elapsed_seconds = timing
         usage = getattr(response, "usage", None)
         completion_details = getattr(usage, "completion_tokens_details", None)
         prompt_details = getattr(usage, "prompt_tokens_details", None)
@@ -68,6 +99,7 @@ class RunAudit:
                 ),
                 "response_characters": len(content),
                 "error": _clean(str(error), 300) if error else "",
+                "elapsed_seconds": round(max(elapsed_seconds, 0), 3) if elapsed_seconds is not None else None,
             }
         )
 
@@ -136,8 +168,11 @@ class RunAudit:
 
     def token_totals(self) -> dict[str, Any]:
         by_stage: dict[str, int] = defaultdict(int)
+        request_seconds: dict[str, float] = defaultdict(float)
         for item in self.llm_calls:
             by_stage[str(item["stage"])] += _integer(item.get("total_tokens"))
+            if item.get("elapsed_seconds") is not None:
+                request_seconds[str(item["stage"])] += item["elapsed_seconds"]
         return {
             "llm_call_count": len(self.llm_calls),
             "llm_unreported_usage_count": sum(
@@ -159,6 +194,8 @@ class RunAudit:
                 _integer(item.get("total_tokens")) for item in self.llm_calls
             ),
             "llm_tokens_by_stage": dict(sorted(by_stage.items())),
+            "llm_request_seconds_by_stage": {key: round(value, 3) for key, value in sorted(request_seconds.items())},
+            "llm_timing_unreported_count": sum(item.get("elapsed_seconds") is None for item in self.llm_calls),
         }
 
 
@@ -317,6 +354,9 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     )
     for stage, value in llm["llm_tokens_by_stage"].items():
         lines.append(f"  - {stage}：{value}")
+    if llm.get("llm_request_seconds_by_stage"):
+        lines.extend(["", "### 模型请求耗时", "", "各阶段为已记录请求耗时之和，并发时不能当作墙上耗时；未记录耗时不是零。"])
+        lines.extend(f"- {stage}：{seconds:.3f} 秒" for stage, seconds in llm["llm_request_seconds_by_stage"].items())
     lines.extend(["", "## 原始材料筛选记录", ""])
     if payload["origin_decisions"]:
         for item in payload["origin_decisions"]:
