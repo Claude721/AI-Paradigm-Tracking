@@ -1,0 +1,71 @@
+name: 单路线真实研究验收（最多20元，无邮件）
+
+on:
+  workflow_dispatch:
+    inputs:
+      arxiv_id:
+        description: 单个普通论文 arXiv ID（不接受 Technical Report 或多条材料）
+        required: true
+        type: string
+      budget_cny:
+        description: 本次人民币 API 总费用上限（大于0、不超过20）
+        required: true
+        default: "20"
+        type: string
+      pricing_verified_on:
+        description: 已人工核验的官方价格日期；本版仅接受2026-10-12且只可当日执行
+        required: true
+        type: string
+      live_authorized:
+        description: 明确授权本次最多一条路线的真实模型测试；不发邮件、不恢复生产状态、不自动续跑
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paradigm-radar-one-route-acceptance
+  cancel-in-progress: false
+
+jobs:
+  one-route:
+    if: inputs.live_authorized
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      AI_RADAR_SKIP_DOTENV: "true"
+      LLM_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+      EMAIL_PUSH_ENABLED: "false"
+      EMAIL_PUSH_REQUIRED: "false"
+      PARADIGM_AUTO_RESUME_ENABLED: "false"
+      SAMPLE_ARXIV_ID: ${{ inputs.arxiv_id }}
+      SAMPLE_BUDGET_CNY: ${{ inputs.budget_cny }}
+      SAMPLE_PRICING_DATE: ${{ inputs.pricing_verified_on }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+      - name: 离线发布门（禁止网络、模型和邮件）
+        run: python scripts/offline_checks.py
+      - name: 本次授权的一条路线（不调用主流程）
+        run: >-
+          python scripts/one_route_check.py --live-authorized
+          --arxiv-id "$SAMPLE_ARXIV_ID" --budget-cny "$SAMPLE_BUDGET_CNY"
+          --pricing-verified-on "$SAMPLE_PRICING_DATE"
+      - name: 保存验收与费用证据（不上传临时数据库）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paradigm-radar-one-route-${{ github.run_id }}
+          path: |
+            logs/one_route/*.json
+            logs/one_route/*.md
+            logs/offline_checks.json
+          retention-days: 14

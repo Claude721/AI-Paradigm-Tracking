@@ -1,5 +1,7 @@
 # AI 技术范式雷达：完整配置 Checklist
 
+单路线真实模型验收不复用正式研究配置：独立工作流仅注入已授权的 `DASHSCOPE_API_KEY` 和 GitHub 只读 token，费用不超过 20 元且价格核验当日有效；其他付费 API、SMTP、生产状态和自动续跑隔离。不要为了小样本把正式工作流清库或截断旧任务。详见 [单路线验收契约](ONE_ROUTE_ACCEPTANCE.md)。
+
 2026-10-12 新增书目身份补全控制：`PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED=false` 默认不新增 OpenAlex 搜索；显式开启需已配置 `OPENALEX_API_KEY`，`PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT=8` 限制每个生产进程的新请求（1–100），成功身份使用原状态续跑。关闭或达到限额不能把未解析书目当完成；这不是月度成本控制。普通公开 audit 不因该开关而获得 API 授权，需同时 `--include-authenticated`，最多一次身份协议样本。详见 [输入闭合修复](INPUT_CLOSURE_REPAIR_20261012.md)。
 
 > 本地生产密钥填写到根目录 `.env`；GitHub 部署填写到 Actions Secrets。不要粘贴到聊天、截图或提交到 Git。独立验收脚本忽略 `.env`。配置模板见 `.env.example`。

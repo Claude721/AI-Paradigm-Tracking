@@ -29,7 +29,7 @@ python scripts/source_audit.py --include-authenticated --budget-seconds 900 --ma
 python scripts/source_audit.py --entry official:5 --budget-seconds 100 --max-requests 6
 ```
 
-默认输出 `logs/source_audit_latest.json/md`，已被 Git 忽略。默认 900 秒总预算、300 次总请求、45 秒单入口、6 次单入口请求；arXiv 与 OpenReview 同主机至少 3.1 秒，其他主机至少 1 秒。OpenReview 公开 GET 的普通 429 若有合法且不超过 60 秒的 `Retry-After`，允许整轮该主机一次共享冷却/恢复；恢复仍计入原请求/时间上限，原始 429 留在账本。挑战、长/未知等待、重复限流及其他提供方仍熔断，其他来源继续。已尝试却无法继续的对象记失败，真正零请求项才记未执行。解压后 10 MB 上限和预算耗尽不记成功空结果。私网字面 IP、localhost、带 userinfo 和非 HTTP(S) 地址拒绝访问，重定向逐跳核对；不声称这是完整 DNS 重绑定防护。
+默认输出 `logs/source_audit_latest.json/md`，已被 Git 忽略。默认 900 秒总预算、300 次总请求、45 秒单入口、6 次单入口请求；arXiv 与 OpenReview 同主机至少 3.1 秒，其他主机至少 1 秒。OpenReview 公开 GET 的普通 429 若有合法且不超过 60 秒的 `Retry-After`，允许整轮该主机一次共享冷却/恢复；恢复仍计入原请求/时间上限，原始 429 留在账本。挑战、长/未知等待、重复限流及其他提供方仍熔断，其他来源继续。已尝试却无法继续的对象记失败，真正零请求项才记未执行。生产官方页与验收共用流式解压上限：普通响应 10 MB，真实 PDF 文件签名响应 40 MB；扩展名/MIME 不足，超限关闭连接并保留失败，不记成功空结果。私网字面 IP、localhost、带 userinfo 和非 HTTP(S) 地址拒绝访问，重定向逐跳核对；不声称这是完整 DNS 重绑定防护。
 
 `--include-authenticated` 仅开放有界 OpenAlex/GitHub。`--include-platforms` 是额外明确授权：Tavily 最多一次 basic 搜索，月度保护开启时先一次只读 `/usage`；X 最多 10 条的一次搜索、Semantic Scholar 一次、Reddit OAuth 加一次最小搜索。不启用关闭的平台，不自动补格式或重试付费请求。Tavily 用量未知/额度耗尽不搜索，成功样本必须确认本次 credits，关闭 auto_parameters；独立验收不恢复生产额度账本，不是账户级费用硬保证。未配置与 disabled 不算通过；启用入口缺少凭据也阻止 `acceptance_complete`。`--entry` / `--kind` 是局部诊断，始终不算完整验收；即使所选样本 passed，退出码仍为 1。
 

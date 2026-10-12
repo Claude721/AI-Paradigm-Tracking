@@ -37,6 +37,7 @@ from sources.openreview_source import OpenReviewSource, OPENREVIEW_SEARCH_API, D
 from sources.request_policy import OPENREVIEW_REQUEST_SPACING_SECONDS, MAX_RETRY_AFTER_SECONDS, retry_after_seconds
 from sources.priority_research_source import PriorityResearchPageSource, _AnchorParser, _discover_index_links
 from sources.bibliography_resolver import BibliographyResolver
+from sources.document_limits import response_byte_limit
 from sources.research_feed_source import ResearchFeedSource
 
 CONTRACT_VERSION = 3
@@ -217,11 +218,12 @@ class RecordingTransport(httpx.AsyncBaseTransport):
                         self.row["rate_limit_recovery_scheduled"] = True
                     else:
                         self.runner.blocked_hosts.add(host)
-                chunks, length = [], 0
+                chunks, length, prefix = [], 0, b""
                 try:
                     async for chunk in response.aiter_bytes():
+                        prefix = (prefix + chunk[:1024])[:1024]
                         length += len(chunk)
-                        if length > 10_000_000:
+                        if length > response_byte_limit(prefix):
                             self.row["transport_limit"] = "response_size_limit"
                             raise AuditLimit("response_size_limit")
                         chunks.append(chunk)
@@ -583,6 +585,8 @@ def diagnose_entry(row):
         category, action = "separate_acceptance_needed", "此样本未验收；核对授权或响应大小边界后单独检查。"
     elif status == "passed":
         category, action = "bounded_sample_passed", "协议/解析样本通过；不证明全分页、长期可用性或本期没有更新。"
+    elif reason == "response_size_limit" or row.get("transport_limit") == "response_size_limit":
+        category, action = "decompressed_document_size_limit", "响应超过有界下载上限；核对 PDF 文件签名和大小，不归因于鉴权或解析格式。"
     elif row.get("input_url_checked") is False or row.get("blocked_destination"):
         category, action = "unsafe_or_invalid_input_url", "修正配置地址或不安全重定向；不放宽私网/凭据 URL 限制。"
     elif last.get("access_challenge"):

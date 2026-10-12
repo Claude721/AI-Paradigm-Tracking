@@ -27,6 +27,7 @@ from paradigms.reputation import source_identity, source_link_allowed
 from research_watchlist import source_record
 from sources.bibliography_resolver import BibliographyResolver, author_aligned, normalized_title
 from sources.official_detail_queue import OfficialDetailQueue, DETAIL_QUEUE_VERSION
+from sources.document_limits import bounded_document_get
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class PriorityResearchPageSource:
 
         async def bounded_get(client: httpx.AsyncClient, url: str):
             async with semaphore:
-                return await client.get(url)
+                return await bounded_document_get(client, url)
 
         async with (self.client_factory or httpx.AsyncClient)(
             timeout=30, follow_redirects=True, headers=headers

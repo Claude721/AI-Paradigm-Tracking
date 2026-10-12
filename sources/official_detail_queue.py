@@ -20,7 +20,7 @@ TASK_STAGE = "official_detail_task"
 def official_detail_policy():
     """Invalidate both source and detail receipts for parser/layout repairs."""
     root = Path(__file__).parent
-    files = ("official_detail_queue.py", "priority_research_source.py", "qwen_catalog.py", "bibliography_resolver.py")
+    files = ("official_detail_queue.py", "priority_research_source.py", "qwen_catalog.py", "bibliography_resolver.py", "document_limits.py")
     return hashlib.sha256(b"".join(hashlib.sha256((root / name).read_bytes()).digest() for name in files)).hexdigest()
 
 
