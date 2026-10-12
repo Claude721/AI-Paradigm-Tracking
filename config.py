@@ -203,6 +203,9 @@ TAVILY_DISCOVERY_DOMAINS: list[str] = [
 TAVILY_REQUEST_SAFETY_LIMIT: int = max(
     0, _env_int("TAVILY_REQUEST_SAFETY_LIMIT", 0)
 )
+# 跨运行的 UTC 自然月上限。0 是显式取消此保护，不代表免费；免费账号
+# 还必须在供应商控制台关闭 PAYG，其他客户端用量无法由本库原子控制。
+TAVILY_MONTHLY_CREDIT_LIMIT: int = max(0, _env_int("TAVILY_MONTHLY_CREDIT_LIMIT", 1000))
 
 # Reddit 官方 Data API 必须先获得 Reddit 批准并使用 OAuth。商业用途还需
 # 单独获得许可，因此即使填了密钥，也只有显式确认批准后才会调用。
@@ -241,7 +244,9 @@ ALIGNMENT_FORUM_SOURCE_ENABLED: bool = _env_bool(
 )
 KOL_SOURCE_ENABLED: bool = _env_bool("KOL_SOURCE_ENABLED", True)
 KOL_CUSTOM_FEED_URLS: list[str] = _env_csv("KOL_CUSTOM_FEED_URLS")
-KOL_X_SOURCE_ENABLED: bool = _env_bool("KOL_X_SOURCE_ENABLED", True)
+# X official API is owner opt-in. Public web indexes remain a separate,
+# incomplete discovery capability and must never masquerade as X coverage.
+KOL_X_SOURCE_ENABLED: bool = _env_bool("KOL_X_SOURCE_ENABLED", False)
 
 # 内置名单版本化保存在 research_watchlist.py。环境变量默认只追加少量自定义
 # 项，避免 GitHub 中的旧 Variable 阻止仓库名单随版本更新；replace 可显式替换。
@@ -263,6 +268,8 @@ PRIORITY_RESEARCH_LINK_SAFETY_LIMIT: int = max(
 PRIORITY_RESEARCH_CONCURRENCY: int = max(
     1, min(_env_int("PRIORITY_RESEARCH_CONCURRENCY", 6), 12)
 )
+PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED: bool = _env_bool("PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED", False)
+PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT: int = max(1, min(_env_int("PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT", 8), 100))
 
 # “已建立”与“监测”严格分层。别名只做实体精确归一，不使用任意子串匹配；
 # 不登记整所大学，也不加入 Seed、GLM、AI Lab 等歧义裸词。
@@ -384,7 +391,7 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
 PARADIGM_KEY_RESEARCHER_LIMIT: int = max(
     1, min(_env_int("PARADIGM_KEY_RESEARCHER_LIMIT", 3), 6)
 )
-PARADIGM_STATE_SCHEMA_VERSION: int = 8
+PARADIGM_STATE_SCHEMA_VERSION: int = 9
 
 # 云端任务必须在 GitHub 的硬超时之前主动收尾。该预算只决定本轮执行到
 # backlog 的哪个位置，不参与 Rubric、排序分数或研究去留；未处理项会持久化

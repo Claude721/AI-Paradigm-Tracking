@@ -24,6 +24,7 @@ from smokecheck import (
     _openreview,
     _priority_pages,
     _research_feeds,
+    _tavily,
     smoke_failed,
 )
 
@@ -35,6 +36,59 @@ def _client_context(response: httpx.Response) -> tuple[MagicMock, MagicMock]:
     context.__aenter__ = AsyncMock(return_value=client)
     context.__aexit__ = AsyncMock(return_value=False)
     return context, client
+
+
+class TavilySmokeCreditTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        settings = patch.multiple(
+            config, TAVILY_API_KEY="offline-only", TAVILY_MONTHLY_CREDIT_LIMIT=2
+        )
+        settings.start()
+        self.addCleanup(settings.stop)
+
+    async def probe(self, account, search):
+        calls = []
+
+        def response(request):
+            calls.append(request)
+            return httpx.Response(
+                200, json=account if request.url.path == "/usage" else search
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(response))
+        with patch("smokecheck.httpx.AsyncClient", return_value=client):
+            result = await _tavily()
+        return result, calls
+
+    async def test_usage_precedes_one_explicit_basic_search(self):
+        result, calls = await self.probe(
+            {"account": {"plan_usage": 1, "paygo_usage": 0}},
+            {"results": [], "usage": {"credits": 1}},
+        )
+        self.assertEqual([request.url.path for request in calls], ["/usage", "/search"])
+        self.assertEqual(result[0], 0)
+        self.assertIn("credits=1", result[1])
+        payload = json.loads(calls[1].content)
+        self.assertEqual(payload["search_depth"], "basic")
+        self.assertIs(payload["auto_parameters"], False)
+        self.assertNotIn("offline-only", str(calls[0].url))
+
+    async def test_exhausted_or_unknown_usage_never_searches(self):
+        for account in ({}, {"account": {"plan_usage": 2, "paygo_usage": 0}}):
+            calls = []
+            client = httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda request: (calls.append(request.url.path), httpx.Response(200, json=account))[1]
+            ))
+            with patch("smokecheck.httpx.AsyncClient", return_value=client):
+                with self.assertRaises(ValueError):
+                    await _tavily()
+            self.assertEqual(calls, ["/usage"])
+
+    async def test_unconfirmed_cost_or_error_object_is_not_passed(self):
+        for search in ({"results": []}, {"results": [], "usage": {"credits": 2}},
+                       {"results": [], "usage": {"credits": 0}, "error": "failure"}):
+            with self.assertRaises(ValueError):
+                await self.probe({"account": {"plan_usage": 0, "paygo_usage": 0}}, search)
 
 
 class SmokeCheckContractTests(unittest.TestCase):

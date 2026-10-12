@@ -6,13 +6,14 @@ import asyncio
 import html as html_lib
 import io
 import json
+import hashlib
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from runtime_clock import research_now
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qsl
 
 import httpx
 
@@ -24,6 +25,8 @@ from paradigms.publication import (
 )
 from paradigms.reputation import source_identity, source_link_allowed
 from research_watchlist import source_record
+from sources.bibliography_resolver import BibliographyResolver, author_aligned, normalized_title
+from sources.official_detail_queue import OfficialDetailQueue, DETAIL_QUEUE_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,7 @@ class _ResearchLink:
     published_at: str = ""
     body_hint: str = ""
     original_url: str = ""
+    fetch_url: str = ""
 
 
 class PriorityResearchPageSource:
@@ -49,6 +53,9 @@ class PriorityResearchPageSource:
         pages: list[str] | None = None,
         concurrency: int | None = None,
         client_factory=None,
+        stage_cache=None,
+        catalog_sleeper=None,
+        bibliography_resolver=None,
     ):
         self.lookback_days = max(lookback_days, 1)
         configured = config.PRIORITY_RESEARCH_LINK_SAFETY_LIMIT
@@ -71,6 +78,12 @@ class PriorityResearchPageSource:
         )
         self.page_coverage: dict[str, dict[str, object]] = {}
         self.client_factory = client_factory
+        self.stage_cache = stage_cache
+        self.catalog_sleeper = catalog_sleeper or asyncio.sleep
+        self.bibliography_resolver = bibliography_resolver or BibliographyResolver(
+            stage_cache=stage_cache, enabled=config.PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED,
+            max_requests=config.PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT,
+        )
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
         if not self.pages:
@@ -84,12 +97,13 @@ class PriorityResearchPageSource:
                 coverage.get("parse_zero_links", 0) or 0
             )
             detail_failures = int(coverage.get("detail_failures", 0) or 0) + int(coverage.get("unresolved_citations", 0) or 0)
+            pending_details = int(coverage.get("detail_pending", 0) or 0)
             checked = int(coverage.get("checked_pages", 0) or 0)
             total = int(coverage.get("total_pages", 0) or 0)
             if total and root_failures >= total:
                 self.fetch_status = "query_failed"
                 self.fetch_error = "AllIndexPagesFailed"
-            elif checked < total or root_failures or detail_failures:
+            elif checked < total or root_failures or detail_failures or pending_details:
                 self.fetch_status = "partial"
                 self.fetch_error = "PartialPageFailure"
             else:
@@ -104,6 +118,8 @@ class PriorityResearchPageSource:
 
     async def fetch(self) -> list[TechnicalEvidence]:
         self.page_coverage = {}
+        detail_queues, cached_results = {}, []
+        self.partial_results = cached_results
         headers = {"User-Agent": "AI-Paradigm-Radar/3.1"}
         cutoff = research_now() - timedelta(days=self.lookback_days)
         semaphore = asyncio.Semaphore(self.concurrency)
@@ -120,6 +136,7 @@ class PriorityResearchPageSource:
                 return_exceptions=True,
             )
             discovered: list[tuple[str, _ResearchLink]] = []
+            bibliography_rows = {}
             for index_url, response in zip(
                 self.pages, index_responses
             ):
@@ -143,15 +160,54 @@ class PriorityResearchPageSource:
                     }
                     logger.warning("官方研究入口返回失败 %s: %s", index_url, exc)
                     continue
-                links = _discover_index_links(response.text, str(response.url), source_url=index_url)
+                try:
+                    links = _discover_index_links(response.text, str(response.url), source_url=index_url)
+                except Exception as exc:
+                    self.page_coverage[index_url] = {"status": "parse_zero_links", "error": type(exc).__name__,
+                                                     "discovered_links": 0, "evidence": 0}
+                    continue
                 metadata = source_record(index_url) or {}
                 unresolved_citations = 0
                 bibliography_diagnostics = {}
                 if metadata.get("bibliography_arxiv"):
                     citation_links, unresolved_citations = _discover_bibliographic_publications(response.text, cutoff=cutoff, diagnostics=bibliography_diagnostics)
                     links.extend(citation_links)
+                    try:
+                        rows = await self.bibliography_resolver.resolve(client, index_url,
+                            bibliography_diagnostics["pending_records"], lookback_days=self.lookback_days)
+                    except Exception as exc:
+                        rows = [{"key": hashlib.sha256(index_url.encode()).hexdigest(), "title": "",
+                                 "status": "pending", "reason": type(exc).__name__}]
+                    bibliography_rows[index_url] = rows
+                    bibliography_diagnostics["resolution_tasks"] = rows
+                    for row in rows:
+                        if row["status"] in {"resolved_url", "primary_verified"}:
+                            links.append(_ResearchLink(title=row["title"], url=row["url"]))
+                    unresolved_citations = sum(row["status"] != "primary_verified" for row in rows)
                 script_urls = _publication_script_urls(response.text, str(response.url), metadata)
                 script_failures = 0
+                catalog_diagnostics = {}
+                if metadata.get("public_catalog") == "qwen_public_collections_v1":
+                    from sources.qwen_catalog import fetch_catalog
+                    try:
+                        catalog_links, catalog_diagnostics = await fetch_catalog(
+                            lambda url: bounded_get(client, url), cutoff=cutoff, reference_time=research_now())
+                        links.extend(_ResearchLink(**item) for item in catalog_links)
+                        script_failures += len(catalog_diagnostics["pending_records"])
+                    except Exception as exc:
+                        script_failures += 1
+                        catalog_diagnostics = {"status": "invalid_registered_catalog", "error": type(exc).__name__}
+                if metadata.get("embedded_nuxt_catalog") == "modelbest_news_v1":
+                    try:
+                        first_pages = {}
+                        catalog_links, catalog_diagnostics = _discover_modelbest_catalog(response.text, cutoff=cutoff, page_payloads=first_pages)
+                        links.extend(catalog_links)
+                        extra_links = await self._complete_modelbest_catalog(client, index_url, first_pages, catalog_diagnostics, cutoff)
+                        links.extend(extra_links)
+                        script_failures += catalog_diagnostics["pagination_pending"] + len(catalog_diagnostics["pending_records"])
+                    except (ValueError, TypeError, RecursionError):
+                        script_failures += 1
+                        catalog_diagnostics = {"status": "invalid_registered_catalog"}
                 for script_url in script_urls:
                     try:
                         script = await bounded_get(client, script_url)
@@ -204,32 +260,64 @@ class PriorityResearchPageSource:
                     or not _parse_date(link.published_at)
                     or _parse_date(link.published_at) >= cutoff
                 ]
+                try:
+                    queue = OfficialDetailQueue(index_url, self.lookback_days, self.stage_cache)
+                    queue.merge(recent_links)
+                    self._bind_bibliography_queue(bibliography_rows.get(index_url, []), queue, cutoff)
+                    if index_url in bibliography_rows:
+                        unresolved_citations = sum(row["status"] != "primary_verified" for row in bibliography_rows[index_url])
+                    cached, cached_outside, cached_parsed = queue.cached()
+                except Exception as exc:
+                    self.page_coverage[index_url] = {"status": "request_failed", "error": type(exc).__name__,
+                                                     "discovered_links": len(links), "evidence": 0}
+                    continue
+                detail_queues[index_url] = queue
+                cached_results.extend(cached)
+                pending_links = queue.pending_links()
                 selected_links = (
-                    recent_links[: self.per_page]
+                    pending_links[: self.per_page]
                     if self.per_page > 0
-                    else recent_links
+                    else pending_links
                 )
+                started_links, checkpoint_failures = [], 0
+                for link in selected_links:
+                    try:
+                        queue.begin_attempt(link)
+                        started_links.append(link)
+                    except Exception as exc:
+                        checkpoint_failures += 1
+                        logger.warning("官方详情尝试检查点失败 %s: %s", link.url, type(exc).__name__)
+                selected_links = started_links
                 self.page_coverage[index_url] = {
                     "status": (
                         "parsed"
-                        if selected_links
-                        else ("no_recent_links" if links else "parse_zero_links")
+                        if selected_links or cached_parsed
+                        else "detail_checkpoint_failed" if checkpoint_failures
+                        else "catalog_pending" if catalog_diagnostics and not catalog_diagnostics.get("complete")
+                        else "bibliography_pending" if unresolved_citations
+                        else ("no_recent_links" if links or catalog_diagnostics.get("complete") else "parse_zero_links")
                     ),
                     "discovered_links": len(links),
                     "allowed_links": len(allowed_links),
                     "recent_links": len(recent_links),
                     "selected_links": len(selected_links),
+                    "detail_pending": queue.pending_count,
+                    "detail_cached": cached_parsed,
+                    "detail_queue_version": DETAIL_QUEUE_VERSION,
                     "selection_limit_origin": self.limit_origin,
-                    "detail_failures": script_failures,
+                    "detail_failures": script_failures + checkpoint_failures,
+                    "detail_checkpoint_failures": checkpoint_failures,
                     "index_data_urls": script_urls,
                     "index_data_failures": script_failures,
-                    "detail_outside_window": 0,
-                    "detail_parsed": 0,
-                    "evidence": 0,
+                    "detail_outside_window": cached_outside,
+                    "detail_parsed": cached_parsed,
+                    "evidence": len(cached),
                     "unresolved_citations": unresolved_citations,
                     "bibliography_diagnostics": bibliography_diagnostics,
+                    "catalog_diagnostics": catalog_diagnostics,
+                    "resolved_index_url": str(response.url),
                 }
-                if self.per_page > 0 and len(recent_links) > self.per_page:
+                if self.per_page > 0 and len(pending_links) > self.per_page:
                     message = (
                         "官方研究入口 %s 触发%s：%s → %s"
                     )
@@ -240,7 +328,7 @@ class PriorityResearchPageSource:
                             if self.limit_origin == "caller_sample"
                             else "用户显式 link safety limit"
                         ),
-                        len(recent_links),
+                        len(pending_links),
                         self.per_page,
                     )
                     if self.limit_origin == "caller_sample":
@@ -250,166 +338,314 @@ class PriorityResearchPageSource:
                 for link in selected_links:
                     discovered.append((index_url, link))
 
-            detail_responses = await asyncio.gather(
-                *(
-                    bounded_get(client, _download_url(link.url))
-                    for _, link in discovered
-                ),
-                return_exceptions=True,
-            )
+            async def read_detail(link):
+                if link.fetch_url:
+                    # A dynamic reader-facing landing is only acceptable with
+                    # its registered article API, and both must be accessible.
+                    landing = await bounded_get(client, link.url)
+                    landing.raise_for_status()
+                    if str(landing.url) != link.url:
+                        raise ValueError("Registered article landing redirected")
+                return await bounded_get(client, link.fetch_url or _download_url(link.url))
 
-        results: list[TechnicalEvidence] = []
-        for (index_url, link), response in zip(discovered, detail_responses):
-            if isinstance(response, Exception):
-                self.page_coverage[index_url]["detail_failures"] = int(
-                    self.page_coverage[index_url].get("detail_failures", 0)
-                ) + 1
-                continue
-            try:
-                response.raise_for_status()
-            except Exception:
-                self.page_coverage[index_url]["detail_failures"] = int(
-                    self.page_coverage[index_url].get("detail_failures", 0)
-                ) + 1
-                continue
-            if (
-                (urlparse(link.url).path.casefold().endswith(".pdf")
-                 or "application/pdf" in response.headers.get("content-type", "").casefold())
-                and not _is_pdf_response(response, str(response.url))
-            ):
-                self.page_coverage[index_url]["detail_failures"] = int(
-                    self.page_coverage[index_url].get("detail_failures", 0)
-                ) + 1
-                logger.warning("官方报告链接未返回 PDF 文件: %s", link.url)
-                continue
-            if link.body_hint:
-                article = _ArticleParser(str(response.url))
-                article.feed(response.text)
-                title = link.title or article.title
-                body = link.body_hint
-                authors = article.authors
-                site_name = article.site_name
-                published = link.published_at
-                modified = article.modified_at
-                linked_documents = []
-            elif _is_pdf_response(response, str(response.url)):
+            async def complete_detail(index_url, link):
+                page = self.page_coverage[index_url]
                 try:
-                    title, body, authors = _extract_pdf_document(response.content)
+                    response = await read_detail(link)
+                    outside_before = page["detail_outside_window"]
+                    verifications = []
+                    evidence = self._parse_detail(index_url, link, response, cutoff, bibliography_rows,
+                                                  bibliography_verifications=verifications)
+                    if evidence is not None:
+                        detail_queues[index_url].complete(link, evidence, outside=False)
+                        cached_results.append(evidence)
+                        page["evidence"] += 1
+                    elif page["detail_outside_window"] > outside_before:
+                        detail_queues[index_url].complete(link, None, outside=True)
+                    for row, published_at in verifications:
+                        self.bibliography_resolver.verified(row, published_at, detail_contract=detail_queues[index_url].contract)
                 except Exception as exc:
-                    logger.warning("官方 Technical Report PDF 解析失败 %s: %s", link.url, exc)
-                    self.page_coverage[index_url]["detail_failures"] += 1
+                    page["detail_failures"] += 1
+                    logger.warning("官方详情执行失败 %s: %s", link.url, type(exc).__name__)
+                finally:
+                    page["detail_pending"] = detail_queues[index_url].pending_count
+
+            # Each healthy detail commits before a slow/cancelled peer; no
+            # all-response barrier ahead of the downstream source checkpoint.
+            await asyncio.gather(*(complete_detail(index_url, link) for index_url, link in discovered))
+        for index_url, rows in bibliography_rows.items():
+            self.page_coverage[index_url]["unresolved_citations"] = sum(row["status"] != "primary_verified" for row in rows)
+        return list({item.fingerprint: item for item in cached_results}.values())
+
+
+    def _bind_bibliography_queue(self, rows, queue, cutoff):
+        """A bibliography identity alone cannot prove primary-detail closure."""
+        for row in rows:
+            url = row.get("url")
+            if not url:
+                continue
+            receipt = queue.completed_detail(url)
+            if receipt is not None:
+                evidence, outside = receipt
+                date = _parse_date(evidence.published_at if evidence else row.get("primary_published_at", ""))
+                paired = (row.get("status") == "primary_verified"
+                          and row.get("primary_detail_contract") == queue.contract
+                          and date and _parse_date(row.get("primary_published_at", "")) == date)
+                if (evidence is not None and not outside and date and cutoff <= date <= research_now()
+                        and normalized_title(evidence.title) == normalized_title(row["title"])
+                        and author_aligned(row["author_text"], evidence.authors)):
+                    if not paired:
+                        self.bibliography_resolver.verified(row, date.isoformat(), detail_contract=queue.contract)
                     continue
-                site_name = ""
-                published = link.published_at
-                modified = ""
-                linked_documents: list[dict[str, str]] = []
-            else:
-                article = _ArticleParser(str(response.url))
-                article.feed(response.text)
-                title = article.title
-                body = _compact_text(article.text)
-                authors = article.authors
-                site_name = article.site_name
-                # dateModified 只表示网页最近被编辑，不能把一年前发布的工作
-                # 伪装成本周新技术。原始发布日期与修改时间必须分栏保留。
-                published = article.published_at or link.published_at
-                modified = article.modified_at
-                linked_documents = [
-                    {"title": label or "linked research document", "url": url}
-                    for label, url in article.links
-                    if source_link_allowed(index_url, url)
-                    and looks_like_linked_research_document(label, url)
-                    and url.rstrip("/") != str(response.url).rstrip("/")
-                ]
-                linked_documents = list(
-                    {
-                        item["url"].rstrip("/"): item
-                        for item in linked_documents
-                    }.values()
-                )
-            title = title or link.title
-            if not title or len(body) < 120:
-                self.page_coverage[index_url]["detail_failures"] += 1
-                continue
-            self.page_coverage[index_url]["detail_parsed"] += 1
-            published_dt = _parse_date(published)
-            if published_dt and published_dt < cutoff:
-                self.page_coverage[index_url]["detail_outside_window"] += 1
-                continue
-            modified_dt = _parse_date(modified)
-            if not published_dt and modified_dt and modified_dt < cutoff:
-                self.page_coverage[index_url]["detail_outside_window"] += 1
-                continue
-            # PDF 元数据标题有时只写模型名；保留索引页锚文本，避免把明确标注的
-            # “Technical Report”误判成普通模型发布。
-            classification = classify_publication(
-                title=f"{title} {link.title}",
-                url=link.url,
-                summary=body,
-                metadata=" ".join(
-                    [
-                        site_name,
-                        *[
-                            f"{item['title']} {item['url']}"
-                            for item in linked_documents
-                        ],
-                    ]
-                ),
-                official=True,
-            )
-            origin_kind = classification.origin_kind
-            host = urlparse(index_url).netloc
-            source_meta, owner, publisher_tier = source_identity(index_url)
-            owner_name = str(owner.get("name", "")) if owner else ""
-            if source_meta:
-                publisher_evidence = f"内置研究入口（{publisher_tier}）：{index_url}"
-            else:
-                publisher_evidence = f"用户追加的重点入口，尚无内置 owner 核验：{index_url}"
-            summary_limit = 60_000 if origin_kind == "technical_report" else 16_000
-            results.append(
-                TechnicalEvidence(
-                    source=self.source_name,
-                    evidence_type=EvidenceType.TECHNICAL_BLOG,
-                    title=title,
-                    # 永久保留索引发现的稳定 URL；HTTP 跳转终点可能是带
-                    # Expires/Signature 的临时 CDN 下载地址。
-                    url=link.url,
-                    summary=body[:summary_limit],
-                    published_at=(published_dt.isoformat() if published_dt else ""),
-                    authors=list(dict.fromkeys(authors)),
-                    # 内置入口使用已核验 owner；用户自定义入口只保留域名，避免
-                    # 网页伪造 og:site_name 后继承知名机构身份。
-                    organization=owner_name or host,
-                    raw={
-                        "origin_kind": origin_kind,
-                        "origin_classification_reason": classification.reason,
-                        "document_format": classification.document_format,
-                        "system_layer_count": classification.system_layer_count,
-                        "origin_priority": 3 if origin_kind == "technical_report" else 2,
-                        "publisher_tier": publisher_tier,
-                        "publisher_evidence": publisher_evidence,
-                        "research_index_url": index_url,
-                        "canonical_source_url": link.url,
-                        "index_discovered_url": link.original_url or link.url,
-                        "source_published_at": published,
-                        "source_modified_at": modified,
-                        "date_basis": (
-                            "published"
-                            if published_dt
-                            else "modified_only"
-                            if modified_dt
-                            else "unknown"
-                        ),
-                        "resolved_fetch_host": urlparse(str(response.url)).netloc,
-                        "linked_research_documents": linked_documents,
-                        "source_owner_id": str(source_meta.get("owner", "")) if source_meta else "",
-                    },
-                )
-            )
-            self.page_coverage[index_url]["evidence"] = int(
-                self.page_coverage[index_url].get("evidence", 0)
+                if evidence is None and outside and paired and (date < cutoff or date > research_now()):
+                    continue
+                queue.reopen(url)
+            self.bibliography_resolver.require_primary(row)
+
+    def _parse_detail(self, index_url, link, response, cutoff, bibliography_rows, *, bibliography_verifications=None):
+        if isinstance(response, Exception):
+            self.page_coverage[index_url]["detail_failures"] = int(
+                self.page_coverage[index_url].get("detail_failures", 0)
             ) + 1
-        return list({item.fingerprint: item for item in results}.values())
+            return None
+        try:
+            response.raise_for_status()
+        except Exception:
+            self.page_coverage[index_url]["detail_failures"] = int(
+                self.page_coverage[index_url].get("detail_failures", 0)
+            ) + 1
+            return None
+        if (
+            (urlparse(link.url).path.casefold().endswith(".pdf")
+             or "application/pdf" in response.headers.get("content-type", "").casefold())
+            and not _is_pdf_response(response, str(response.url))
+        ):
+            self.page_coverage[index_url]["detail_failures"] = int(
+                self.page_coverage[index_url].get("detail_failures", 0)
+            ) + 1
+            logger.warning("官方报告链接未返回 PDF 文件: %s", link.url)
+            return None
+        if link.body_hint:
+            article = _ArticleParser(str(response.url))
+            article.feed(response.text)
+            title = link.title or article.title
+            body = link.body_hint
+            authors = article.authors
+            site_name = article.site_name
+            published = link.published_at
+            modified = article.modified_at
+            linked_documents = []
+        elif _is_pdf_response(response, str(response.url)):
+            try:
+                title, body, authors = _extract_pdf_document(response.content)
+            except Exception as exc:
+                logger.warning("官方 Technical Report PDF 解析失败 %s: %s", link.url, exc)
+                self.page_coverage[index_url]["detail_failures"] += 1
+                return None
+            site_name = ""
+            published = link.published_at
+            modified = ""
+            linked_documents: list[dict[str, str]] = []
+        else:
+            html_text, article_date = response.text, ""
+            if link.fetch_url:
+                from sources.qwen_catalog import decode_article
+                try:
+                    html_text, article_date = decode_article(response, link)
+                except Exception:
+                    self.page_coverage[index_url]["detail_failures"] += 1
+                    return None
+            article = _ArticleParser(link.url if link.fetch_url else str(response.url))
+            article.feed(html_text)
+            title = article.title
+            body = _compact_text(article.text)
+            authors = article.authors
+            site_name = article.site_name
+            # dateModified 只表示网页最近被编辑，不能把一年前发布的工作
+            # 伪装成本周新技术。原始发布日期与修改时间必须分栏保留。
+            published = article_date or article.published_at or link.published_at
+            modified = article.modified_at
+            linked_documents = [
+                {"title": label or "linked research document", "url": url}
+                for label, url in article.links
+                if source_link_allowed(index_url, url)
+                and looks_like_linked_research_document(label, url)
+                and url.rstrip("/") != str(response.url).rstrip("/")
+            ]
+            linked_documents = list(
+                {
+                    item["url"].rstrip("/"): item
+                    for item in linked_documents
+                }.values()
+            )
+        title = title or link.title
+        if not title or len(body) < 120:
+            self.page_coverage[index_url]["detail_failures"] += 1
+            return None
+        self.page_coverage[index_url]["detail_parsed"] += 1
+        published_dt = _parse_date(published)
+        if (source_record(index_url) or {}).get("bibliography_arxiv"):
+            rows = [row for row in bibliography_rows.get(index_url, []) if row.get("url") == link.url]
+            aligned = all(normalized_title(title) == normalized_title(row.get("title", ""))
+                          and author_aligned(row.get("author_text", ""), authors) for row in rows)
+            if (not published_dt or normalized_title(title) != normalized_title(link.title) or not aligned):
+                self.page_coverage[index_url]["detail_failures"] += 1
+                return None
+            if bibliography_verifications is not None:
+                bibliography_verifications.extend((row, published_dt.isoformat()) for row in rows)
+        if published_dt and (published_dt < cutoff or published_dt > research_now()):
+            self.page_coverage[index_url]["detail_outside_window"] += 1
+            return None
+        modified_dt = _parse_date(modified)
+        # PDF 元数据标题有时只写模型名；保留索引页锚文本，避免把明确标注的
+        # “Technical Report”误判成普通模型发布。
+        classification = classify_publication(
+            title=f"{title} {link.title}",
+            url=link.url,
+            summary=body,
+            metadata=" ".join(
+                [
+                    site_name,
+                    *[
+                        f"{item['title']} {item['url']}"
+                        for item in linked_documents
+                    ],
+                ]
+            ),
+            official=True,
+        )
+        origin_kind = classification.origin_kind
+        host = urlparse(index_url).netloc
+        source_meta, owner, publisher_tier = source_identity(index_url)
+        owner_name = str(owner.get("name", "")) if owner else ""
+        if source_meta:
+            publisher_evidence = f"内置研究入口（{publisher_tier}）：{index_url}"
+        else:
+            publisher_evidence = f"用户追加的重点入口，尚无内置 owner 核验：{index_url}"
+        summary_limit = 60_000 if origin_kind == "technical_report" else 16_000
+        return TechnicalEvidence(
+                source=self.source_name,
+                evidence_type=EvidenceType.TECHNICAL_BLOG,
+                title=title,
+                # 永久保留索引发现的稳定 URL；HTTP 跳转终点可能是带
+                # Expires/Signature 的临时 CDN 下载地址。
+                url=link.url,
+                summary=body[:summary_limit],
+                published_at=(published_dt.isoformat() if published_dt else ""),
+                authors=list(dict.fromkeys(authors)),
+                # 内置入口使用已核验 owner；用户自定义入口只保留域名，避免
+                # 网页伪造 og:site_name 后继承知名机构身份。
+                organization=owner_name or host,
+                raw={
+                    "origin_kind": origin_kind,
+                    "origin_classification_reason": classification.reason,
+                    "document_format": classification.document_format,
+                    "system_layer_count": classification.system_layer_count,
+                    "origin_priority": 3 if origin_kind == "technical_report" else 2,
+                    "publisher_tier": publisher_tier,
+                    "publisher_evidence": publisher_evidence,
+                    "research_index_url": index_url,
+                    "canonical_source_url": link.url,
+                    "document_fetch_url": link.fetch_url,
+                    "embedded_published_at": article.published_at if link.fetch_url else "",
+                    "index_discovered_url": link.original_url or link.url,
+                    "source_published_at": published,
+                    "source_modified_at": modified,
+                    "date_basis": (
+                        "published"
+                        if published_dt
+                        else "modified_only"
+                        if modified_dt
+                        else "unknown"
+                    ),
+                    "resolved_fetch_host": urlparse(str(response.url)).netloc,
+                    "linked_research_documents": linked_documents,
+                    "source_owner_id": str(source_meta.get("owner", "")) if source_meta else "",
+                },
+        )
+
+    async def _complete_modelbest_catalog(self, client, index_url, first_pages, diagnostics, cutoff):
+        """Walk the registered public news API; checkpoint each decoded page."""
+        metadata = source_record(index_url) or {}
+        endpoint = metadata.get("catalog_endpoint")
+        expected = set(metadata.get("catalog_categories", ()))
+        missing = expected - set(first_pages)
+        unexpected = set(first_pages) - expected
+        diagnostics["missing_categories"] = sorted(missing)
+        diagnostics["unexpected_categories"] = sorted(unexpected)
+        tasks, extra_links, request_count = [], [], 0
+        diagnostics["pagination_tasks"] = tasks
+        if not endpoint:
+            diagnostics["complete"] = False
+            return []
+        api_url = urljoin(index_url, endpoint)
+        if urlparse(api_url).netloc != urlparse(index_url).netloc:
+            raise ValueError("Catalog endpoint must remain on registered origin")
+        for category, first in first_pages.items():
+            if category not in expected:
+                continue
+            if not first["data"]["hasMore"]:
+                continue
+            signature = hashlib.sha256(json.dumps([1, index_url, category, first,
+                research_now().isoformat(), self.lookback_days, endpoint], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            stage = "modelbest_catalog_pages"
+            cache = self.stage_cache.cache_get(stage, signature) if self.stage_cache else None
+            if cache is not None and not isinstance(cache, dict):
+                raise ValueError("Invalid catalog page checkpoint")
+            pages = [] if cache is None else cache.get("pages")
+            if not isinstance(pages, list):
+                raise ValueError("Invalid catalog page checkpoint")
+            task = {"category_id": category, "next_page": 2, "status": "pending", "pages_completed": 1}
+            tasks.append(task)
+            seen = {hashlib.sha256(json.dumps(first["data"]["list"], sort_keys=True, ensure_ascii=False).encode()).hexdigest()}
+            for number, page in enumerate(pages, 2):
+                if (not isinstance(page, dict) or page.get("number") != number
+                        or type(page.get("has_more")) is not bool or not isinstance(page.get("links"), list)
+                        or not isinstance(page.get("diagnostics"), dict)
+                        or not isinstance(page.get("payload_signature"), str)
+                        or (number > 2 and not pages[number - 3]["has_more"])):
+                    raise ValueError("Invalid catalog page checkpoint identity")
+                _merge_catalog_diagnostics(diagnostics, page["diagnostics"])
+                extra_links.extend(_ResearchLink(**value) for value in page["links"])
+                seen.add(page["payload_signature"])
+                task.update(next_page=number + 1, pages_completed=number)
+            more = not pages or pages[-1]["has_more"]
+            while more and request_count < 20:
+                try:
+                    await self.catalog_sleeper(1.0)
+                    request_count += 1
+                    response = await client.post(api_url, json={"cateId": category,
+                        "pageNum": task["next_page"], "pageSize": 30}, headers={"Content-Language": "zh"})
+                    response.raise_for_status()
+                    if urlparse(str(response.url)).netloc != urlparse(api_url).netloc or len(response.content) > 2_000_000:
+                        raise ValueError("Catalog response violates origin/size contract")
+                    payload = response.json()
+                    links, detail = _discover_modelbest_page(payload, str(category), cutoff=cutoff)
+                    digest = hashlib.sha256(json.dumps(payload["data"]["list"], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                    if digest in seen:
+                        raise ValueError("Catalog pagination repeated a page")
+                    seen.add(digest)
+                    next_more = payload["data"]["hasMore"]
+                    page = {"number": task["next_page"], "has_more": next_more,
+                            "links": [asdict(link) for link in links], "diagnostics": detail,
+                            "payload_signature": digest}
+                    if self.stage_cache:
+                        self.stage_cache.cache_save(stage, signature, {"pages": [*pages, page]})
+                    pages.append(page)
+                    more = next_more
+                    _merge_catalog_diagnostics(diagnostics, detail)
+                    extra_links.extend(links)
+                    task.update(next_page=task["next_page"] + 1, pages_completed=task["pages_completed"] + 1)
+                except Exception as exc:
+                    task["reason"] = type(exc).__name__
+                    break
+            task["status"] = "pending" if more else "completed"
+            if more and request_count >= 20:
+                task["reason"] = "catalog_request_safety_limit"
+        diagnostics["pagination_requests"] = request_count
+        diagnostics["pagination_pending"] = len(missing) + len(unexpected) + sum(task["status"] != "completed" for task in tasks)
+        diagnostics["complete"] = not diagnostics["pagination_pending"] and not diagnostics["pending_records"]
+        return extra_links
 
     def coverage(self) -> dict[str, object]:
         statuses = list(self.page_coverage.values())
@@ -429,6 +665,7 @@ class PriorityResearchPageSource:
                 int(item.get("detail_failures", 0) or 0) for item in statuses
             ),
             "unresolved_citations": sum(int(item.get("unresolved_citations", 0)) for item in statuses),
+            "detail_pending": sum(int(item.get("detail_pending", 0)) for item in statuses),
             "evidence": sum(int(item.get("evidence", 0) or 0) for item in statuses),
             "pages": self.page_coverage,
         }
@@ -679,6 +916,7 @@ def _discover_bibliographic_publications(html_text, *, cutoff=None, diagnostics=
     parser = _BibliographicParser()
     parser.feed(html_text)
     links, unresolved, total, outside_years = {}, 0, 0, 0
+    pending_records = []
     for text in parser.paragraphs:
         # A citation year is not a publication timestamp. Resolve the explicit
         # arXiv ID through its canonical landing page and normal detail parser.
@@ -694,15 +932,158 @@ def _discover_bibliographic_publications(html_text, *, cutoff=None, diagnostics=
             continue
         identifier = re.search(r"\barXiv\s*:\s*(\d{4}\.\d{4,5}(?:v\d+)?)\b", text, re.I)
         title = re.search(r'[“"]([^”"]{5,800})[”"]', text)
-        if not identifier or not title:
+        # Only explicit identifiers qualify; a journal/conference name or a
+        # paper title is not permission to synthesize a primary URL.
+        doi = re.search(r"(?:https?://doi\.org/|\bdoi\s*:\s*)(10\.\d{4,9}/[^\s<>\"”]+)", text, re.I)
+        if not title or not (identifier or doi):
             unresolved += 1
+            pending_records.append({
+                "key": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "title": _compact_text(title.group(1)) if title else "",
+                "citation_year": int(year.group(1)),
+                "author_text": _compact_text(text[:year.start()]).strip(" .,;"),
+                "status": "pending_primary_metadata",
+                "date_basis": "year_only_not_publication_date",
+            })
             continue
-        url = "https://arxiv.org/abs/" + identifier.group(1)
+        url = ("https://arxiv.org/abs/" + identifier.group(1) if identifier
+               else "https://doi.org/" + doi.group(1).rstrip(".,;"))
         links[url] = _ResearchLink(title=_compact_text(title.group(1)), url=url)
     if diagnostics is not None:
         diagnostics.update(citation_records=total, outside_window_by_year=outside_years,
-                           resolved_arxiv_urls=len(links), unresolved_in_window=unresolved)
+                           resolved_arxiv_urls=sum(url.startswith("https://arxiv.org/") for url in links),
+                           resolved_doi_urls=sum(url.startswith("https://doi.org/") for url in links),
+                           unresolved_in_window=unresolved,
+                           unresolved_boundary="window_year_candidates_not_verified_recent_publications",
+                           pending_records=pending_records)
     return list(links.values()), unresolved
+
+
+def _discover_modelbest_catalog(html_text, *, cutoff=None, page_payloads=None):
+    """Decode only registered public Nuxt news data, never JavaScript.
+
+    URLs and publishTime must be explicit card fields. No route construction
+    from numeric IDs, no dateModified/createTime fallback, no model-card or
+    image URLs. Unresolved cards and truncated category pages block coverage.
+    """
+    match = re.search(r'<script\b[^>]*\bid=["\']__NUXT_DATA__["\'][^>]*>(.*?)</script>', html_text, re.S | re.I)
+    if not match or len(match.group(1)) > 2_000_000:
+        raise ValueError("Registered Nuxt catalog is missing or too large")
+    heap = json.loads(match.group(1))
+    if not isinstance(heap, list) or not heap or len(heap) > 20000:
+        raise ValueError("Invalid Nuxt data heap")
+    visiting, memo = set(), {}
+
+    def raw(index):
+        if type(index) is not int or not 0 <= index < len(heap):
+            raise ValueError("Invalid Nuxt data reference")
+        value = heap[index]
+        wrappers = set()
+        while isinstance(value, list) and value and isinstance(value[0], str):
+            if len(value) != 2 or value[0] not in {"Reactive", "ShallowReactive", "Ref", "ShallowRef"}:
+                raise ValueError("Unsupported Nuxt data wrapper")
+            reference = value[1]
+            if type(reference) is not int or not 0 <= reference < len(heap) or reference in wrappers:
+                raise ValueError("Invalid Nuxt wrapper reference")
+            wrappers.add(reference)
+            value = heap[reference]
+        return value
+
+    def decode(index, depth=0):
+        if type(index) is not int:
+            raise ValueError("Invalid Nuxt data reference type")
+        if index == -1:
+            return None  # devalue's declared undefined sentinel
+        if not 0 <= index < len(heap):
+            raise ValueError("Invalid Nuxt data reference range")
+        if depth > 50 or index in visiting:
+            raise ValueError("Cyclic/deep Nuxt catalog")
+        if index in memo:
+            return memo[index]
+        visiting.add(index)
+        try:
+            value = raw(index)
+            if isinstance(value, dict):
+                result = {key: decode(reference, depth + 1) for key, reference in value.items()}
+            elif isinstance(value, list):
+                result = [decode(reference, depth + 1) for reference in value]
+            elif value is None or isinstance(value, (str, bool, int, float)):
+                result = value
+            else:
+                raise ValueError("Invalid Nuxt catalog value")
+            memo[index] = result
+            return result
+        finally:
+            visiting.remove(index)
+
+    root = raw(0)
+    if not isinstance(root, dict) or "data" not in root:
+        raise ValueError("Nuxt catalog root data is missing")
+    data = raw(root["data"])
+    if not isinstance(data, dict):
+        raise ValueError("Nuxt catalog data is invalid")
+    categories = [(name, reference) for name, reference in data.items()
+                  if re.fullmatch(r"news-cate-\d+-1-30", name)]
+    if not categories:
+        raise ValueError("Registered news categories are missing")
+    links, pending = {}, []
+    records, outside, pagination = 0, 0, 0
+    for category, reference in categories:
+        payload = decode(reference)
+        category_id = int(category.split("-")[2])
+        page_links, detail = _discover_modelbest_page(payload, str(category_id), cutoff=cutoff)
+        if page_payloads is not None:
+            page_payloads[category_id] = payload
+        pagination += int(payload["data"]["hasMore"])
+        records += detail["records"]
+        outside += detail["outside_window"]
+        pending.extend(detail["pending_records"])
+        links.update((link.url, link) for link in page_links)
+    return list(links.values()), {"categories": len(categories), "records": records,
+                                "outside_window": outside, "pagination_pending": pagination,
+                                "pending_records": pending, "resolved_links": len(links)}
+
+
+def _discover_modelbest_page(payload, category, *, cutoff=None):
+    if not isinstance(payload, dict) or type(payload.get("code")) is not int or payload["code"] != 1:
+        raise ValueError("News category returned a non-success payload")
+    page = payload.get("data")
+    if not isinstance(page, dict) or type(page.get("hasMore")) is not bool:
+        raise ValueError("News category pagination contract is missing")
+    cards = page.get("list")
+    # The public endpoint explicitly returns null for exhausted empty pages.
+    if cards is None and not page["hasMore"]:
+        cards = []
+    if not isinstance(cards, list) or (not cards and page["hasMore"]):
+        raise ValueError("News category list is invalid or makes no progress")
+    links, pending, outside = {}, [], 0
+    for card in cards:
+        if not isinstance(card, dict) or not isinstance(card.get("title"), str) or not card["title"].strip():
+            raise ValueError("News card identity is missing")
+        published = card.get("publishTime") if isinstance(card.get("publishTime"), str) else ""
+        date = _parse_date(published)
+        if date and date.year == 1:
+            date = None
+        if date and cutoff is not None and date < cutoff:
+            outside += 1
+            continue
+        url = card.get("link") if isinstance(card.get("link"), str) else ""
+        parsed = urlparse(url)
+        temporary = any(key.casefold() in {"expires", "signature"} or key.casefold().startswith("x-amz-")
+                        for key, _ in parse_qsl(parsed.query))
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or temporary:
+            pending.append({"key": hashlib.sha256(json.dumps([category, card.get("id"), card["title"]], ensure_ascii=False).encode()).hexdigest(),
+                            "title": card["title"], "status": "pending_primary_url"})
+            continue
+        links.setdefault(url, _ResearchLink(title=card["title"].strip(), url=url, published_at=date.isoformat() if date else ""))
+    return list(links.values()), {"records": len(cards), "outside_window": outside,
+                                "pending_records": pending, "resolved_links": len(links)}
+
+
+def _merge_catalog_diagnostics(target, page):
+    for field in ("records", "outside_window", "resolved_links"):
+        target[field] += page[field]
+    target["pending_records"].extend(page["pending_records"])
 
 
 def _discover_index_links(html_text: str, base_url: str, *, source_url: str | None = None) -> list[_ResearchLink]:

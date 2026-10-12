@@ -160,14 +160,17 @@ def collect_checks() -> list[Check]:
         Check(
             "Tavily 跨站公开索引",
             "社区页面/独立技术博客发现",
-            "ready" if config.TAVILY_API_KEY else "degraded",
+            "ready" if config.TAVILY_SOCIAL_SEARCH_ENABLED and config.TAVILY_API_KEY else "degraded",
             (
                 f"已配置；credit safety limit="
                 f"{config.TAVILY_REQUEST_SAFETY_LIMIT or '不限制'}；"
+                f"UTC 月度上限={config.TAVILY_MONTHLY_CREDIT_LIMIT or '显式取消保护'}；"
                 f"域名限制={config.TAVILY_DISCOVERY_DOMAINS or '无'}；"
                 "只作为部分索引线索，不代表平台总声量"
-                if config.TAVILY_API_KEY
-                else "未配置 TAVILY_API_KEY，运行时跳过跨站公开索引"
+                if config.TAVILY_SOCIAL_SEARCH_ENABLED and config.TAVILY_API_KEY
+                else "Tavily 已由配置关闭；未搜索，不代表零讨论"
+                if not config.TAVILY_SOCIAL_SEARCH_ENABLED
+                else "Tavily 已开启但未配置 Key；不发请求，候选社区查询保留待办"
             ),
         ),
         Check(
@@ -193,10 +196,10 @@ def collect_checks() -> list[Check]:
         Check(
             "X 精确标题搜索",
             "作者身份/KOL 二次解读",
-            "ready" if config.TWITTER_BEARER_TOKEN else "degraded",
+            "ready" if config.KOL_X_SOURCE_ENABLED and config.TWITTER_BEARER_TOKEN else "degraded",
             "Bearer Token 已配置"
-            if config.TWITTER_BEARER_TOKEN
-            else "未配置时自动跳过，不影响主流程",
+            if config.KOL_X_SOURCE_ENABLED and config.TWITTER_BEARER_TOKEN
+            else "X 官方 API 已关闭或未配置；不宣称已覆盖 X 讨论",
         ),
         Check(
             "真实接口 Smoke 契约",
@@ -219,6 +222,7 @@ _BOOLEAN_ENVIRONMENT_KEYS = (
     "ALIGNMENT_FORUM_SOURCE_ENABLED",
     "KOL_SOURCE_ENABLED",
     "KOL_X_SOURCE_ENABLED",
+    "PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED",
     "TAVILY_SOCIAL_SEARCH_ENABLED",
     "REDDIT_API_ACCESS_APPROVED",
     "FOLLOW_BUILDERS_ENABLED",
@@ -237,8 +241,10 @@ _INTEGER_ENVIRONMENT_RANGES: dict[str, tuple[int, int | None]] = {
     "SMOKE_CHECK_TIMEOUT_SECONDS": (5, 120),
     "LESSWRONG_KARMA_THRESHOLD": (0, 500),
     "TAVILY_REQUEST_SAFETY_LIMIT": (0, None),
+    "TAVILY_MONTHLY_CREDIT_LIMIT": (0, None),
     "PRIORITY_RESEARCH_LINK_SAFETY_LIMIT": (0, None),
     "PRIORITY_RESEARCH_CONCURRENCY": (1, 12),
+    "PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT": (1, 100),
     "PARADIGM_DISCOVERY_SAFETY_LIMIT": (0, None),
     "PARADIGM_ANALYSIS_SAFETY_LIMIT": (0, None),
     "PARADIGM_DEEP_SAFETY_LIMIT": (0, None),

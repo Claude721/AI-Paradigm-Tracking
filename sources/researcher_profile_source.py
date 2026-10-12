@@ -62,7 +62,7 @@ class ResearcherProfileClient:
                         try:
                             await self._openalex(client, profile, evidence)
                         except Exception as exc:
-                            logger.warning("OpenAlex 人物增强失败 [%s]: %s", profile.name, exc)
+                            logger.warning("OpenAlex 人物增强失败 [%s]: %s", profile.name, type(exc).__name__)
                             _note(profile, f"OpenAlex 检索失败：{type(exc).__name__}")
                     else:
                         _note(profile, "OpenAlex 未配置，未执行作者身份检索")
@@ -71,7 +71,7 @@ class ResearcherProfileClient:
                         try:
                             await self._orcid(client, profile, orcid)
                         except Exception as exc:
-                            logger.warning("ORCID 人物增强失败 [%s]: %s", profile.name, exc)
+                            logger.warning("ORCID 人物增强失败 [%s]: %s", profile.name, type(exc).__name__)
                             _note(profile, f"ORCID 检索失败：{type(exc).__name__}")
                     else:
                         _note(profile, "未获得可核验的 ORCID")
@@ -112,9 +112,9 @@ class ResearcherProfileClient:
         best = None
         if known_id:
             known_short_id = known_id.rstrip("/").rsplit("/", 1)[-1]
-            response = await client.get(
+            response = await self._openalex_get(client,
                 f"{OPENALEX_AUTHORS}/{known_short_id}",
-                params={"api_key": config.OPENALEX_API_KEY},
+                params={},
             )
             if response.status_code < 400:
                 known_author = response.json()
@@ -131,10 +131,9 @@ class ResearcherProfileClient:
                         "当前论文返回的 OpenAlex 作者 ID 未能与当前论文题目对齐",
                     )
         if best is None:
-            response = await client.get(
+            response = await self._openalex_get(client,
                 OPENALEX_AUTHORS,
                 params={
-                    "api_key": config.OPENALEX_API_KEY,
                     "search": profile.name,
                     "per-page": 5,
                 },
@@ -181,10 +180,9 @@ class ResearcherProfileClient:
             )
         if not short_id:
             return
-        works_response = await client.get(
+        works_response = await self._openalex_get(client,
             OPENALEX_WORKS,
             params={
-                "api_key": config.OPENALEX_API_KEY,
                 "filter": f"author.id:{short_id}",
                 "sort": "cited_by_count:desc",
                 "per-page": 12,
@@ -237,10 +235,9 @@ class ResearcherProfileClient:
         short_id = str(author.get("id", "")).rsplit("/", 1)[-1]
         if not short_id or not title.strip():
             return False
-        response = await client.get(
+        response = await self._openalex_get(client,
             OPENALEX_WORKS,
             params={
-                "api_key": config.OPENALEX_API_KEY,
                 "filter": f"author.id:{short_id}",
                 "search": title,
                 "per-page": 3,
@@ -257,6 +254,13 @@ class ResearcherProfileClient:
             >= 0.82
             for work in response.json().get("results", [])
         )
+
+    @staticmethod
+    async def _openalex_get(client, url, *, params):
+        # Never put a production Secret in URLs, exception text or redirected
+        # requests. ORCID/homepage requests do not inherit this header.
+        return await client.get(url, params=params,
+            headers={"Authorization": f"Bearer {config.OPENALEX_API_KEY}"}, follow_redirects=False)
 
     async def _orcid(
         self,

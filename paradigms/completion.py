@@ -141,7 +141,7 @@ def research_completion_violations(stats: dict) -> list[str]:
                     issues.append("学术查询计划计数无效")
     for section, planned, checked, failure_keys in (
         ("official_pages", "total_pages", "checked_pages",
-         ("request_failed", "parse_zero_links", "detail_failures", "unresolved_citations")),
+         ("request_failed", "parse_zero_links", "detail_failures", "unresolved_citations", "detail_pending")),
         ("official_repositories", "configured_organizations", "checked_organizations",
          ("failed_organizations", "repository_page_failures", "unverified_primary_releases")),
     ):
@@ -155,6 +155,12 @@ def research_completion_violations(stats: dict) -> list[str]:
             value.get(key) for key in failure_keys
         ):
             issues.append(f"{section} 尚未闭合")
+        if section == "official_pages":
+            pages = value.get("pages") or {}
+            if not isinstance(pages, dict):
+                issues.append("official_pages 逐入口详情账本无效")
+            elif any(not isinstance(page, dict) or number(page, "detail_pending") for page in pages.values()):
+                issues.append("official_pages 逐入口详情仍未闭合")
     for section in ("curated_kol_sources", "high_signal_forums", "curated_kol_x"):
         value = frontier.get(section) or {}
         if not isinstance(value, dict):
@@ -200,7 +206,7 @@ def discovery_retry_sources(frontier: dict) -> set[str]:
     ):
         selected.add("arxiv")
     for section, source, checked, total, failures in (
-        ("official_pages", "priority-research-page", "checked_pages", "total_pages", ("request_failed", "parse_zero_links", "detail_failures", "unresolved_citations")),
+        ("official_pages", "priority-research-page", "checked_pages", "total_pages", ("request_failed", "parse_zero_links", "detail_failures", "unresolved_citations", "detail_pending")),
         ("official_repositories", "official-repository-release", "checked_organizations", "configured_organizations", ("failed_organizations", "repository_page_failures", "unverified_primary_releases")),
     ):
         value = frontier.get(section) or {}
@@ -208,6 +214,10 @@ def discovery_retry_sources(frontier: dict) -> set[str]:
             continue
         if value.get(checked, 0) < value.get(total, 0) or any(value.get(key) for key in failures):
             selected.add(source)
+        if section == "official_pages":
+            pages = value.get("pages") or {}
+            if not isinstance(pages, dict) or any(not isinstance(page, dict) or page.get("detail_pending") for page in pages.values()):
+                selected.add(source)
     for section, source in (("curated_kol_sources", "curated-kol-feeds"), ("high_signal_forums", "high-signal-forums"), ("curated_kol_x", "curated-kol-x")):
         value = frontier.get(section) or {}
         if value.get("status") in {"not_configured", "disabled"}:
@@ -222,5 +232,9 @@ def require_completed_research(stats: dict, *, content: str = "", candidates=Non
     violations = research_completion_violations(stats) + partial_report_violations(content)
     if candidates is not None and any(item.status == "pending_deep" for item in candidates):
         violations.append("报告候选仍有 pending_deep 研究检查点")
+    if candidates is not None:
+        from .search_receipts import incomplete_searches
+        if any(incomplete_searches(item) for item in candidates):
+            violations.append("报告候选仍有未闭合的社区查询")
     if violations:
         raise ResearchNotCompleteError(violations)

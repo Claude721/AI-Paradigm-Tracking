@@ -2181,6 +2181,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             mental_model_method="先建立低分辨率运行图，再逐层提高分辨率。",
             lineage_parent="video prediction",
             evidence="[]",
+            community_coverage="{}",
+            community_search_receipts="{}",
         )
         self.assertIn('"trend_interpretation"', synthesis)
         self.assertIn('"excluded_evidence_indices"', synthesis)
@@ -3287,7 +3289,7 @@ class ParadigmPipelineTests(unittest.TestCase):
     def test_openalex_orders_search_by_relevance_before_date(self) -> None:
         response = httpx.Response(
             200,
-            json={"results": []},
+            json={"results": [], "meta": {"next_cursor": None}},
             request=httpx.Request("GET", "https://api.openalex.org/works"),
         )
         transport = MagicMock()
@@ -3620,6 +3622,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         transport = MagicMock()
         transport.post = AsyncMock(return_value=response)
         client = SocialWebSearchClient(max_requests=1)
+        client.monthly_limit = 0  # This fixture isolates the per-process cap.
         first, second = candidate(), candidate()
         with (
             patch.object(config, "TAVILY_SOCIAL_SEARCH_ENABLED", True),
@@ -3630,7 +3633,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             asyncio.run(client.search(transport, second))
         self.assertEqual(transport.post.await_count, 1)
         self.assertEqual(client.requests_used, 1)
-        self.assertIn("credit safety limit", second.community_coverage["tavily_social_web"])
+        self.assertEqual(second.community_search_receipts["tavily_social_web"]["reason"], "request_safety_limit")
 
     def test_unanalyzed_discovery_remains_eligible_next_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

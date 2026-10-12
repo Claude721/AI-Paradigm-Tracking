@@ -104,13 +104,17 @@ class AcceptanceFaultTests(unittest.IsolatedAsyncioTestCase):
         requests=[]
         def handler(request):
             requests.append(request)
+            if request.url.path == '/usage':
+                return httpx.Response(200, json={'account': {'plan_usage': 0, 'paygo_usage': 0}}, request=request)
             return httpx.Response(200,json={'results':[{'title':'Research','url':'https://lab.example/paper'}],'usage':{'credits':1}},request=request)
         entry=Entry('tavily','separate-acceptance','https://api.tavily.com/search',credential='TAVILY_API_KEY',deferred_reason='requires_separate_authorized_platform_acceptance')
         with patch.object(config,'TAVILY_API_KEY','private-key'):
             result=await SourceAudit(transport=httpx.MockTransport(handler),include_platforms=True).run([entry],reference_time=NOW)
         self.assertEqual(result['counts'],{'passed':1})
-        self.assertEqual(len(requests),1)
-        self.assertEqual(json.loads(requests[0].content)['search_depth'],'basic')
+        self.assertEqual(len(requests),2)
+        self.assertEqual(requests[0].url.path,'/usage')
+        self.assertEqual(json.loads(requests[1].content)['search_depth'],'basic')
+        self.assertIs(json.loads(requests[1].content)['auto_parameters'],False)
         self.assertEqual(result['entries'][0]['platform_usage_credits'],1)
         self.assertNotIn('private-key',json.dumps(result))
 

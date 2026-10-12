@@ -408,7 +408,7 @@ RESEARCH_SOURCES: tuple[dict, ...] = (
     # 中国官方研究/Technical Report 索引。
     {"url": "https://ernie.baidu.com/blog/", "owner": "baidu", "tier": "established"},
     {"url": "https://seed.bytedance.com/en/research", "owner": "bytedance-seed", "tier": "established"},
-    {"url": "https://qwenlm.github.io/publication/", "owner": "alibaba-qwen", "tier": "established"},
+    {"url": "https://qwenlm.github.io/publication/", "owner": "alibaba-qwen", "tier": "established", "index_path": "https://qwen.ai/research", "allowed_domains": ("qwenlm.github.io", "qwen.ai"), "public_catalog": "qwen_public_collections_v1"},
     {"url": "https://www.kimi.com/blog/", "owner": "moonshot", "tier": "established", "allowed_domains": ("kimi.com", "moonshot.ai", "github.com", "arxiv.org")},
     {"url": "https://www.moonshot.ai/", "owner": "moonshot", "tier": "verified", "allowed_domains": ("moonshot.ai", "kimi.com")},
     {"url": "https://z.ai/blog", "owner": "zhipu", "tier": "established", "allowed_domains": ("z.ai", "zhipuai.cn")},
@@ -416,14 +416,14 @@ RESEARCH_SOURCES: tuple[dict, ...] = (
     {"url": "https://api-docs.deepseek.com/updates/", "owner": "deepseek", "tier": "verified", "allowed_domains": ("api-docs.deepseek.com", "deepseek.com"), "page_mode": "changelog"},
     {"url": "https://chat.stepfun.com/research/en", "owner": "stepfun", "tier": "established", "allowed_domains": ("stepfun.com", "chat.stepfun.com", "github.com"), "index_path": "/research", "embedded_path_cards": True, "detail_path_pattern": r"^/research/(?:en|zh)/[^/]+/?$"},
     {"url": "https://www.minimax.io/blog", "owner": "minimax", "tier": "established"},
-    {"url": "https://modelbest.cn/", "owner": "modelbest", "tier": "established"},
+    {"url": "https://modelbest.cn/", "owner": "modelbest", "tier": "established", "embedded_nuxt_catalog": "modelbest_news_v1", "catalog_endpoint": "/api/news/getCateNewsList", "catalog_categories": (7, 8, 9, 10, 11, 12, 13), "allowed_domains": ("modelbest.cn", "mp.weixin.qq.com")},
     {"url": "https://arc.tencent.com/research", "owner": "tencent-hunyuan", "tier": "verified", "index_script_pattern": r"^/assets/index-[a-zA-Z0-9_-]+\.js$", "publication_module_pattern": r"^/assets/Research-[a-zA-Z0-9_-]+\.js$", "publication_script_schema": "tencent_arc"},
     {"url": "https://www.noahlab.com.hk/research_paper", "owner": "huawei-noah", "tier": "verified"},
     # 具名实验室索引只提高召回，普通论文仍需技术与外部承接验证。
     {"url": "https://bair.berkeley.edu/blog/", "owner": "bair", "tier": "verified"},
     {"url": "https://crfm.stanford.edu/", "owner": "stanford-crfm", "tier": "verified", "index_path": "/blog.html", "detail_path_pattern": r"^/20\d{2}/\d{2}/\d{2}/[^/]+\.html$"},
     {"url": "https://www.ri.cmu.edu/publications/", "owner": "cmu-ri", "tier": "verified", "allowed_domains": ("ri.cmu.edu",), "detail_path_pattern": r"^/[^/]{12,}/?$"},
-    {"url": "https://wp.nyu.edu/cilvr/cilvr-group-publications/", "owner": "nyu-cilvr", "tier": "verified", "bibliography_arxiv": True, "bibliography_year_bound": True},
+    {"url": "https://wp.nyu.edu/cilvr/cilvr-group-publications/", "owner": "nyu-cilvr", "tier": "verified", "bibliography_arxiv": True, "bibliography_year_bound": True, "bibliography_adapter_version": 3, "allowed_domains": ("doi.org",)},
 )
 
 

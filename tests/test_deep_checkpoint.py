@@ -438,7 +438,8 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.store.save_candidates(failed)
         restored = self.store.load_pending_deep_candidates()[0]
         self.assertIsNotNone(self.store.load_synthesized_checkpoint(restored))
-        with patch("database.paradigm_store.DEEP_SYNTHESIS_CHECKPOINT_VERSION", 2):
+        from database.paradigm_store import DEEP_SYNTHESIS_CHECKPOINT_VERSION
+        with patch("database.paradigm_store.DEEP_SYNTHESIS_CHECKPOINT_VERSION", DEEP_SYNTHESIS_CHECKPOINT_VERSION + 1):
             self.assertIsNone(self.store.load_synthesized_checkpoint(restored))
 
         original_read = Path.read_bytes

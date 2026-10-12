@@ -1,6 +1,6 @@
 # 逐入口信源验收
 
-更新：2026-10-10。用于验证输入与接口，不是完整研究、报告或生产 V0 认证。它不会减少生产研究范围、清空 backlog 或把缺口改写为“没有更新”。最新结果见 [归因报告](SOURCE_ACCEPTANCE_20261010.md)，云端操作见 [Key 复验指南](SOURCE_API_KEY_VERIFICATION.md)。
+更新：2026-10-12。用于验证输入与接口，不是完整研究、报告或生产 V0 认证。它不会减少生产研究范围、清空 backlog 或把缺口改写为“没有更新”。最新云端结果见 [run 38027283680](RUN_38027283680_SOURCE_REVIEW.md)，后续局部修复/样本见 [输入闭合修复](INPUT_CLOSURE_REPAIR_20261012.md)，云端操作见 [Key 复验指南](SOURCE_API_KEY_VERIFICATION.md)。
 
 ## 云端先做什么
 
@@ -13,6 +13,8 @@
 - `source_audit.log`：该次命令结果。HTTP 原始正文、查询参数、密钥与生产数据库不输出到验收制品。
 
 生产研究源与辅助源按当前配置逐项列入清单，包括每个官方页面、KOL/RSS、论坛、Follow Builders 文件、学术查询和 GitHub 组织。官方页面最多一条详情、学术查询首个小页；GitHub/Search/作者查询等只验证协议，不声称全部 README、作者身份合并、独立承接或全分页已经完成。
+
+正式官方详情使用固定窗口的单调任务清单和逐条持久化结果；`detail_pending` 与逐页面尾项会阻断生产闭合。这里的 `caller_sample` 故意只验证一个详情协议，即使该样本 passed，也不能用它清除正式队列的未尝试/失败任务。audit 使用临时库，不恢复生产缓存；恢复效率应另测同窗多进程，而不是对健康入口重复请求 50/100 次。
 
 ## 本地命令与限制
 
@@ -27,11 +29,11 @@ python scripts/source_audit.py --include-authenticated --budget-seconds 900 --ma
 python scripts/source_audit.py --entry official:5 --budget-seconds 100 --max-requests 6
 ```
 
-默认输出 `logs/source_audit_latest.json/md`，已被 Git 忽略。默认 900 秒总预算、300 次总请求、45 秒单入口、6 次单入口请求；arXiv 同主机至少 3.1 秒，其他主机至少 1 秒。429 或明确配额耗尽后同主机剩余项停止请求，但其他来源继续；解压后 10 MB 上限和预算耗尽不记成功空结果。私网字面 IP、localhost、带 userinfo 和非 HTTP(S) 地址拒绝访问，重定向逐跳核对；不声称这是完整 DNS 重绑定防护。
+默认输出 `logs/source_audit_latest.json/md`，已被 Git 忽略。默认 900 秒总预算、300 次总请求、45 秒单入口、6 次单入口请求；arXiv 与 OpenReview 同主机至少 3.1 秒，其他主机至少 1 秒。OpenReview 公开 GET 的普通 429 若有合法且不超过 60 秒的 `Retry-After`，允许整轮该主机一次共享冷却/恢复；恢复仍计入原请求/时间上限，原始 429 留在账本。挑战、长/未知等待、重复限流及其他提供方仍熔断，其他来源继续。已尝试却无法继续的对象记失败，真正零请求项才记未执行。解压后 10 MB 上限和预算耗尽不记成功空结果。私网字面 IP、localhost、带 userinfo 和非 HTTP(S) 地址拒绝访问，重定向逐跳核对；不声称这是完整 DNS 重绑定防护。
 
-`--include-authenticated` 仅开放有界 OpenAlex/GitHub。`--include-platforms` 是额外明确授权：Tavily basic 一次、X 最多 10 条的一次搜索、Semantic Scholar 一次、Reddit OAuth 加一次最小搜索；不启用配置中关闭的平台，不自动补格式或重试付费请求。未配置与 disabled 不算通过；启用入口缺少凭据也阻止 `acceptance_complete`。`--entry` / `--kind` 是局部诊断，始终不算完整验收；即使所选样本 passed，退出码仍为 1。
+`--include-authenticated` 仅开放有界 OpenAlex/GitHub。`--include-platforms` 是额外明确授权：Tavily 最多一次 basic 搜索，月度保护开启时先一次只读 `/usage`；X 最多 10 条的一次搜索、Semantic Scholar 一次、Reddit OAuth 加一次最小搜索。不启用关闭的平台，不自动补格式或重试付费请求。Tavily 用量未知/额度耗尽不搜索，成功样本必须确认本次 credits，关闭 auto_parameters；独立验收不恢复生产额度账本，不是账户级费用硬保证。未配置与 disabled 不算通过；启用入口缺少凭据也阻止 `acceptance_complete`。`--entry` / `--kind` 是局部诊断，始终不算完整验收；即使所选样本 passed，退出码仍为 1。
 
-JSON v2 增加逐请求耗时、连接错误类型、限流/挑战提示和保守 `diagnosis`；不记录异常文本、响应正文、Token 或查询值。403 不能直接诊断 Key 失效。执行前后代码指纹变化也阻止完成声明。
+JSON v3 在 v2 请求耗时/挑战归因基础上增加尝试号、响应类型与恢复账本。旧 v2 制品仍可离线复核，不把换版前后混为长期稳定性样本。控制台逐项输出未通过/已恢复入口的去敏摘要，GitHub Step Summary 在非零退出前写入同一验收表；不记录异常文本、响应正文、Token 或查询值。403 不能直接诊断 Key 失效。执行前后代码指纹变化也阻止完成声明。
 
 重复观测使用下面的离线汇总，参数按先旧后新；不同 scope 不合并，缺席保留，时间缺失保持未知。不用少量样本估计 P95/长期可用率，不同代码版本的修复对照不是同版本稳定性实验。
 

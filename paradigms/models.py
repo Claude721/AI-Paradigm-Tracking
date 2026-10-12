@@ -595,6 +595,7 @@ def scrub_ephemeral_evidence(evidence: TechnicalEvidence) -> None:
     platform = str(evidence.raw.get("social_platform") or evidence.source)
     labels = {
         "reddit": "Reddit 公开讨论",
+        "hackernews": "Hacker News 公开讨论",
         "tavily-reddit": "Reddit 公开索引线索",
         "x": "X 公开索引线索",
         "tavily-x": "X 公开索引线索",
@@ -916,6 +917,7 @@ class ParadigmCandidate:
     secondary_discussion_summary: str = ""
     objective_momentum_signals: list[str] = field(default_factory=list)
     community_coverage: dict[str, str] = field(default_factory=dict)
+    community_search_receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
     publisher_tier: str = "unknown"
     publisher_evidence: list[str] = field(default_factory=list)
     admission_reason: str = ""
@@ -1078,7 +1080,7 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
             "researchers",
         },
         mappings={
-            "mental_model", "community_coverage", "screening_rubric",
+            "mental_model", "community_coverage", "community_search_receipts", "screening_rubric",
             "rubric_assessment", "freshness_assessment",
             "deep_checkpoint_synthesis_rubric",
         },
@@ -1090,6 +1092,24 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
     )
     raw_evidence = payload.get("evidence", [])
     raw_researchers = payload.get("researchers", [])
+    from .search_receipts import SEARCH_STATUSES
+    for provider, receipt in payload.get("community_search_receipts", {}).items():
+        if (not isinstance(provider, str) or not provider or not isinstance(receipt, dict)
+                or receipt.get("status") not in SEARCH_STATUSES
+                or not isinstance(receipt.get("reason", ""), str)
+                or type(receipt.get("result_count", 0)) is not int
+                or receipt.get("result_count", 0) < 0
+                or not isinstance(receipt.get("input_signature", ""), str)
+                or not isinstance(receipt.get("evidence_fingerprints", []), list)
+                or any(not isinstance(value, str) for value in receipt.get("evidence_fingerprints", []))):
+            raise ValueError("社区查询回执结构无效")
+        history = receipt.get("failure_history", [])
+        if not isinstance(history, list) or any(
+            not isinstance(item, dict) or item.get("status") not in {"failed", "not_executed", "not_configured"}
+            or not isinstance(item.get("reason"), str) or not isinstance(item.get("input_signature"), str)
+            for item in history
+        ):
+            raise ValueError("社区查询失败账本无效")
     if not isinstance(raw_evidence, list) or not isinstance(raw_researchers, list):
         raise ValueError("候选状态中的 evidence/researchers 必须是数组")
     evidence = [technical_evidence_from_dict(item) for item in raw_evidence]

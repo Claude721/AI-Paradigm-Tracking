@@ -97,6 +97,8 @@ _REQUIRED_COLUMNS = {
     "campaign_work": {"campaign_id", "kind", "object_key", "input_revision", "status", "reason", "payload_json", "updated_at"},
     "research_attempts": {"attempt_id", "campaign_id", "kind", "object_key", "input_revision", "outcome", "reason", "started_at", "finished_at"},
     "research_stage_cache": {"stage", "input_signature", "result_json", "created_at"},
+    "provider_credit_periods": {"provider", "period", "baseline_credits", "observed_credits", "observed_through"},
+    "provider_credit_requests": {"request_id", "provider", "period", "credits", "status"},
 }
 
 
@@ -112,6 +114,7 @@ def migrate_state(
     version 6 adds render-attempt accounting and quarantined delivery recovery.
     Version 7 separates origin source snapshots from execution checkpoints.
     Version 8 adds fixed research campaigns, work/attempt receipts and stage caches.
+    Version 9 adds cross-run provider credit reservations and account observations.
     All additions are backwards-compatible, so opening
     the database with :class:`ParadigmStore` performs the migration.  Future
     versions must extend this function before raising the schema version.
@@ -134,7 +137,7 @@ def migrate_state(
             f"{config.PARADIGM_STATE_SCHEMA_VERSION}"
         )
 
-    _validate_sqlite(path, require_current=version >= 7, require_campaign=version >= 8)
+    _validate_sqlite(path, require_current=version >= 7, require_campaign=version >= 8, require_budgets=version >= 9)
 
     # Imported lazily so the module can print the current version without
     # opening or creating the configured production database.
@@ -158,7 +161,7 @@ def _normalize_version(value: int | str | None) -> int:
         raise ValueError(f"无法识别状态 schema 版本: {value}") from exc
 
 
-def _validate_sqlite(path: Path, *, require_current: bool, require_campaign: bool = True) -> None:
+def _validate_sqlite(path: Path, *, require_current: bool, require_campaign: bool = True, require_budgets: bool = True) -> None:
     try:
         with sqlite3.connect(path) as connection:
             integrity = connection.execute("PRAGMA quick_check").fetchone()
@@ -190,6 +193,8 @@ def _validate_sqlite(path: Path, *, require_current: bool, require_campaign: boo
         )
     if require_campaign:
         required.update({"research_campaigns", "campaign_work", "research_attempts", "research_stage_cache"})
+    if require_budgets:
+        required.update({"provider_credit_periods", "provider_credit_requests"})
     missing = required - tables
     if missing:
         raise ValueError(f"状态数据库缺少必需表: {sorted(missing)}")
@@ -218,12 +223,14 @@ def _validate_domain_payloads(path: Path) -> None:
 
     from database.origin_state import validate as validate_origins
     from database.research_campaign import validate as validate_campaigns
+    from database.provider_budget import validate as validate_budgets
     from paradigms.models import ORIGIN_EVIDENCE_TYPES, candidate_from_dict, technical_evidence_from_dict
 
     try:
         with sqlite3.connect(path) as connection:
             validate_origins(connection)
             validate_campaigns(connection)
+            validate_budgets(connection)
             for fingerprint, payload_json in connection.execute(
                 "SELECT fingerprint, payload_json FROM evidence_state"
             ):

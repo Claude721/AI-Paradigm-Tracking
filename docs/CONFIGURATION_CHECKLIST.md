@@ -1,12 +1,16 @@
 # AI 技术范式雷达：完整配置 Checklist
 
+2026-10-12 新增书目身份补全控制：`PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED=false` 默认不新增 OpenAlex 搜索；显式开启需已配置 `OPENALEX_API_KEY`，`PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT=8` 限制每个生产进程的新请求（1–100），成功身份使用原状态续跑。关闭或达到限额不能把未解析书目当完成；这不是月度成本控制。普通公开 audit 不因该开关而获得 API 授权，需同时 `--include-authenticated`，最多一次身份协议样本。详见 [输入闭合修复](INPUT_CLOSURE_REPAIR_20261012.md)。
+
 > 本地生产密钥填写到根目录 `.env`；GitHub 部署填写到 Actions Secrets。不要粘贴到聊天、截图或提交到 Git。独立验收脚本忽略 `.env`。配置模板见 `.env.example`。
 
-2026-10-09 工程候选使用 schema v8，自动迁移旧状态且保留历史结果，继续 `reset_state=false`。新增逐入口 `source_check_only` 手动模式，不需要新增 Secret/Variable；它优先于 `smoke_only`，不运行模型、邮件或恢复生产数据库。已有预算续跑仍默认关闭，额外研究 run 会增加 API 消耗，只有所有者明确开启才自动排队。升级不等于生产 V0 验收，迁移、续跑与回退边界见 `CLOUD_AUTOMATION.md`。
+当前工程候选使用 schema v9：保留 v8 的固定批次并增加 Tavily 月度 credit 账本，自动迁移 v1–v8 状态且保留历史结果，继续 `reset_state=false`。逐入口 `source_check_only` 优先于 `smoke_only`，不运行模型、邮件或恢复生产数据库。预算续跑仍默认关闭，额外研究 run 会增加 API 消耗，只有所有者明确开启才自动排队。升级不等于生产 V0 验收，迁移、续跑与回退边界见 `CLOUD_AUTOMATION.md`。
 
 本地逐入口检查使用 `python scripts/source_audit.py`，脚本**忽略 `.env`**，只读取显式进程环境；`--list` 只列去敏清单，不联网。`--include-authenticated` 只允许有界 OpenAlex/GitHub 请求，不授权 Tavily、X、Reddit 或模型/SMTP。没有凭据的入口保留 `not_configured`，不会记为通过；局部 `--entry` / `--kind` 选择始终标为不完整验收。具体边界和云端步骤见 [逐入口验收](SOURCE_ACCEPTANCE.md)。
 
 2026-10-10 新增 `--include-platforms` / 手动 input `source_platform_checks=true` 的独立授权检查；默认关闭，可能消耗 Tavily/X 额度，仅测试已启用平台，不触发模型或邮件，也不是新增生产 Variable。不要盲目轮换 Key；依照 [云端凭据复验指南](SOURCE_API_KEY_VERIFICATION.md) 区分未注入、401、403、429、套餐权限和公开页面访问挑战。
+
+同日云端 run `38027283680` 已验证 OpenAlex 11 项/GitHub 27 项，失败清单见 [复核](RUN_38027283680_SOURCE_REVIEW.md)。按所有者决定，X 官方 API 默认关闭；如果 Actions Variable 原来是 `KOL_X_SOURCE_ENABLED=true`，请明确改为 `false`，新默认值不会覆盖已有配置。仅关闭 X，不删除历史任务。Workflow 已补齐 `TAVILY_SOCIAL_SEARCH_ENABLED` 与 `TAVILY_SOCIAL_SEARCH_DOMAINS` 注入；前者是生产开关，后者供平台 Smoke 的域名范围使用，正式组合检索仍由 `TAVILY_DISCOVERY_DOMAINS` 控制。
 
 成对制品的容量诊断使用 `python scripts/inspect_capacity.py --database /解压路径/paradigm_radar.db --audit /同run路径/run_audit_latest.json`，仅 mode=ro 查询、不迁移、不读取 .env/密钥、不联网。模型请求取消现在记为未知用量并阻止自动预算链；客户端取消不证明服务端没有执行/收费。预筛前填/过期刷新转交不需要新 Variable，也没有改变模型或思考模式。
 
@@ -118,7 +122,7 @@ LESSWRONG_KARMA_THRESHOLD=30
 ALIGNMENT_FORUM_SOURCE_ENABLED=true
 KOL_SOURCE_ENABLED=true
 KOL_CUSTOM_FEED_URLS=
-KOL_X_SOURCE_ENABLED=true
+KOL_X_SOURCE_ENABLED=false
 ```
 
 LessWrong 的 `karmaThreshold=30` 是 frontpage Feed 的入选下限，不是系统取得的精确帖子 karma；curated Feed 也只证明编辑精选。内置 KOL 目录同时保存姓名、主页、已验证 Feed 和可选 X handle。自定义 Feed 没有内置身份元数据，默认只能作为二次解读；要让某位作者的原创文章具备机制原点资格，应在 `research_watchlist.py` 中补齐其主页、Feed、方向和 `origin_policy` 后提交代码。
@@ -130,12 +134,18 @@ RESEARCH_WATCHLIST_MODE=merge
 PRIORITY_RESEARCH_PAGES=
 PRIORITY_RESEARCH_LINK_SAFETY_LIMIT=0
 PRIORITY_RESEARCH_CONCURRENCY=6
+PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED=false
+PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT=8
 ESTABLISHED_RESEARCH_ORGANIZATIONS=
 MONITORED_RESEARCH_ORGANIZATIONS=
 PRIORITY_RESEARCHERS=
 ```
 
 `merge` 表示环境变量只追加少量自定义项，仓库更新时仍会获得新的内置名单；`replace` 才会完全替换默认目录。GitHub 中曾保存过旧版长名单也不需要删除，默认会去重合并。新增页面只提高召回优先级：只有内置目录记录了 owner 与 tier 的页面才继承发布者身份，用户追加页面只能同域抓取并降为 `verified`。
+
+`PRIORITY_RESEARCH_LINK_SAFETY_LIMIT=0` 尝试窗口内全部待抓详情；非零值只限制每个入口本进程新增详情尝试，不是编辑 Top-K 或完成分母。固定窗口的详情 URL 清单只增不减，失败/未尝试对象以低尝试次数优先续跑；当前索引不再列出旧失败 URL 也不会删除它。成功正文逐条保存，恢复时复用，不占新增尝试限额；超时保留已提交的健康同伴，所有 pending 仍阻断正式交付。注册适配器/解析策略升级会重开旧成功回执，但不能删除入口或更改原窗口来清零。信源 audit 最多一条详情的协议取样不证明该详情队列闭合。Qwen 保留登记入口 `https://qwenlm.github.io/publication/` 的原身份，内部访问新站；不要把新站地址当作等价自定义项追加后假定已有同一适配器。
+
+书目身份与详情额度分开：成功身份不重复 OpenAlex 查询，成功详情只有与同窗口、当前策略的标题/作者/日期核验配对才可复用。恢复不会无条件重置 `primary_verified`，也不会仅凭它跳过未保存正文。书目确认失败但正文已保存可补回执；不同标题、作者不匹配或旧策略仍待核验。默认关闭身份搜索并不代表真实书目已解析，已保存的健康结果不会因为关闭新增搜索被删除。
 
 官方 GitHub 组织名单同样版本化保存在 `research_watchlist.py`，复用现有 `GITHUB_TOKEN`，不新增 Secret/Variable。系统按仓库 `created_at` 发现发布事件，不依赖项目名关键词：若仓库链接可打开的一手论文/官方技术页，以外部材料为原点；若技术首先通过结构化 README 与代码接口定义，可形成 `original_implementation` 机制假说。普通 SDK、demo、awesome list、论文聚合和信息不足的 README 会被确定性排除；任何仓库仍须通过 Rubric 与外部承接闸门，stars/forks 不算独立复现。
 
@@ -166,9 +176,14 @@ TAVILY_SOCIAL_SEARCH_DOMAINS=x.com,twitter.com,reddit.com,xiaohongshu.com
 TAVILY_SOCIAL_MAX_RESULTS=12
 TAVILY_DISCOVERY_DOMAINS=
 TAVILY_REQUEST_SAFETY_LIMIT=0
+TAVILY_MONTHLY_CREDIT_LIMIT=1000
 ```
 
-在 Tavily 创建普通账号即可，不要求学术邮箱，也不要求信用卡。免费计划额度以 Tavily 控制台当前显示为准；项目对每个通过 Rubric 的深挖候选采用一次 `basic` 组合搜索，不会分别为三个平台重复消耗。`TAVILY_DISCOVERY_DOMAINS` 留空时执行全网发现，能找到独立技术博客；需要限制站点时再填域名。`TAVILY_REQUEST_SAFETY_LIMIT=0` 表示动态覆盖全部深挖候选；只有你需要严格保护 credits 时才设置非零熔断值。搜索结果只能说明页面被公开索引，不能证明完整覆盖或用相关度替代点赞、评论等声量指标。
+免费计划额度以 Tavily 控制台当前显示为准；先确认 Plan/Usage，关闭 PAYG 或设置账户硬限额。项目对每个通过 Rubric 的深挖候选采用一次 `basic` 组合搜索，明确关闭 auto_parameters，不分别为三个平台重复消耗。`TAVILY_DISCOVERY_DOMAINS` 留空时执行全网发现，能找到独立技术博客；需要限制站点时再填域名。搜索结果只能说明页面被公开索引，不能证明完整覆盖或用相关度替代点赞、评论等声量指标。
+
+`TAVILY_REQUEST_SAFETY_LIMIT=0` 只是不设每进程请求上限；月度保护由 `TAVILY_MONTHLY_CREDIT_LIMIT=1000` 独立控制，必须为非负整数，`0` 明确关闭保护而不是免费。生产进程核验账户用量后，在 schema v9 状态中原子预留 credit；实际用量明确才结算，取消/崩溃/未知用量不退款，未知账户/请求用量停止后续搜索。月份按实际 UTC，不按冻结研究窗口；账本随 state artifact 恢复。它无法原子约束同账户其他客户端、供应商计数延迟或回退旧状态，不能替代提供方硬限额。
+
+Smoke/显式平台样本不恢复生产账本：启用月度保护时先一次只读 `/usage`，再最多一次 basic 搜索；用量缺失或额度耗尽不搜索。仍需授权，可能消耗 1 credit，不自动改套餐。显式开启但缺 Key 的 Tavily/X/已批准 Reddit/学术增强记录 `not_configured` 并保留待办，不能当作查询成功；确实不使用时需由所有者明确关闭。HTTP、协议错误和额度耗尽阻断对象完成，健康同伴继续；启用的 Semantic Scholar 失败不能冒充零匹配。
 
 Reddit 若要获得帖子分数、评论量和讨论正文，需要先向 Reddit 申请 Data API 访问。获批后配置：
 
@@ -310,8 +325,8 @@ SCHEDULE_TIMEZONE=Asia/Shanghai
 - [ ] `PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED=true`：让重点研究者近期论文通过独立于术语的 arXiv 车道进入视野；姓名不替代技术与身份核验
 - [ ] `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60`：数据库为空或覆盖地图升级时，只扩大高信号回补车道
 - [ ] 常规运行保持 `PARADIGM_SEED_ARXIV_IDS` 为空；只在精确回补/审计漏项时临时填写。它只负责召回，不会提高 Rubric、发布者或编辑复核资格
-- [ ] Codex 自动任务“AI 技术范式雷达周报”保持启用
-- [ ] 不要同时长期运行 `python main.py --schedule`，避免形成两套调度
+- [ ] 本项目默认由 GitHub Actions 定时运行；不要同时启用本机重复调度
+- [ ] 如选择本机 `python main.py --schedule`，先关闭其他同项目调度，避免重复研究与邮件
 
 如果只在本机使用，Codex 自动任务或 `python main.py --schedule` 都要求电脑保持开机。
 需要关机后仍执行时，使用仓库内置的 GitHub Actions 云端任务，并停用本机重复调度。
@@ -346,7 +361,7 @@ python main.py --smoke-test
 python main.py --smoke-test --smoke-skip-llm --smoke-skip-smtp --smoke-skip-tavily
 ```
 
-上面的复核命令不会重复消耗 Qwen、SMTP 或 Tavily；第一次完整 smoke 应直接运行 `python main.py --smoke-test`，让 Tavily 做 1 个 basic request。全部关键项通过后再执行 `python main.py`；如果 `EMAIL_PUSH_ENABLED=true`，手动完整运行也会发送邮件。
+上面的复核命令不会重复消耗 Qwen、SMTP 或 Tavily。获得真实接口检查授权后，完整 Smoke 才执行启用接口；Tavily 先核验账户用量，再最多做 1 个 basic request。关键项和逐入口样本通过后，完整研究/邮件仍需授权；如果 `EMAIL_PUSH_ENABLED=true`，手动完整运行也会发送邮件。
 
 检查结果：
 

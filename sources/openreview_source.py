@@ -8,7 +8,6 @@ import re
 import hashlib
 import json
 import time
-from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
 from runtime_clock import research_now
 
@@ -16,6 +15,7 @@ import httpx
 
 import config
 from paradigms.models import EvidenceType, TechnicalEvidence, nonnegative_number, technical_evidence_from_dict
+from sources.request_policy import OPENREVIEW_REQUEST_SPACING_SECONDS, MAX_RETRY_AFTER_SECONDS, retry_after_seconds
 
 logger = logging.getLogger(__name__)
 OPENREVIEW_SEARCH_API = "https://api2.openreview.net/notes/search"
@@ -44,6 +44,8 @@ class OpenReviewSource:
         searches: list[str] | None = None,
         concurrency: int = 1,
         stage_cache=None,
+        clock=None,
+        sleeper=None,
     ):
         self.lookback_days = max(lookback_days, 1)
         self.limit = min(max(limit, 1), 100)
@@ -63,6 +65,9 @@ class OpenReviewSource:
         self.query_progress: dict[str, dict] = {}
         self._request_lock = asyncio.Lock()
         self._last_request_started = 0.0
+        self._cooldown_until = 0.0
+        self._clock = clock or time.monotonic
+        self._sleeper = sleeper
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
         if not self.venues:
@@ -177,6 +182,10 @@ class OpenReviewSource:
                         progress.update(offset=offset, pages=len(seen_pages), results=len(evidence), status="completed" if complete else "pending")
                         if complete:
                             return list(evidence.values()), True
+                except OpenReviewCircuitOpen:
+                    self.not_executed_queries += 1
+                    progress["status"] = "not_executed_rate_limit"
+                    return list(evidence.values()), False
                 except Exception as exc:
                     self.failed_queries += 1
                     progress.update(status="failed", error=type(exc).__name__)
@@ -257,29 +266,33 @@ class OpenReviewSource:
             )
         for attempt in range(3):
             async with self._request_lock:
-                await asyncio.sleep(max(0, 1.0 - (time.monotonic() - self._last_request_started)))
-                self._last_request_started = time.monotonic()
+                # The circuit and cooldown must be rechecked INSIDE the lock.
+                # A peer may have observed a 429 while this query was queued.
+                if self._circuit_open:
+                    raise OpenReviewCircuitOpen("OpenReview rate-limit circuit already open")
+                wait = max(0, self._cooldown_until - self._clock(),
+                           OPENREVIEW_REQUEST_SPACING_SECONDS - (self._clock() - self._last_request_started))
+                await (self._sleeper or asyncio.sleep)(wait)
+                self._last_request_started = self._clock()
                 self.request_count += 1
                 response = await client.get(OPENREVIEW_SEARCH_API, params=params)
-            last_response = response
-            if response.status_code != 429:
-                response.raise_for_status()
-                return response
-            self.rate_limited_requests += 1
-            if attempt < 2:
-                retry_after = response.headers.get("Retry-After", "")
-                try:
-                    delay = float(retry_after)
-                except (TypeError, ValueError):
-                    try:
-                        date = parsedate_to_datetime(retry_after)
-                        delay = (date - datetime.now(timezone.utc)).total_seconds()
-                    except (TypeError, ValueError):
-                        delay = float(2**attempt)
-                if delay > 60:
+                last_response = response
+                if response.status_code != 429:
+                    response.raise_for_status()
+                    return response
+                self.rate_limited_requests += 1
+                if (response.headers.get("cf-mitigated") == "challenge"
+                        or response.headers.get("x-vercel-mitigated") == "challenge"):
                     self._circuit_open = True
                     response.raise_for_status()
-                await asyncio.sleep(max(1.0, delay))
+                delay = retry_after_seconds(response.headers.get("Retry-After", ""))
+                delay = max(1.0, delay if delay is not None else float(2**attempt))
+                # Publish cooldown before releasing the lock: EVERY query,
+                # not only this retry, must honor the provider's wait.
+                self._cooldown_until = max(self._cooldown_until, self._clock() + delay)
+                if delay > MAX_RETRY_AFTER_SECONDS or attempt == 2:
+                    self._circuit_open = True
+                    response.raise_for_status()
         assert last_response is not None
         # 同一轮已经证明上游持续限流后，停止其余 venue/query 继续消耗请求。
         # 这些查询会在 coverage 中记为 not_executed，而不是伪装成零命中。

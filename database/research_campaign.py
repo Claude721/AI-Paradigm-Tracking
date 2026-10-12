@@ -370,6 +370,20 @@ class CampaignStore:
             row = conn.execute("SELECT result_json FROM research_stage_cache WHERE stage=? AND input_signature=?", (stage, signature)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def cache_get_many(self, stage, signatures):
+        """Bound SQL parameters; avoid one connection per official detail."""
+        results = {}
+        with self.store._connect() as conn:
+            for offset in range(0, len(signatures), 256):
+                chunk = signatures[offset:offset + 256]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT input_signature, result_json FROM research_stage_cache WHERE stage=? AND input_signature IN ({placeholders})",
+                    [stage, *chunk],
+                )
+                results.update((signature, json.loads(payload)) for signature, payload in rows)
+        return results
+
     def cache_save(self, stage, signature, result):
         with self.store._connect() as conn:
             conn.execute("INSERT OR REPLACE INTO research_stage_cache VALUES (?, ?, ?, ?)", (stage, signature, _encode(result), _now()))

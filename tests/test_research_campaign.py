@@ -243,7 +243,7 @@ class CampaignReplayTests(unittest.IsolatedAsyncioTestCase):
         with sqlite3.connect(self.path) as conn:
             for table in ("research_stage_cache", "research_attempts", "campaign_work", "research_campaigns"):
                 conn.execute(f"DROP TABLE {table}")
-        self.assertEqual(migrate_state(self.path, 7), 8)
+        self.assertEqual(migrate_state(self.path, 7), config.PARADIGM_STATE_SCHEMA_VERSION)
         restored = ParadigmStore(self.path)
         self.assertIsNone(restored.campaigns.active())
         self.assertEqual(restored.load_pending_origins(), [])

@@ -27,7 +27,7 @@ AI4S 作为独立技术栈覆盖 [FutureHouse Research](https://www.futurehouse.
 
 同一 owner 目录还维护一组已核验官方 GitHub 组织，用于发现“官方网页尚未收录、但新仓库已经发布”的事件。它不是第五种背书层：系统只按组织身份与仓库 `created_at` 召回，不靠项目名关键词；仓库链接到外部一手论文/官方技术页时使用外部原点，技术首先由结构化 README 与代码接口定义时才形成 `original_implementation` 假说。SDK、demo、聚合列表和信息不足的 README 不具备原点资格，star/fork 不能替代独立承接。
 
-Google Research、Apple、Amazon、IBM、xAI、腾讯 ARC、华为诺亚、BAIR、Stanford CRFM、CMU RI 和 NYU CILVR 也会被主动读取，但默认 tier 是 `verified`：它们的页面要么覆盖面很宽，要么偏模型发布/动态页面，要么普通论文数量很大，不能仅凭入口直接晋级。Z.ai、Qwen 新站、腾讯 ARC 和华为诺亚的动态页面可能需要专用解析器；通用抓取失败时，arXiv/OpenAlex 仍是第二条召回路径。
+Google Research、Apple、Amazon、IBM、xAI、腾讯 ARC、华为诺亚、BAIR、Stanford CRFM、CMU RI 和 NYU CILVR 也会被主动读取，但默认 tier 是 `verified`：它们的页面要么覆盖面很宽，要么偏模型发布/动态页面，要么普通论文数量很大，不能仅凭入口直接晋级。Qwen 新站、腾讯 ARC 已有限定公开数据适配与本地样本；Z.ai 完整目录及其他实际故障仍须单独闭合。arXiv/OpenAlex 是第二条召回路径，但不能抹去失败官方入口的覆盖账本。当前协议和限制见 [信源说明](../信源说明.md)。
 
 ## 3. 已建立的前沿组织
 

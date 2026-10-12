@@ -29,7 +29,7 @@ from paradigms.completion import ResearchNotCompleteError, require_completed_res
 
 logger = logging.getLogger(__name__)
 
-DEEP_SYNTHESIS_CHECKPOINT_VERSION = 1
+DEEP_SYNTHESIS_CHECKPOINT_VERSION = 2
 DEEP_TRAJECTORY_CHECKPOINT_VERSION = 1
 DEEP_SYNTHESIS_CHECKPOINT_MAX_AGE = timedelta(hours=48)
 
@@ -124,6 +124,8 @@ class ParadigmStore:
         self._init_db()
         from database.research_campaign import CampaignStore
         self.campaigns = CampaignStore(self)
+        from database.provider_budget import ProviderBudgetStore
+        self.provider_budgets = ProviderBudgetStore(self)
 
     @contextmanager
     def _connect(self):
@@ -277,6 +279,8 @@ class ParadigmStore:
             origin_state.initialize(conn)
             from database.research_campaign import initialize as initialize_campaigns
             initialize_campaigns(conn)
+            from database.provider_budget import initialize as initialize_budgets
+            initialize_budgets(conn)
 
     def is_bootstrap_required(self) -> bool:
         """空状态或覆盖地图升级时使用较长发现窗口。"""
@@ -1244,6 +1248,40 @@ class ParadigmStore:
                 break
         return results
 
+    def reopen_failed_community_judgments(self) -> int:
+        """Reopen only explicit failed receipts, never all historical results.
+
+        Invoked by an authorized research run, not by status/inspection reads.
+        Delivery history and last_reported_signature remain untouched.
+        """
+        from paradigms.search_receipts import incomplete_searches, record_search
+        count = 0
+        with self.transaction(), self._connect() as conn:
+            rows = conn.execute("SELECT paradigm_key, payload_json FROM paradigms WHERE status != 'pending_deep'").fetchall()
+            for key, payload in rows:
+                candidate = candidate_from_dict(json.loads(payload))
+                if candidate.key != key:
+                    raise ValueError("历史候选身份与持久化记录不一致")
+                pending = incomplete_searches(candidate)
+                if not pending:
+                    continue
+                for provider in pending:
+                    if provider not in candidate.community_search_receipts:
+                        record_search(candidate, provider, "failed", reason="legacy_explicit_query_failure")
+                candidate.status = "pending_deep"
+                candidate.rubric_assessment = {}
+                candidate.rejection_reason = ""
+                candidate.deep_checkpoint_stage = ""
+                candidate.deep_checkpoint_input_signature = ""
+                candidate.deep_checkpoint_support_signature = ""
+                candidate.deep_checkpoint_created_at = ""
+                candidate.deep_checkpoint_trajectory_signature = ""
+                candidate.deep_checkpoint_synthesis_rubric = {}
+                conn.execute("UPDATE paradigms SET status='pending_deep', payload_json=? WHERE paradigm_key=?",
+                    (json.dumps(candidate.to_dict(), ensure_ascii=False, sort_keys=True), key))
+                count += 1
+        return count
+
     def load_candidate_snapshots(self, keys: set[str]) -> list[ParadigmCandidate]:
         """Reload committed downstream inputs after a bounded origin visit."""
         if not keys:
@@ -1377,6 +1415,21 @@ class ParadigmStore:
             return False
         campaign = self.campaigns.active(load_discovery=False)
         return bool(campaign and candidate.key in self.campaigns.candidate_keys(campaign.campaign_id))
+
+    def save_enrichment_checkpoint(self, original: ParadigmCandidate, progress: ParadigmCandidate) -> ParadigmCandidate:
+        """CAS input progress, returning the exact next stage's expected base."""
+        snapshot = _persistable_candidate(progress)
+        snapshot.status = "pending_deep"
+        if (original.key != snapshot.key or original.status != "pending_deep"
+                or _deep_checkpoint_input_signature(original) != _deep_checkpoint_input_signature(snapshot)):
+            raise ValueError("增强检查点身份或一手输入版本不一致")
+        with self.transaction(), self._connect() as conn:
+            row = conn.execute("SELECT status, payload_json FROM paradigms WHERE paradigm_key=?", (original.key,)).fetchone()
+            if (row is None or row[0] != "pending_deep" or json.loads(row[1]) != original.to_dict()
+                    or not _deep_origin_revisions_current(conn, original)):
+                raise ValueError("增强检查点与当前候选或一手版本冲突")
+            self.save_candidates([snapshot])
+        return snapshot
 
     def save_synthesized_checkpoint(
         self, original: ParadigmCandidate, synthesized: ParadigmCandidate

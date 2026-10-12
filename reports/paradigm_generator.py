@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import config
+from paradigms.search_receipts import search_receipt_summary
 from agents.llm_utils import build_client
 from paradigms.models import (
     ORIGIN_EVIDENCE_TYPES,
@@ -453,6 +454,7 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         "evidence_assessment": item.evidence_assessment,
         "objective_momentum_signals": momentum_signals,
         "community_coverage": item.community_coverage,
+        "community_search_receipts": search_receipt_summary(item),
         "secondary_discussion_summary": discussion_summary,
         "trend_interpretation": trend,
         # 与完整 evidence 分开提供经过准入语义过滤的扩散证据，避免总编辑
@@ -555,6 +557,7 @@ def _compact_route_dossier(item: ParadigmCandidate) -> dict:
         "evidence_assessment": item.evidence_assessment,
         "objective_momentum_signals": momentum_signals[:12],
         "community_coverage": item.community_coverage,
+        "community_search_receipts": search_receipt_summary(item),
         "secondary_discussion_summary": discussion_summary,
         "trend_interpretation": trend,
         "open_questions": item.open_questions[:8],

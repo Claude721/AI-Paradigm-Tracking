@@ -24,6 +24,12 @@ class RuntimeProvenanceTests(unittest.TestCase):
             self.assertEqual(source_fingerprint(root), baseline)
             (root / "config.py").write_text("MODE = 'new-policy'\n", encoding="utf-8")
             self.assertNotEqual(source_fingerprint(root), baseline)
+            protocol_baseline = source_fingerprint(root)
+            (root / "tavily_protocol.py").write_text("CONTRACT = 1\n", encoding="utf-8")
+            self.assertNotEqual(source_fingerprint(root), protocol_baseline)
+            protocol_baseline = source_fingerprint(root)
+            (root / "tavily_protocol.py").write_text("CONTRACT = 2\n", encoding="utf-8")
+            self.assertNotEqual(source_fingerprint(root), protocol_baseline)
 
 
 if __name__ == "__main__":

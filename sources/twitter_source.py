@@ -1,8 +1,8 @@
 """
 Twitter/X 信源 - 通过 Twitter API v2 搜索 AI 领域动态
 
-注意: Twitter API 免费层不支持读取推文，需要 Basic 层 ($100/月) 或更高。
-如果未配置 TWITTER_BEARER_TOKEN，此信源将自动跳过。
+默认关闭；只有显式启用并配置 TWITTER_BEARER_TOKEN 才会请求。
+权限与计费以 X 当前开发者控制台为准，不把 403 一概归因于订阅层级。
 策略: 追踪精选 AI 领域大牛账号的最新推文，而非全量关键词搜索，以节省 API 配额。
 """
 
@@ -12,12 +12,12 @@ import logging
 
 import httpx
 
-from config import TWITTER_BEARER_TOKEN, TWITTER_WATCH_ACCOUNTS
+import config
 from .base import BaseSource, RawProject
 
 logger = logging.getLogger(__name__)
 
-TWITTER_API = "https://api.twitter.com/2"
+TWITTER_API = "https://api.x.com/2"
 
 FILTER_KEYWORDS = [
     "building", "launched", "launching", "open source", "stealth",
@@ -33,21 +33,18 @@ class TwitterSource(BaseSource):
         self.max_results = max_results_per_query
 
     async def fetch(self) -> list[RawProject]:
-        if not TWITTER_BEARER_TOKEN:
-            logger.info(
-                "TWITTER_BEARER_TOKEN 未配置，跳过 Twitter 信源"
-                "（需要 Basic 层 $100/月）"
-            )
+        if not config.KOL_X_SOURCE_ENABLED or not config.TWITTER_BEARER_TOKEN:
+            logger.info("X 官方 API 已关闭或未配置，未执行 Twitter 信源请求")
             return []
 
         headers = {
-            "Authorization": f"Bearer {TWITTER_BEARER_TOKEN}",
+            "Authorization": f"Bearer {config.TWITTER_BEARER_TOKEN}",
         }
 
         query_parts = []
-        if TWITTER_WATCH_ACCOUNTS:
+        if config.TWITTER_WATCH_ACCOUNTS:
             from_clauses = " OR ".join(
-                f"from:{acct}" for acct in TWITTER_WATCH_ACCOUNTS[:15]
+                f"from:{acct}" for acct in config.TWITTER_WATCH_ACCOUNTS[:15]
             )
             query_parts.append(f"({from_clauses})")
         else:
@@ -76,7 +73,7 @@ class TwitterSource(BaseSource):
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 403:
                     logger.warning(
-                        "Twitter API 返回 403: 免费层不支持搜索，需要 Basic 层订阅"
+                        "X API 返回 403：核对权限、额度及访问策略，不能直接判定 Key 无效"
                     )
                 else:
                     logger.warning(f"Twitter API 请求失败: {e}")

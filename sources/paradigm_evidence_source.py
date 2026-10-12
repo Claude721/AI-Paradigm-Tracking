@@ -23,13 +23,15 @@ from paradigms.models import (
 )
 from sources.reddit_evidence_source import RedditEvidenceClient
 from sources.social_web_search_source import SocialWebSearchClient
+from paradigms.search_receipts import record_search, reusable_search, search_signature
+from paradigms.async_utils import gather_scoped
 
 logger = logging.getLogger(__name__)
 
 
 class CommunityEvidenceClient:
-    def __init__(self):
-        self.social_web = SocialWebSearchClient()
+    def __init__(self, *, budget_store=None):
+        self.social_web = SocialWebSearchClient(budget_store=budget_store)
         self.reddit = RedditEvidenceClient()
         self._github_lock = asyncio.Lock()
         self._github_last_request_at = 0.0
@@ -37,34 +39,50 @@ class CommunityEvidenceClient:
         self._github_failure_logged = False
 
     async def search(self, candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
+        candidate.community_search_receipts.pop("community_runtime", None)
+        candidate.community_coverage.pop("community_runtime", None)
+        async def execute(provider, operation, client):
+            signature = search_signature(candidate, provider)
+            if reusable_search(candidate, provider, signature):
+                return []  # Evidence already belongs to the candidate snapshot.
+            previous = candidate.community_search_receipts.get(provider, {})
+            history = list(previous.get("failure_history", []))
+            if previous.get("status") in {"failed", "not_executed", "not_configured"}:
+                history.append({key: previous.get(key, "") for key in ("status", "reason", "input_signature")})
+            record_search(candidate, provider, "not_executed", reason="query_pending")
+            batch = []
+            try:
+                batch = await operation(client, candidate)
+                batch = [item for item in batch if not (date := _evidence_datetime(item.published_at)) or date <= research_now()]
+                batch = list({item.fingerprint: item for item in batch}.values())
+                candidate.evidence.extend(batch)
+            except asyncio.CancelledError:
+                record_search(candidate, provider, "not_executed", reason="query_interrupted")
+                raise
+            except Exception as exc:
+                receipt = candidate.community_search_receipts.get(provider, {})
+                if receipt.get("status") != "failed":
+                    record_search(candidate, provider, "failed", reason=type(exc).__name__)
+                candidate.community_coverage[provider] = f"查询异常：{type(exc).__name__}；待重试，不代表零讨论"
+                batch = []
+            finally:
+                receipt = candidate.community_search_receipts[provider]
+                if receipt["status"] == "completed":
+                    receipt["result_count"] = len(batch)
+                receipt["input_signature"] = signature
+                receipt["evidence_fingerprints"] = [item.fingerprint for item in batch]
+                receipt["failure_history"] = history
+            return batch
+
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            batches = await asyncio.gather(
-                self._github(client, candidate),
-                self._hackernews(client, candidate),
-                self.social_web.search(client, candidate),
-                self.reddit.search(client, candidate),
-                self._x_title_search(client, candidate),
-                return_exceptions=True,
+            batches = await gather_scoped(
+                execute("github", self._github, client),
+                execute("hackernews", self._hackernews, client),
+                execute("tavily_social_web", self.social_web.search, client),
+                execute("reddit_official", self.reddit.search, client),
+                execute("x_official", self._x_title_search, client),
             )
-        results = []
-        for source_name, coverage_key, batch in zip(
-            ("GitHub", "Hacker News", "Tavily", "Reddit", "X"),
-            (
-                "github",
-                "hackernews",
-                "tavily_social_web",
-                "reddit_official",
-                "x_official",
-            ),
-            batches,
-        ):
-            if isinstance(batch, Exception):
-                logger.warning("%s 范式证据搜索失败: %s", source_name, batch)
-                candidate.community_coverage[coverage_key] = (
-                    f"已尝试，但查询异常：{type(batch).__name__}"
-                )
-                continue
-            results.extend(batch)
+        results = [item for batch in batches for item in batch]
         return [item for item in results if not (date := _evidence_datetime(item.published_at)) or date <= research_now()]
 
     def coverage(self) -> dict[str, str]:
@@ -74,7 +92,7 @@ class CommunityEvidenceClient:
                 if config.GITHUB_TOKEN
                 else "未配置 GitHub Token；本轮不调用匿名 Search API"
             ),
-            "hackernews": "已尝试 Algolia 搜索；单次失败会降级",
+            "hackernews": "Algolia 搜索执行结果以逐候选回执为准；失败保留待重试",
             "tavily_social_web": (
                 "已配置并尝试公开网页索引搜索 X、Reddit 与小红书；结果非平台全量"
                 if config.TAVILY_SOCIAL_SEARCH_ENABLED and config.TAVILY_API_KEY
@@ -87,8 +105,8 @@ class CommunityEvidenceClient:
             ),
             "x_official": (
                 "已配置 X Recent Search 并尝试获取公开帖子和互动量"
-                if config.TWITTER_BEARER_TOKEN
-                else "未配置 X API；不得把未检出解释为零讨论"
+                if config.KOL_X_SOURCE_ENABLED and config.TWITTER_BEARER_TOKEN
+                else "X 官方 API 已关闭或未配置；不得把未检出解释为零讨论"
             ),
         }
 
@@ -96,6 +114,8 @@ class CommunityEvidenceClient:
         self, client: httpx.AsyncClient, candidate: ParadigmCandidate
     ) -> list[TechnicalEvidence]:
         if not config.GITHUB_TOKEN or self._github_circuit_open:
+            record_search(candidate, "github", "not_executed" if self._github_circuit_open else "disabled",
+                          reason="provider_circuit_open" if self._github_circuit_open else "no_token")
             if self._github_circuit_open:
                 candidate.community_coverage["github"] = (
                     "此前 GitHub Search 已鉴权/限流失败，本轮熔断后未继续查询"
@@ -120,6 +140,9 @@ class CommunityEvidenceClient:
         # GitHub Search API 有独立且明显低于 Core API 的分钟限额。所有候选共享
         # 一个串行节流器，避免并发候选在 Actions 中触发 secondary rate limit。
         async with self._github_lock:
+            if self._github_circuit_open:
+                record_search(candidate, "github", "not_executed", reason="provider_circuit_open")
+                return []
             elapsed = time.monotonic() - self._github_last_request_at
             if elapsed < 2.2:
                 await asyncio.sleep(2.2 - elapsed)
@@ -134,6 +157,8 @@ class CommunityEvidenceClient:
                 },
             )
             self._github_last_request_at = time.monotonic()
+            if response.status_code in {401, 403, 429}:
+                self._github_circuit_open = True
         if response.status_code >= 400:
             if response.status_code in {401, 403, 429}:
                 self._github_circuit_open = True
@@ -148,7 +173,11 @@ class CommunityEvidenceClient:
             candidate.community_coverage["github"] = (
                 f"已尝试 GitHub Search，但返回 HTTP {response.status_code}"
             )
+            record_search(candidate, "github", "failed", reason=f"http_{response.status_code}")
             return []
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            raise ValueError("Invalid GitHub search response")
         results = []
         official_repositories = {
             str(url).rstrip("/").removeprefix("https://github.com/").casefold()
@@ -156,7 +185,7 @@ class CommunityEvidenceClient:
             for url in (evidence.raw.get("github_repositories") or [])
             if url
         }
-        for repo in response.json().get("items", []):
+        for repo in payload["items"]:
             if not _is_relevant_repository(candidate, repo):
                 continue
             updated_at = str(repo.get("updated_at", ""))
@@ -191,6 +220,8 @@ class CommunityEvidenceClient:
         candidate.community_coverage["github"] = (
             f"已执行 GitHub Search；相关实现/仓库命中 {len(results)} 条"
         )
+        record_search(candidate, "github", "failed" if payload.get("incomplete_results") else "completed",
+                      reason="incomplete_search_response" if payload.get("incomplete_results") else "", count=len(results))
         return results
 
     async def _hackernews(
@@ -213,9 +244,13 @@ class CommunityEvidenceClient:
             candidate.community_coverage["hackernews"] = (
                 f"已尝试 Hacker News 搜索，但返回 HTTP {response.status_code}"
             )
+            record_search(candidate, "hackernews", "failed", reason=f"http_{response.status_code}")
             return []
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("hits"), list):
+            raise ValueError("Invalid Hacker News search response")
         results = []
-        for hit in response.json().get("hits", []):
+        for hit in payload["hits"]:
             if not _is_related(candidate, hit.get("title") or ""):
                 continue
             object_id = hit.get("objectID", "")
@@ -233,19 +268,24 @@ class CommunityEvidenceClient:
                         "comments": hit.get("num_comments", 0) or 0,
                     },
                     identifiers={"hackernews": str(object_id)},
-                    raw={"relationship": "exact_or_mechanism_title_match"},
+                    raw={"relationship": "exact_or_mechanism_title_match", "ephemeral_content": True, "social_platform": "hackernews"},
                 )
             )
         candidate.community_coverage["hackernews"] = (
             f"已执行 Hacker News 搜索；相关讨论命中 {len(results)} 条"
         )
+        record_search(candidate, "hackernews", "completed", count=len(results))
         return results
 
     async def _x_title_search(
         self, client: httpx.AsyncClient, candidate: ParadigmCandidate
     ) -> list[TechnicalEvidence]:
         """可选的精确标题搜索；同时提供作者本人公开发布时的身份线索。"""
-        if not config.TWITTER_BEARER_TOKEN:
+        if not config.KOL_X_SOURCE_ENABLED or not config.TWITTER_BEARER_TOKEN:
+            record_search(candidate, "x_official", "not_configured" if config.KOL_X_SOURCE_ENABLED else "disabled", reason="no_token" if config.KOL_X_SOURCE_ENABLED else "disabled_by_config")
+            candidate.community_coverage["x_official"] = (
+                "X 官方 API 已关闭或未配置；未执行标题搜索，不代表零讨论"
+            )
             return []
         lead_title = next(
             (
@@ -257,6 +297,7 @@ class CommunityEvidenceClient:
         )
         phrase = re.sub(r"[\"\n\r]+", " ", lead_title).strip()[:180]
         if not phrase:
+            record_search(candidate, "x_official", "failed", reason="missing_search_identity")
             return []
         response = await client.get(
             "https://api.x.com/2/tweets/search/recent",
@@ -274,8 +315,11 @@ class CommunityEvidenceClient:
             candidate.community_coverage["x_official"] = (
                 f"已尝试 X Recent Search，但返回 HTTP {response.status_code}"
             )
+            record_search(candidate, "x_official", "failed", reason=f"http_{response.status_code}")
             return []
         payload = response.json()
+        if not isinstance(payload, dict) or payload.get("errors") or not isinstance(payload.get("data", []), list) or ("data" not in payload and (payload.get("meta") or {}).get("result_count") != 0):
+            raise ValueError("Invalid X search response")
         users = {
             str(user.get("id", "")): user
             for user in (payload.get("includes") or {}).get("users", [])
@@ -319,6 +363,8 @@ class CommunityEvidenceClient:
                             else "exact_work_title_match"
                         ),
                         "social_author_name": str(user.get("name", "")),
+                        "ephemeral_content": True,
+                        "social_platform": "x",
                         "social_bio": str(user.get("description", "")),
                         "social_profile_url": (
                             f"https://x.com/{username}" if username else ""
@@ -329,6 +375,7 @@ class CommunityEvidenceClient:
         candidate.community_coverage["x_official"] = (
             f"已执行 X 精确标题搜索；相关帖子命中 {len(results)} 条"
         )
+        record_search(candidate, "x_official", "completed", count=len(results))
         return results
 
 

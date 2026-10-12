@@ -1,12 +1,14 @@
 # AI 技术范式雷达：GitHub 云端自动化上线清单
 
-## 当前交付与恢复契约（2026-10-09）
+## 当前交付与恢复契约（2026-10-12）
 
 正式报告必须同时满足研究任务与已配置信源覆盖闭合；预算延期不是结论。任一待分析、待深挖、执行错误或人物/URL 缺口使主流程非零退出，只保存内部检查点与审计，不生成或发送阶段性 memo。完整空雷达仅表示原窗口、约定范围内没有合格路线。旧阶段性 outbox 隔离，不覆盖较新的候选；`--report` 只能续投合规任务或重建已闭合的历史报告。
 
-schema v8 新增 `research_campaigns`、`campaign_work`、`research_attempts`、`research_stage_cache`，保留 v7 的来源/执行边界。恢复 v1–v7 时在下载副本上迁移，保留原点、候选、交付历史，不清库。v8 缺表、无效批次/任务身份、损坏领域 payload 会拒绝恢复并尝试较早健康快照。回退时选择升级前兼容状态；不能让旧代码写新库，也不能丢掉升级后已确认的交付。
+当前 schema v9：保留 v8 的 `research_campaigns`、`campaign_work`、`research_attempts`、`research_stage_cache` 及 v7 来源/执行边界，新增 `provider_credit_periods` / `provider_credit_requests`。恢复 v1–v8 在下载副本迁移，保留原点、候选、交付历史，不清库；v9 缺表、损坏额度账本、无效批次/任务身份或领域 payload 拒绝恢复并尝试较早健康快照。回退需指定兼容状态并对账最新交付与费用，不能让旧代码写新库，不能靠旧 artifact 遗失已确认交付/扣费。
 
-首跑冻结研究窗口、seed、发现快照和历史刷新清单。未完成时下一次正常运行自动恢复该批次；发现仅重试失败来源，已检查的历史路线不每次重复入队。失败来源配置被删掉或改成未配置不能获得覆盖完成凭据。原窗口之后的发布与指标观测不能倒填为本期事件。已有历史 backlog 仍进入清单，不能缩分母制造闭合；有故障的具体请求/入口不会因数量占比较小而变成完成。
+`TAVILY_MONTHLY_CREDIT_LIMIT=1000` 默认启用月度保护，`0` 明确关闭它。生产进程先查询账户真实 UTC 月份用量，basic 请求前在 SQLite 原子预留，未知扣费不退款；账本随状态上传/恢复，额度或用量未知使对应候选 pending，不能假称零讨论或自动扩支出。它不是同账户所有客户端的原子费用保证，提供方计数延迟/旧状态回退仍需 PAYG 关闭或账户硬限额。独立 Smoke/信源样本不恢复生产账本，先 `/usage` 再最多一个付费搜索，仍须明确授权。
+
+首跑冻结研究窗口、seed、发现快照和历史刷新清单。未完成时下一次正常运行自动恢复该批次；发现重试失败或解析契约已变化的来源，已检查的历史路线不每次重复入队。公开入口/查询/窗口的 scope 签名与适配器契约签名分离：同一 scope 下修复解析器可重新核验，不能删除失败来源、改成未配置或变更原窗口获得覆盖完成凭据。旧快照没有独立 scope 时，官方入口须有完全一致的逐页面清单及已记录窗口，数量相等不能代替证明。原窗口之后的发布与指标观测不能倒填为本期事件。已有历史 backlog 仍进入清单，不能缩分母制造闭合；有故障的具体请求/入口不会因数量占比较小而变成完成。
 
 `python main.py --resume-research` 严格只恢复活动批次，不建新窗口；`--expected-campaign-id ID` 额外校验身份，不匹配在研究/续投前失败。Actions 的 `resume_campaign_id` 用于同一控制，必须同时 `smoke_only=false`、`reset_state=false`。关闭或更改窗口不会改变已经创建的批次。交付确认后才能建立新窗口；成功恢复旧 outbox 后仍先上传新状态，再独立排队新研究，不能叠在一个 90 分钟进程。
 
@@ -16,7 +18,9 @@ schema v8 新增 `research_campaigns`、`campaign_work`、`research_attempts`、
 
 模型请求耗时按阶段记录，请求秒数之和因并发可能超过墙上时间。预算取消仍传播，并记录 `usage_reported=false`；取消客户端等待不证明服务端没有执行或收费。未知用量会阻止自动预算续跑，不能把原先只有 86 条成功返回记录视为全部付费调用。模型/SDK版本、思考模式和请求参数未改变。
 
-OpenReview 现在按固定窗口、venue、query 和页大小保存已转换的一手证据与分页位置；先提交健康页快照，再登记 query 完成。中途 429/取消不丢失前页；同批次续跑只补尾页，完成的零命中 query 同样有回执。普通官方页面和其他索引尚未全部具备页级恢复，不能把这项修复描述为所有来源都不重复请求。
+OpenReview 现在按固定窗口、venue、query 和页大小保存已转换的一手证据与分页位置；先提交健康页快照，再登记 query 完成。中途 429/取消不丢失前页；同批次续跑只补尾页，完成的零命中 query 同样有回执。官方详情新增同窗口只增不减清单与逐 URL 的正文/执行回执，先保存结果再暴露完成；显式 safety limit 的尾项与失败项跨进程保留，已完成详情不重复 HTTP。轻量父清单与独立子记录仍使用 v9 的 `research_stage_cache`，旧 inline v1 清单先保存全部子项再升级 v2；迁移失败保留原父快照。目录仍须重新核验，其他来源也未全部具备页级恢复，不宣称全来源不重复请求。
+
+NYU 书目回执与详情按当前策略配对恢复，不再每次重置已核验条目；旧策略或没有下游结果仍重开。正文先提交，书目核验后确认；上游确认失败可从已保存正文补齐而不重抓，未尝试/身份不匹配记录仍阻断闭合。该恢复使用原状态，不要求 reset，也不自动启用额外 OpenAlex 搜索或放大请求额度。
 
 ## 逐入口信源验收（先于完整研究）
 
@@ -24,9 +28,9 @@ OpenReview 现在按固定窗口、venue、query 和页大小保存已转换的�
 
 独立 CLI 在请求前仍复用零网络配置语法检查，不要求模型或 SMTP 密钥；`flase` 等无效开关、非法入口或越界整数不会被静默解析为关闭/默认值。
 
-在 `paradigm-radar-audit-*` 中下载 `source_audit_latest.json`、`source_audit_latest.md` 和 `source_audit.log`。HTTP 200 登录页、解析空索引、错误 JSON、详情失败都会明确失败；原始正文、查询凭据和生产数据库不进入验收制品。手动 `source_platform_checks` 默认 false；只有显式 true 才额外授权每个已启用 Tavily/X/Semantic Scholar/已批准 Reddit 一次最小请求（Reddit 另需 OAuth），Tavily/X 可能消耗额度；不调用研究模型、不启用关闭的平台、不自动增加套餐/支出。缺少凭据、失败/未测试/未执行均阻止验收完成；这不是研究故障告警，也不发失败邮件。即使全部样本通过，`campaign_coverage_complete` 仍是 false，单页不能证明生产分页/研究闭合。完整操作见 [逐入口验收](SOURCE_ACCEPTANCE.md) 与 [Key 复验指南](SOURCE_API_KEY_VERIFICATION.md)。
+在 `paradigm-radar-audit-*` 中下载 `source_audit_latest.json`、`source_audit_latest.md` 和 `source_audit.log`。HTTP 200 登录页、解析空索引、错误 JSON、详情失败都会明确失败；原始正文、查询凭据和生产数据库不进入验收制品。手动 `source_platform_checks` 默认 false；显式 true 才授权已启用平台的最小协议样本：Tavily 最多一次 basic 搜索，月度保护开启时先只读账户用量；X/Semantic Scholar 各一次，已批准 Reddit 先 OAuth 再一次搜索。Tavily/X 可能消耗额度，不调用研究模型、不启用关闭的平台、不自动加钱。缺凭据、失败/未测试/未执行阻止验收完成，不发故障邮件。即使样本全通过，`campaign_coverage_complete` 仍为 false，不证明生产全分页/研究闭合。见 [逐入口验收](SOURCE_ACCEPTANCE.md) 与 [Key 复验指南](SOURCE_API_KEY_VERIFICATION.md)。
 
-2026-10-10 JSON v2 记录请求耗时/传输错误、访问挑战与保守归因；401、403、429、套餐额度和配置未注入分开。`scripts/review_source_audits.py` 可离线合并按时间排序的多份制品，保持全部 scope 身份，不估计长期 SLA。适配器/目录规则变化会使该源旧发现回执失效，不删除批次历史任务；书目缺少一手链接仍阻止完成。代码执行期间发生修改也不能生成验收完成证明。
+2026-10-10 后续 JSON v3 增加恢复尝试号/响应类型；OpenReview 公开接口 3.1 秒共享间隔，普通短 Retry-After 可在原预算内整轮该主机恢复一次，挑战/未知/长等待/重复限流继续熔断。控制台逐项诊断且失败退出前写 Step Summary。旧 v2 制品仍可用 `scripts/review_source_audits.py` 复核，scope/失败账本保留，不估计长期 SLA。适配器变化使该源旧发现回执失效，不删任务，书目缺一手链接仍阻止完成。详情见 [最新云端复核](RUN_38027283680_SOURCE_REVIEW.md)。
 
 ## 有界自动预算续跑（默认关闭）
 
@@ -57,7 +61,7 @@ OpenReview 现在按固定窗口、venue、query 和页大小保存已转换的�
 - 研究检查点、报告渲染和邮件投递已经解耦。研究完成后先写入持久化 outbox；报告或 SMTP 失败不会撤销已完成研究，也不会把该报告登记成已成功交付。缺少当前输入契约的冻结快照，或完成内置修订后仍违反确定性交付质量契约的制品会立即隔离；网络、超时等其他渲染失败默认累计 3 次后隔离，并把候选原子退回 `pending_deep`。隔离记录不再阻塞后续研究。SMTP 失败仍保留已验证报告并让必需邮件任务失败。成功续投旧 outbox 后当前进程安全退出，云端在新状态 artifact 上传成功后自动排队第二个完整研究 run；若旧任务被隔离，当前进程直接继续新研究。若本轮新生成的报告被隔离，状态 artifact 仍会保存，但当前 Workflow 必须失败，不能把未完成交付显示为绿色；下一次运行也不会再被该坏任务阻塞。
 - 报告若包含英文长段、评分表、字段拼装、绝对化“新范式”宣称、缺少关键人物/公开检索记录或缺少任一路线的一手链接，会先自动重写一次；仍不合格则任务失败且不发送邮件。人物名会先排除邮箱、URL、TeX/版式残片和拼接联系方式；OpenAlex 同名结果必须由当前论文题目交叉核验，只有具备最低背景、联系入口检索记录和直接身份锚点/当前工作对齐的人物才进入确定性索引。人物与原文索引由结构化证据确定性生成，不依赖模型抄写；全文每一个 HTTP(S) URL 都必须原样来自证据或人物档案，一个有效原文不能掩盖另一个猜测链接。
 - 成功邮件除研究 Memo 外，还会附带本轮结构化筛选审计和运行日志；审计记录信源返回量、筛选理由及各阶段 token 用量，不保存 prompt、模型正文或私有推理。
-- 去重数据库会在生产运行结束后以 `always()` 语义保存为私有 Actions artifact，包括报告/SMTP 失败后留下的研究检查点与 outbox。当前 schema v8 除 SQLite `quick_check`、表/字段迁移、领域 JSON 与 fingerprint/key 核验外，还会检查来源/执行检查点一致性，以及活动 outbox 是否满足当前人物/一手来源输入契约；不可再交付的旧任务在迁移时隔离并把候选退回深挖。证据在写库事务之前逐条执行与恢复路径一致的领域回环校验，结构不合法的记录按来源隔离并把本轮计入研究积压，健康同批记录仍会提交。最新 artifact 即使数据库页完整、但领域 payload 已损坏，也会被拒绝并继续尝试更早的不可变快照。恢复成功后会执行 `python main.py --inspect-state`，在日志中输出不含候选正文和 Secret 的队列计数、截断 key、失败类型及尝试次数。除非手动勾选 `reset_state=true`，所有快照均缺失、损坏或不兼容都会 fail closed，不会静默冷启动。
+- 去重数据库会在生产运行结束后以 `always()` 语义保存为私有 Actions artifact，包括报告/SMTP 失败后留下的研究检查点与 outbox。当前 schema v9 除 SQLite `quick_check`、表/字段迁移、领域 JSON 与 fingerprint/key 核验外，还会检查额度账本、来源/执行检查点一致性，以及活动 outbox 是否满足当前人物/一手来源输入契约；不可再交付的旧任务在迁移时隔离并把候选退回深挖。证据在写库事务之前逐条执行与恢复路径一致的领域回环校验，结构不合法的记录按来源隔离并把本轮计入研究积压，健康同批记录仍会提交。最新 artifact 即使数据库页完整、但领域 payload 已损坏，也会被拒绝并继续尝试更早的不可变快照。恢复成功后会执行 `python main.py --inspect-state`，在日志中输出不含候选正文和 Secret 的队列计数、截断 key、失败类型及尝试次数。除非手动勾选 `reset_state=true`，所有快照均缺失、损坏或不兼容都会 fail closed，不会静默冷启动。
 - 工作流先在清空生产配置、拒绝网络和忽略 `.env` 的子进程中运行完整离线单元测试、无第三方包的失败提醒导入检查与静态编译，再接触生产状态和真实接口。任一普通生产步骤失败时，最后的 `always() && failure()` 步骤会尝试发送独立失败提醒，并指出首个失败步骤、运行 commit 与离线失败用例；不会再把回归测试失败误报成研究主流程失败。GitHub 直接取消整个 job、Runner 宕机或达到 90 分钟硬超时时，任何后置步骤都无法保证执行，因此必须依靠软预算主动收尾。正式报告必须通过完整研究闸门：待分析、待深挖、执行异常、人物/链接缺口或已配置召回入口未闭合时，主流程非零退出，保存检查点但不生成/发送报告。仅在研究与覆盖均闭合后，0 条交付才是本期约定范围内的有效空结论。
 - `logs/pipeline_result.json` 区分 `fresh_research_executed` 与 `fresh_research_completed`：后者只有在本轮确实执行研究且 `research_incomplete=false`、`coverage_incomplete=false` 时为真；恢复旧邮件不算新研究；未闭合运行写入 `result_kind=research_blocked` 和 `delivery_blocking_reasons`，并明确失败。审计另含原点/深挖队列运行前后总量、净变化、最长待办龄，以及本期发布日期原点与深挖路线各自的计划/完成量；本期完成为零时检查 `current_window_origin_service` 与 `current_window_deep_service` 事件，区分被历史积压饿死和技术审查未通过。净增长需要结合实际来源到达量评估，不能只以 Workflow 绿色判断吞吐是否足够。
 
@@ -102,17 +106,22 @@ OpenReview 现在按固定窗口、venue、query 和页大小保存已转换的�
 | `ALIGNMENT_FORUM_SOURCE_ENABLED` | 可选；默认 `true`，使用公开官方 RSS |
 | `KOL_SOURCE_ENABLED` | 可选；默认 `true`，读取代码内手工核验的个人 Feed |
 | `KOL_CUSTOM_FEED_URLS` | 可选自定义 Feed；因身份未内置核验，默认只作二次解读 |
-| `KOL_X_SOURCE_ENABLED` | 可选；默认 `true`，但只有配置 X Bearer Token 才读取内置 handle 的近期短文 |
+| `KOL_X_SOURCE_ENABLED` | 可选；默认 `false`。显式 `true` 且配置 Bearer Token 才调用 KOL/社区标题搜索/Smoke；既有 `true` Variable 需由所有者改为 `false` |
+| `TAVILY_SOCIAL_SEARCH_ENABLED` | 可选；默认 true，正式网页索引开关；本轮补齐 Workflow 注入，免费与否需核对提供方套餐 |
+| `TAVILY_SOCIAL_SEARCH_DOMAINS` | 可选；平台 Smoke 样本域名；正式组合检索用 `TAVILY_DISCOVERY_DOMAINS`，不是全 X API |
 | `RESEARCH_WATCHLIST_MODE` | 推荐 `merge`；自定义值追加到仓库内置目录，只有明确需要时才用 `replace` |
 | `PRIORITY_RESEARCH_PAGES` | 可选的额外官方研究索引；留空使用内置海内外目录，追加页面不会自动成为权威背书 |
 | `PRIORITY_RESEARCH_LINK_SAFETY_LIMIT` | 官方入口 HTTP 抓取熔断；默认 `0`，读取日期窗口内全部候选链接 |
 | `PRIORITY_RESEARCH_CONCURRENCY` | 官方研究页并发数，默认 `6`，不建议超过 `12` |
+| `PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED` | 默认 `false`；显式开启才用 OpenAlex 补无标识书目，需已配置 Key；关闭时未解析项仍阻断覆盖 |
+| `PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT` | 每个生产进程新增身份搜索上限，默认 `8`，范围 `1`–`100`；成功身份随数据库续跑，不是月度费用上限 |
 | `ESTABLISHED_RESEARCH_ORGANIZATIONS` | 可选的额外已核验组织/具名实验室别名；禁止填整所大学和歧义短词 |
 | `MONITORED_RESEARCH_ORGANIZATIONS` | 可选的额外监测组织；只增加关注，不因品牌自动放行 |
 | `PRIORITY_RESEARCHERS` | 可选的额外重点研究者姓名；必须与公开主页或学术 ID 联合核验 |
 | `REDDIT_API_ACCESS_APPROVED` | 只有收到 Reddit 批准且用途符合许可时填 `true`；否则保持空或 `false` |
 | `REDDIT_USER_AGENT` | 例如 `python:ai-paradigm-radar:v1.0 (by /u/你的用户名)`；不含密钥，可放 Variable |
-| `TAVILY_REQUEST_SAFETY_LIMIT` | Tavily credit 熔断；默认 `0`，搜索全部通过 Rubric 的深挖候选 |
+| `TAVILY_REQUEST_SAFETY_LIMIT` | 每进程请求熔断；默认 `0` 不限，不等于关闭月度保护 |
+| `TAVILY_MONTHLY_CREDIT_LIMIT` | 默认 `1000`，非负整数；月度保守 credit 停止线，`0` 明确关闭保护；未知用量不继续 |
 | `TAVILY_DISCOVERY_DOMAINS` | 默认留空执行全网发现；只有要限制 Tavily 站点时才填逗号分隔域名 |
 | `PARADIGM_RECALL_OVERLAP_DAYS` | 推荐 `30`；只用于 Technical Report、重点研究者和官方研究入口的重叠回补，普通发现与交付新鲜度仍按 `SOURCING_LOOKBACK_DAYS` |
 | `PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED` | 推荐 `true`；启用与领域术语独立的重点研究者 arXiv 召回车道 |
@@ -158,9 +167,9 @@ GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留�
 3. 点击 `Run workflow`，第一次选择 `7` 天，保持 `smoke_only=true`。精确 arXiv ID 留空，此时 `reset_state` 不影响结果。
 4. 确认“配置体检”和“小成本真实接口冒烟”完成，并下载 `paradigm-radar-audit-*` 查看 `smoke_test_latest.json`。文件中的 `contract_version` 可确认线上使用的是哪版探针；`failure_kind=transient_availability` 表示第三方临时限流/超时，显示为 `degraded` 且 Workflow 可通过，但风险不会被隐藏；`multi_endpoint_unavailable` 表示某个多入口能力的有界样本全部失败；配置、真实鉴权或响应契约失败才显示为 `failed`。Smoke 不覆盖生产解析器与 SQLite 回环，必须继续执行下一步完整运行。
 5. 先执行 `source_check_only=true`、`reset_state=false` 的逐入口验收（此时 `smoke_only` 被忽略）。下载 source audit，逐项处理失败/未执行/需单独授权项。样本通过不代表全分页闭合，也不能掩盖云端与本地 CDN 差异。
-6. 经完整研究/邮件授权后，再把 `source_check_only` 与 `smoke_only` 都改成 `false`。已有历史状态或正在修复失败任务时保持 `reset_state=false`，让 schema v8 迁移和 outbox 恢复接管；只有新仓库完全没有可用 artifact、或人工确认要建立全新基线时才使用 `reset_state=true`。
+6. 经完整研究/邮件授权后，再把 `source_check_only` 与 `smoke_only` 都改成 `false`。已有历史状态或正在修复失败任务时保持 `reset_state=false`，让 schema v9 迁移和 outbox 恢复接管；只有新仓库完全没有可用 artifact、或人工确认要建立全新基线时才使用 `reset_state=true`。
 7. 下载审计，先确认固定批次任务全部闭合、覆盖完成且报告契约通过，再确认邮件和状态保存成功。预算未闭合会失败并保留状态；不要仅以 Workflow 绿色验收。
-7. 确认收件箱收到邮件及运行审计附件，并在该次运行的 Artifacts 中看到报告、`paradigm-radar-state-<run_id>` 与 `paradigm-radar-audit-*`。状态按运行保存为不可变快照；下一次任务恢复最近一份未过期快照，同时兼容旧的 `paradigm-radar-state` 名称。
+8. 确认收件箱收到邮件及运行审计附件，并在该次运行的 Artifacts 中看到报告、`paradigm-radar-state-<run_id>` 与 `paradigm-radar-audit-*`。状态按运行保存为不可变快照；下一次任务恢复最近一份未过期快照，同时兼容旧的 `paradigm-radar-state` 名称。
 
 首次成功后不需要再保持电脑开机。以后每周五由 GitHub 执行；网页手动运行和定时运行共享同一份去重状态。
 
@@ -177,4 +186,5 @@ GitHub 上通常只需添加 `TAVILY_API_KEY`；`TAVILY_DISCOVERY_DOMAINS` 留�
 - 所有计划研究及已配置信源覆盖均闭合后，没有合格路线可以发送完整空雷达。存在 backlog、执行异常或覆盖缺口时禁止正式报告，不能改写提示、清空统计或把观察池更名来制造完成。失败只保留研究检查点和内部审计，独立故障提醒不附带阶段性研究 memo。
 - GitHub 公共仓库连续 60 天无活动可能停用 scheduled workflow，因此本项目建议使用私有仓库。
 - 修改工作流后，确保更改已经进入默认分支。
+- 2026-10-12：正式研究会原子重开明确社区失败却已终结的旧候选，保留交付历史；只读/信源检查不执行。新版候选有社区执行回执，失败对象阻断综合/交付，健康对象继续；研究状态保存仍先于完成标记，禁止阶段性邮件。ModelBest 分页及 NYU 身份清单使用研究阶段缓存。公开 audit 不隐式获得书目 API 授权，详见 [输入闭合修复](INPUT_CLOSURE_REPAIR_20261012.md)。
 - 工作流使用 Node 24 版本的 `checkout@v6`、`setup-python@v6` 与 `upload-artifact@v7`；任务不执行 git push，因此 checkout 不持久化临时凭据。

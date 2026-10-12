@@ -9,6 +9,7 @@ import json
 import logging
 from difflib import SequenceMatcher
 
+import config
 from sources.paradigm_evidence_source import CommunityEvidenceClient
 from sources.semantic_scholar_source import SemanticScholarClient
 from sources.researcher_profile_source import ResearcherProfileClient
@@ -26,15 +27,16 @@ from .models import (
 )
 from .researcher_identity import merge_researcher_profiles
 from .async_utils import gather_scoped
+from .search_receipts import incomplete_searches, record_search
 
 logger = logging.getLogger(__name__)
 
 
 class EvidenceEnricher:
-    def __init__(self, concurrency: int = 4):
+    def __init__(self, concurrency: int = 4, *, budget_store=None):
         self.concurrency = max(concurrency, 1)
         self.semantic_scholar = SemanticScholarClient()
-        self.community = CommunityEvidenceClient()
+        self.community = CommunityEvidenceClient(budget_store=budget_store)
         self.researchers = ResearcherProfileClient()
         self.documents = ArxivDocumentClient()
 
@@ -110,6 +112,7 @@ class EvidenceEnricher:
                     }
                 except Exception as exc:
                     logger.warning("历史范式社区刷新失败 [%s]: %s", candidate.name, exc)
+                    record_search(candidate, "community_runtime", "failed", reason=type(exc).__name__)
                     # CommunityEvidenceClient already isolates ordinary GitHub/
                     # HN/Tavily/Reddit/X failures and records their coverage.
                     # Reaching this boundary means the whole refresh operation
@@ -121,6 +124,11 @@ class EvidenceEnricher:
                 candidate.evidence = _dedupe_evidence(
                     candidate.evidence, route_key=candidate.key
                 )
+                if incomplete_searches(candidate):
+                    # Return the incomplete object, not None (which means a
+                    # successful no-update judgment). The scheduler partitions
+                    # these objects before synthesis or completion receipts.
+                    return candidate
                 changed = False
                 for item in candidate.evidence:
                     prior = previous.get(item.fingerprint)
@@ -169,6 +177,8 @@ class EvidenceEnricher:
         return [item for item in refreshed if item is not None]
 
     async def _external_enrichment(self, candidate: ParadigmCandidate) -> None:
+        candidate.community_search_receipts.pop("community_runtime", None)
+        candidate.community_coverage.pop("community_runtime", None)
         lead = candidate.evidence[0]
         document_coverage = await self.documents.hydrate(lead)
         candidate.community_coverage = {
@@ -179,8 +189,29 @@ class EvidenceEnricher:
             candidate.evidence.append(
                 _official_repository_evidence(lead, str(repository))
             )
+        async def scholarly_enrichment():
+            provider = "semantic_scholar"
+            if not config.SEMANTIC_SCHOLAR_ENABLED:
+                record_search(candidate, provider, "disabled", reason="disabled_by_config")
+                return None, []
+            if not config.SEMANTIC_SCHOLAR_API_KEY:
+                record_search(candidate, provider, "not_configured", reason="no_approved_key")
+                return None, []
+            record_search(candidate, provider, "not_executed", reason="query_pending")
+            try:
+                result = await self.semantic_scholar.enrich_paper(lead)
+                record_search(candidate, provider, "completed", count=int(result[0] is not None))
+                return result
+            except asyncio.CancelledError:
+                record_search(candidate, provider, "not_executed", reason="query_interrupted")
+                raise
+            except Exception as exc:
+                record_search(candidate, provider, "failed", reason=type(exc).__name__)
+                logger.warning("Semantic Scholar 增强失败 [%s]: %s", candidate.name, type(exc).__name__)
+                return None, []
+
         results = await asyncio.gather(
-            self.semantic_scholar.enrich_paper(lead),
+            scholarly_enrichment(),
             self.community.search(candidate),
             return_exceptions=True,
         )
@@ -192,8 +223,6 @@ class EvidenceEnricher:
             ) > 0:
                 candidate.evidence.append(citation_evidence)
             candidate.researchers = _merge_profiles(candidate.researchers, profiles)
-        else:
-            logger.warning("Semantic Scholar 增强失败 [%s]: %s", candidate.name, scholarly)
         if not isinstance(community, Exception):
             candidate.evidence.extend(community)
             candidate.community_coverage = {
@@ -201,7 +230,8 @@ class EvidenceEnricher:
                 **candidate.community_coverage,
             }
         else:
-            logger.warning("社区证据增强失败 [%s]: %s", candidate.name, community)
+            record_search(candidate, "community_runtime", "failed", reason=type(community).__name__)
+            logger.warning("社区证据增强失败 [%s]: %s", candidate.name, type(community).__name__)
             candidate.community_coverage = {
                 **self.community.coverage(),
                 **candidate.community_coverage,
@@ -212,6 +242,8 @@ class EvidenceEnricher:
         candidate.evidence = _dedupe_evidence(
             candidate.evidence, route_key=candidate.key
         )
+        if incomplete_searches(candidate):
+            return  # Never pay for downstream judgments on incomplete inputs.
         # Semantic Scholar 只有在显式启用且配置获批 Key 时才调用。无论其是否
         # 启用，都用当前论文作者建立人物种子，并通过 OpenAlex/ORCID 补齐身份。
         candidate.researchers = await self.researchers.enrich(

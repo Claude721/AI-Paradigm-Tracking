@@ -16,6 +16,7 @@ from paradigms.landscape import (
     openalex_search_plan,
 )
 from paradigms.models import EvidenceType, TechnicalEvidence
+from sources.request_policy import retry_after_seconds, MAX_RETRY_AFTER_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class OpenAlexSource:
         self.result_count = 0
         cutoff = research_now() - timedelta(days=self.lookback_days)
         date_filter = f"from_publication_date:{cutoff.date().isoformat()}"
-        headers = {"User-Agent": "AI-Paradigm-Radar/3.2"}
+        headers = {"User-Agent": "AI-Paradigm-Radar/3.2", "Authorization": f"Bearer {config.OPENALEX_API_KEY}"}
         semaphore = asyncio.Semaphore(self.concurrency)
 
         async def search_one(client: httpx.AsyncClient, query: str) -> list[dict]:
@@ -82,7 +83,6 @@ class OpenAlexSource:
                     response = await self._get_with_backoff(
                         client,
                         {
-                            "api_key": config.OPENALEX_API_KEY,
                             "search": query,
                             "filter": date_filter,
                             # 时间窗已经由 filter 限定，先按检索相关性排序。
@@ -93,7 +93,11 @@ class OpenAlexSource:
                         },
                     )
                     payload = response.json()
-                    page = payload.get("results", [])
+                    if (not isinstance(payload, dict) or not isinstance(payload.get("results"), list)
+                            or not isinstance(payload.get("meta"), dict)
+                            or any(not isinstance(work, dict) or not isinstance(work.get("display_name"), str) for work in payload["results"])):
+                        raise ValueError("Invalid OpenAlex results page")
+                    page = payload["results"]
                     relevant_page = [
                         work
                         for work in page
@@ -108,6 +112,8 @@ class OpenAlexSource:
                     next_cursor = str(
                         (payload.get("meta") or {}).get("next_cursor") or ""
                     )
+                    if page and next_cursor == cursor:
+                        raise ValueError("OpenAlex cursor made no progress")
                     # OpenAlex search 可能把摘要弱命中分页到很深。这里不是固定
                     # Top-K：只有在按相关性排序后连续两页都没有标题/主题强命中
                     # 时才认为该已知路线的有效证据耗尽。
@@ -133,7 +139,7 @@ class OpenAlexSource:
         for query, response in zip(self.searches, responses):
             if isinstance(response, Exception):
                 failed += 1
-                logger.warning("OpenAlex 单个查询失败 [%s]: %s", query, response)
+                logger.warning("OpenAlex 单个查询失败 [%s]: %s", query, type(response).__name__)
                 continue
             self.completed_queries += 1
             evidence.extend(self._parse(response))
@@ -178,11 +184,10 @@ class OpenAlexSource:
                 self.transient_retries += 1
             if attempt < 3:
                 retry_after = response.headers.get("Retry-After", "")
-                try:
-                    delay = float(retry_after)
-                except (TypeError, ValueError):
-                    delay = float(2**attempt)
-                await asyncio.sleep(max(0.5, min(delay, 10.0)))
+                delay = retry_after_seconds(retry_after)
+                if delay is not None and delay > MAX_RETRY_AFTER_SECONDS:
+                    break  # Never turn a long supplier cooldown into an early retry.
+                await asyncio.sleep(max(0.5, delay if delay is not None else float(2**attempt)))
         assert last_response is not None
         last_response.raise_for_status()
         return last_response

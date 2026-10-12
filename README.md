@@ -1,6 +1,6 @@
 # AI 技术范式雷达
 
-> 当前状态（2026-10-10）：V0 工程候选，尚未通过生产验收。最新云端 `9031490` 研究/覆盖未闭合，正确中止报告；补充 state/audit 后已修复刷新版本、预筛批次和取消记账。本地完整入口清单复验：160 项、110 样本通过、8 失败、40 本地缺凭据、2 关闭；531 项离线测试通过。已修复目录/正文适配不等于长期稳定，云端 Key、详细覆盖和真实吞吐仍待验收。没有删源、清 backlog 或恢复阶段性邮件。详见 [入口归因](docs/SOURCE_ACCEPTANCE_20261010.md)、[Key 复验操作](docs/SOURCE_API_KEY_VERIFICATION.md)、[工程体检](docs/PROJECT_HEALTH_REPORT.md)、[容量复核](docs/RUN_37899070924_CAPACITY_REVIEW.md) 与 [研究设计](docs/PARADIGM_RADAR_DESIGN.md)。
+> 当前状态（2026-10-12）：工程候选，仍不是生产 V0。已修复社区/综合检查点、官方详情尾项/续跑签名、NYU 每轮重开健康详情和尝试登记异常跳过同伴；新增 schema v9 的 Tavily credit 预留、启用学术增强的闭合检查与逐条详情恢复。Python 3.11、3.12 各 657 项离线门通过。此前 Qwen 本地 6 条详情解析/恢复和 ModelBest 有界样本通过，不能替代 Runner 全清单与完整研究验收。Z.ai/拒绝访问入口、真实书目与模型吞吐/质量仍有缺口。X、额外书目搜索、自动预算续跑继续默认关闭；未删历史任务、放宽门槛或恢复阶段性邮件。发布前远端基线为 `2f8ed9a`；用户已授权发布与无模型/邮件的信源验收，以及最多一条路线、单次不超过 20 元的研究样本，实际执行须另行记录，完整研究/SMTP 尚未授权。见 [本轮修复与版本边界](docs/INPUT_CLOSURE_REPAIR_20261012.md)、[工程体检](docs/PROJECT_HEALTH_REPORT.md)、[云端复核](docs/RUN_38027283680_SOURCE_REVIEW.md)。
 
 这个项目不再以 GitHub 项目或 Product Hunt 产品为基本单位，而是每周捕捉正在形成的 AI 技术范式，并从技术反向锁定关键研究者。
 
@@ -46,7 +46,7 @@ Product Hunt、普通 GitHub Trending 和产品热榜不再决定候选，只在
 - 发布者背景一般或无法核验时，需要跨来源的有内容讨论、独立复现、产品承接或高关注研究者的二次解读。
 - 作者本人在 X 或个人主页发布工作可用于核验身份、机构与既往轨迹，但不能把自己的宣传转化为“社区已经验证”。
 - 实质二次讨论按“证据 × 当前路线”核验：同一帖子对路线 A 成立，不会因共享 URL 或数据库证据行自动为路线 B 背书；未核验的标题帖、索引页和同名仓库仍只作为线索。
-- Tavily 免费搜索用于发现公开索引的社区页面和独立技术博客；它不是平台全量 API，也不参与声量计分。Reddit OAuth 只有在明确获批后才读取帖子、评论与互动指标。
+- Tavily 网页搜索用于发现公开索引的社区页面和独立技术博客；它不是平台全量 API，也不参与声量计分。默认月度 credit 保护为 1,000，搜索前核验账户用量并持久化预留，未知用量停止搜索；实际套餐与 PAYG 仍须在提供方确认。Reddit OAuth 只有在明确获批后才读取帖子、评论与互动指标。
 - 前沿机构目录区分“主动抓取、已建立、监测、重点研究者”四层；完整名单与官方核验入口见 [前沿机构与研究者 Watchlist](docs/FRONTIER_RESEARCH_WATCHLIST.md)。
 
 Rubric 位于 [`rubrics/paradigm_rubric.json`](rubrics/paradigm_rubric.json)，可长期增删问题、调整 option 权重与阶段阈值。研究池与最终去留不固定取前 100、30 或 16 个；Rubric 分数与回答只进入审计，不进入最终报告。云端单次运行另有墙上时间软预算：它只让任务在 GitHub 硬超时前分批收尾，未处理材料会保留到后续运行，不会被写成 Rubric 淘汰。本期研究、历史更新、历史补课按实际耗时以 6:2:1 权重轮转；空车道可借出余量，有工作的车道保留未服务份额。原点小批次提交后即可深挖，不再等待整个抽取队列耗完预算；原点车道内部保留高信号/普通 1:3 和新增/FIFO 顺序。旧状态中缺少可靠类型来源的“Technical Report”会先按当前保守规则重新核验，不能沿用历史查询标签消耗高优先级预算。总吞吐和真实研究质量仍需生产验收。
@@ -81,6 +81,8 @@ cp .env.example .env
 ```
 
 至少填写 DashScope Key 与 OpenAlex 免费 Key。Semantic Scholar Key 是可选增强项；没有学术邮箱时保持 `SEMANTIC_SCHOLAR_ENABLED=false` 且 Key 留空，程序会完整跳过，不会匿名调用。人物轨迹仍会通过 OpenAlex、ORCID 与已核验个人主页补齐。
+
+Tavily 默认 `TAVILY_MONTHLY_CREDIT_LIMIT=1000`；生产预留账本随 schema v9 状态 artifact 跨运行恢复，不能靠每进程请求上限保护月度费用。`0` 明确关闭这项保护，不表示免费。账本无法原子限制同账户其他客户端或供应商延迟计数，需关闭提供方 PAYG/设置账户硬限额。完整配置见 [配置清单](docs/CONFIGURATION_CHECKLIST.md)。
 
 LessWrong、Alignment Forum 与内置 KOL 博客全部使用公开 RSS/Atom，默认开启且不需要 Secret。目录位于 `research_watchlist.py`：有稳定 Feed 的作者会自动读取；无 Feed 的作者仍保留个人主页与可选 X handle 供身份核验。`TWITTER_BEARER_TOKEN` 未配置时不会请求 X，不影响个人博客召回。
 
@@ -186,8 +188,12 @@ sources/
   social_web_search_source.py
   reddit_evidence_source.py
   priority_research_source.py
+  qwen_catalog.py             限定官方公开目录与详情协议
+  bibliography_resolver.py    默认关闭的书目身份解析
 database/paradigm_store.py
 database/research_campaign.py  固定批次、任务/尝试账本和逐阶段结果缓存
+database/provider_budget.py   跨运行 credit 观察与请求前预留
+tavily_protocol.py            Smoke/生产/验收共享的独立用量协议
 scripts/replay_research.py     无网络容量/恢复回放
 scripts/research_resume.py     默认关闭的有界自动续跑决策
 reports/paradigm_generator.py

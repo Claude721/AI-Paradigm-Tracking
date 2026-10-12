@@ -28,6 +28,7 @@ from paradigms.clustering import (
 )
 from paradigms.discovery import ParadigmDiscovery
 from paradigms.enrichment import EvidenceEnricher
+from paradigms.search_receipts import incomplete_searches
 from paradigms.models import (
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
@@ -72,7 +73,7 @@ class ParadigmOrchestrator:
             ),
             stage_cache=self.store.campaigns,
         )
-        self.enricher = EvidenceEnricher()
+        self.enricher = EvidenceEnricher(budget_store=self.store.provider_budgets)
         self.synthesizer = ParadigmSynthesizer()
         self.trajectory = ResearcherTrajectoryAnalyzer(stage_cache=self.store.campaigns)
         self.deep_concurrency = config.PARADIGM_DEEP_CONCURRENCY
@@ -118,6 +119,8 @@ class ParadigmOrchestrator:
             "report_date": scheduled_date(research_now()),
             "run_budget_seconds": config.PARADIGM_RUN_BUDGET_SECONDS,
         }
+        reopener = getattr(self.store, "reopen_failed_community_judgments", None)
+        stats["community_failed_judgments_reopened"] = reopener() if callable(reopener) else 0
         queue_before = self.store.work_queue_snapshot(reference_time=research_now())
         stats["work_queue_before"] = queue_before
 
@@ -126,7 +129,9 @@ class ParadigmOrchestrator:
             stats["discovery_resumed"] = False
         else:
             from paradigms.completion import discovery_retry_sources
-            retry_sources = discovery_retry_sources(self.campaign.discovery.coverage)
+            retry_planner = getattr(self.discovery, "retry_sources", None)
+            retry_sources = (retry_planner(self.campaign.discovery) if callable(retry_planner)
+                             else discovery_retry_sources(self.campaign.discovery.coverage))
             stats["discovery_resumed"] = True
             stats["discovery_retry_sources"] = sorted(retry_sources)
             batch = await self.discovery.retry(self.campaign.discovery) if retry_sources else self.campaign.discovery
@@ -235,6 +240,7 @@ class ParadigmOrchestrator:
             or official_coverage.get("parse_zero_links")
             or official_coverage.get("detail_failures")
             or official_coverage.get("unresolved_citations")
+            or official_coverage.get("detail_pending")
         )
         run_audit.event(
             "official_page_coverage",
@@ -246,6 +252,7 @@ class ParadigmOrchestrator:
                 f"解析零链接 {official_coverage.get('parse_zero_links', 0)}；"
                 f"详情失败 {official_coverage.get('detail_failures', 0)}；"
                 f"未解析书目 {official_coverage.get('unresolved_citations', 0)}；"
+                f"待处理详情 {official_coverage.get('detail_pending', 0)}；"
                 f"形成原点 {official_coverage.get('evidence', 0)}"
             ),
         )
@@ -1332,7 +1339,8 @@ class ParadigmOrchestrator:
                     for item in values:
                         score_candidate(item)
                     saved = EvidenceEnricher.finalize(copy.deepcopy([
-                        *values, *stable, *failures
+                        *values, *stable, *failures,
+                        *(item for item in budget if item.community_search_receipts),
                     ]))
                     with self.store.transaction():
                         self.store.save_candidates(saved)
@@ -1720,6 +1728,9 @@ class ParadigmOrchestrator:
         execution_deferred: list = []
         concurrency = getattr(self, "deep_concurrency", 1)
         batch_size = max(config.PARADIGM_DEEP_BATCH_SIZE, concurrency)
+        # Only bases committed by this invocation may replace its original CAS
+        # expectation. A foreign/newer write still fails the exact store check.
+        enrichment_bases = {}
 
         def resumable(candidate):
             return _resumable_deep_snapshot(
@@ -1738,9 +1749,11 @@ class ParadigmOrchestrator:
                 return
 
             async def process_batch():
+                search_failed = []
                 cached = {item.key: resumable(item) for item in group}
-                fresh_originals = [item for item in group if cached[item.key] is None]
+                fresh_originals = [enrichment_bases.get(item.key, item) for item in group if cached[item.key] is None]
                 fresh = copy.deepcopy(fresh_originals)
+                originals = {item.key: item for item in fresh_originals}
                 for item in fresh:
                     item.deep_checkpoint_stage = ""
                     item.deep_checkpoint_input_signature = ""
@@ -1749,18 +1762,39 @@ class ParadigmOrchestrator:
                     item.deep_checkpoint_trajectory_signature = ""
                     item.deep_checkpoint_synthesis_rubric = {}
                 if fresh:
-                    values = await self.enricher.run(fresh, supporting)
+                    try:
+                        values = await self.enricher.run(fresh, supporting)
+                    finally:
+                        # Provider receipts/results survive cancellation before
+                        # synthesis; the candidate remains an executable task.
+                        store = getattr(self, "store", None)
+                        checkpoint = getattr(store, "save_enrichment_checkpoint", None)
+                        saver = getattr(store, "save_candidates", None)
+                        snapshots = [EvidenceEnricher.finalize([copy.deepcopy(item)])[0]
+                                     for item in fresh if item.community_search_receipts]
+                        for snapshot in snapshots:
+                            snapshot.status = "pending_deep"
+                        for snapshot in snapshots:
+                            if checkpoint is not None:
+                                base = checkpoint(originals[snapshot.key], snapshot)
+                                originals[snapshot.key] = base
+                                enrichment_bases[snapshot.key] = base
+                            elif saver is not None:
+                                saver([snapshot])
                     _validate_candidate_stage_output(
                         fresh, values, "external_enrichment"
                     )
-                    values = await self.synthesizer.run(values)
+                    search_failed = [item for item in values if incomplete_searches(item)]
+                    values = [item for item in values if not incomplete_searches(item)]
+                    fresh = [item for item in fresh if not incomplete_searches(item)]
+                    cached.update({item.key: item for item in search_failed})
+                    values = await self.synthesizer.run(values) if values else []
                     _validate_candidate_stage_output(
                         fresh, values, "paradigm_synthesis"
                     )
                     saver = getattr(
                         getattr(self, "store", None), "save_synthesized_checkpoint", None
                     )
-                    originals = {item.key: item for item in fresh_originals}
                     for candidate in values:
                         if (
                             saver is None
@@ -1792,6 +1826,7 @@ class ParadigmOrchestrator:
                     cached.update({item.key: item for item in values})
                 trajectory_inputs = [
                     cached[item.key] for item in group
+                    if item.key not in {value.key for value in search_failed}
                     if cached[item.key].deep_checkpoint_stage != "research_complete"
                 ]
                 before_trajectory = {
@@ -1835,10 +1870,11 @@ class ParadigmOrchestrator:
                         saved.deep_checkpoint_synthesis_rubric.copy()
                     )
                 by_key = {item.key: item for item in trajectory_values}
-                return [by_key.get(item.key, cached[item.key]) for item in group]
+                return ([by_key.get(item.key, cached[item.key]) for item in group
+                         if item.key not in {value.key for value in search_failed}], search_failed)
 
             try:
-                values = await asyncio.wait_for(
+                values, search_failed = await asyncio.wait_for(
                     process_batch(), timeout=remaining
                 )
             except asyncio.TimeoutError:
@@ -1871,6 +1907,11 @@ class ParadigmOrchestrator:
                 )
                 execution_deferred.append(failed)
                 return
+            for candidate in search_failed:
+                candidate.execution_failure_count += 1
+                candidate.last_execution_failure_at = datetime.now(timezone.utc).isoformat()
+                _record_deferred_candidate(candidate, "社区查询未闭合：" + ", ".join(incomplete_searches(candidate)))
+                execution_deferred.append(EvidenceEnricher.finalize([candidate])[0])
             for candidate in values:
                 candidate.execution_failure_count = 0
                 candidate.last_execution_failure_at = ""
@@ -1924,6 +1965,8 @@ class ParadigmOrchestrator:
                     "community_refresh",
                     allow_subset=True,
                 )
+                search_failed = [item for item in candidate_batch if incomplete_searches(item)]
+                values = [item for item in values if not incomplete_searches(item)]
                 if values:
                     changed_inputs = [
                         candidate
@@ -1936,16 +1979,17 @@ class ParadigmOrchestrator:
                         values,
                         "refresh_synthesis",
                     )
-                return values
+                return values, search_failed
 
             try:
-                values = await asyncio.wait_for(
+                values, search_failed = await asyncio.wait_for(
                     process_batch(), timeout=remaining
                 )
             except asyncio.TimeoutError:
                 attempted += len(group)
                 _mark_refresh_attempted(self, group)
-                budget_deferred.extend(group)
+                budget_deferred.extend(_community_progress_snapshot(original, progress)
+                                       for original, progress in zip(group, candidate_batch))
                 return
             except (sqlite3.DatabaseError, OSError):
                 raise
@@ -1962,7 +2006,7 @@ class ParadigmOrchestrator:
                     await process_group(group[midpoint:])
                     return
                 attempted += 1
-                failed = group[0]
+                failed = _community_progress_snapshot(group[0], candidate_batch[0])
                 failed.execution_failure_count += 1
                 failed.last_execution_failure_at = datetime.now(
                     timezone.utc
@@ -1982,6 +2026,11 @@ class ParadigmOrchestrator:
             _mark_refresh_attempted(self, group)
             changed_keys = {candidate.key for candidate in values}
             for candidate in candidate_batch:
+                if candidate.key in {value.key for value in search_failed}:
+                    candidate.execution_failure_count += 1
+                    candidate.last_execution_failure_at = datetime.now(timezone.utc).isoformat()
+                    execution_deferred.append(EvidenceEnricher.finalize([candidate])[0])
+                    continue
                 candidate.execution_failure_count = 0
                 candidate.last_execution_failure_at = ""
                 if candidate.key not in changed_keys:
@@ -2464,6 +2513,19 @@ def _resumable_deep_snapshot(store, candidate, supporting):
     ):
         return None
     return snapshot
+
+
+def _community_progress_snapshot(original, progress):
+    """Retain query progress, never commit an interrupted synthesis's prose."""
+    if not progress.community_search_receipts:
+        return original
+    snapshot = copy.deepcopy(original)
+    snapshot.community_search_receipts = copy.deepcopy(progress.community_search_receipts)
+    snapshot.community_coverage = dict(progress.community_coverage)
+    origins = {item.fingerprint for item in original.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES}
+    snapshot.evidence = list({item.fingerprint: item for item in [*original.evidence, *progress.evidence]
+                              if item.evidence_type not in ORIGIN_EVIDENCE_TYPES or item.fingerprint in origins}.values())
+    return EvidenceEnricher.finalize([snapshot])[0]
 
 
 def _deferred_deep_snapshot(store, candidate, supporting):

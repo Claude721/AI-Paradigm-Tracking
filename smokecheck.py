@@ -230,8 +230,8 @@ async def run_smoke_checks(
         )
     )
     results.append(
-        _skipped("X Recent Search", "未配置 TWITTER_BEARER_TOKEN；运行时正确跳过")
-        if not config.TWITTER_BEARER_TOKEN
+        _skipped("X Recent Search", "X 官方 API 已关闭或未配置；未执行请求")
+        if not config.KOL_X_SOURCE_ENABLED or not config.TWITTER_BEARER_TOKEN
         else await _check(
             "X Recent Search",
             True,
@@ -516,9 +516,8 @@ async def _openalex_works() -> tuple[int, str]:
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.get(
             "https://api.openalex.org/works",
-            headers={"User-Agent": "AI-Paradigm-Radar/3.2"},
+            headers={"User-Agent": "AI-Paradigm-Radar/3.2", "Authorization": f"Bearer {config.OPENALEX_API_KEY}"},
             params={
-                "api_key": config.OPENALEX_API_KEY,
                 # Smoke 只验证 Works 的搜索、日期过滤与响应结构，不拿某条
                 # 前沿路线充当发布门。
                 "search": '"machine learning"',
@@ -540,9 +539,8 @@ async def _openalex_authors() -> tuple[int, str]:
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.get(
             "https://api.openalex.org/authors",
-            headers={"User-Agent": "AI-Paradigm-Radar/3.2"},
+            headers={"User-Agent": "AI-Paradigm-Radar/3.2", "Authorization": f"Bearer {config.OPENALEX_API_KEY}"},
             params={
-                "api_key": config.OPENALEX_API_KEY,
                 "search": "Yann LeCun",
                 "per-page": 2,
             },
@@ -766,6 +764,10 @@ async def _tavily() -> tuple[int, str]:
         if domain in {"x.com", "twitter.com", "reddit.com"}
     ] or ["reddit.com", "x.com"]
     async with httpx.AsyncClient(timeout=30) as client:
+        if config.TAVILY_MONTHLY_CREDIT_LIMIT > 0:
+            from tavily_protocol import read_account_usage
+            if await read_account_usage(client, config.TAVILY_API_KEY) + 1 > config.TAVILY_MONTHLY_CREDIT_LIMIT:
+                raise ValueError("Tavily monthly credit limit reached")
         response = await client.post(
             "https://api.tavily.com/search",
             headers={
@@ -782,15 +784,18 @@ async def _tavily() -> tuple[int, str]:
                 "include_answer": False,
                 "include_raw_content": False,
                 "include_usage": True,
+                "auto_parameters": False,
             },
         )
         response.raise_for_status()
         payload = response.json()
     items = payload.get("results") if isinstance(payload, dict) else None
+    credits = payload.get("usage", {}).get("credits") if isinstance(payload, dict) and isinstance(payload.get("usage"), dict) else None
+    if not isinstance(payload, dict) or payload.get("error") or type(credits) is not int or not 0 <= credits <= 1:
+        raise ValueError("Tavily error/credit usage contract failed")
     if not isinstance(items, list):
         raise ValueError("Tavily 响应缺少 results 列表")
-    usage = payload.get("usage") or {}
-    return len(items), f"本次仅 1 个 basic 请求；usage={usage}"
+    return len(items), f"本次仅 1 个 basic 请求；credits={credits}"
 
 
 async def _semantic_scholar() -> tuple[int, str]:

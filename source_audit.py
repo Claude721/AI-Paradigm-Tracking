@@ -34,10 +34,12 @@ from sources.follow_builders_source import FollowBuildersSource
 from sources.hf_papers_source import HuggingFacePapersSource, HF_PAPERS_API
 from sources.openalex_source import OpenAlexSource, OPENALEX_WORKS_API
 from sources.openreview_source import OpenReviewSource, OPENREVIEW_SEARCH_API, DEFAULT_SEARCHES, _note_matches_venue, _note_matches_query, _search_page
+from sources.request_policy import OPENREVIEW_REQUEST_SPACING_SECONDS, MAX_RETRY_AFTER_SECONDS, retry_after_seconds
 from sources.priority_research_source import PriorityResearchPageSource, _AnchorParser, _discover_index_links
+from sources.bibliography_resolver import BibliographyResolver
 from sources.research_feed_source import ResearchFeedSource
 
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 
 
 def safe_url(value: str) -> str:
@@ -159,58 +161,83 @@ class RecordingTransport(httpx.AsyncBaseTransport):
             raise
         host = request.url.host
         lock = self.runner.host_locks.setdefault(host, asyncio.Lock())
-        async with lock:
-            if host in self.runner.blocked_hosts:
-                self.row["transport_limit"] = "provider_rate_limited"
-                raise AuditLimit("provider_rate_limited")
-            if self.runner.request_count >= self.runner.max_requests or self.row["requests"] >= 6:
-                self.row["transport_limit"] = "request_limit"
-                raise AuditLimit("request_limit")
-            spacing = 3.1 if host == "export.arxiv.org" else 1.0
-            await asyncio.sleep(max(0, spacing - (time.monotonic() - self.runner.host_started.get(host, 0))))
-            # Other hosts can use the shared allowance while this one sleeps.
-            # Recheck immediately before charging/sending, with no await gap.
-            if self.runner.request_count >= self.runner.max_requests:
-                self.row["transport_limit"] = "request_limit"
-                raise AuditLimit("request_limit")
-            self.runner.host_started[host] = time.monotonic()
-            self.runner.request_count += 1
-            self.row["requests"] += 1
-            sent = time.monotonic()
-            event = {"url": safe_url(str(request.url)), "status": None, "bytes": 0}
-            self.row["http"].append(event)
-            try:
-                response = await self.inner.handle_async_request(request)
-            except BaseException as exc:
-                event.update(error_type=type(exc).__name__, elapsed_seconds=round(time.monotonic() - sent, 3))
-                raise
-            if response.status_code == 429 or (response.status_code == 403 and response.headers.get("x-ratelimit-remaining") == "0"):
-                self.runner.blocked_hosts.add(host)
-            chunks, length = [], 0
-            event.update(status=response.status_code,
-                         retry_after_present=bool(response.headers.get("retry-after")),
-                         rate_limit_exhausted=response.headers.get("x-ratelimit-remaining") == "0",
-                         access_challenge=bool(response.headers.get("x-vercel-mitigated") == "challenge" or response.headers.get("cf-mitigated") == "challenge"))
-            retry_after = response.headers.get("retry-after", "")
-            if re.fullmatch(r"\d+(?:\.\d+)?", retry_after):
-                event["retry_after_seconds"] = min(float(retry_after), 86400)
-            try:
-                async for chunk in response.aiter_bytes():
-                    length += len(chunk)
-                    if length > 10_000_000:
-                        self.row["transport_limit"] = "response_size_limit"
-                        raise AuditLimit("response_size_limit")
-                    chunks.append(chunk)
-            finally:
-                event["bytes"] = length
-                event["elapsed_seconds"] = round(time.monotonic() - sent, 3)
-                await response.aclose()
-        headers = dict(response.headers)
-        # aiter_bytes already decoded HTTP compression. Do not ask the caller
-        # to decompress the same payload again (many public sites send gzip).
-        headers.pop("content-encoding", None)
-        headers.pop("content-length", None)
-        decoded = httpx.Response(response.status_code, headers=headers, content=b"".join(chunks), request=request)
+        for attempt in range(2):
+            retry = False
+            async with lock:
+                if host in self.runner.blocked_hosts:
+                    self.row["transport_limit"] = "provider_rate_limited"
+                    raise AuditLimit("provider_rate_limited")
+                if self.runner.request_count >= self.runner.max_requests or self.row["requests"] >= 6:
+                    self.row["transport_limit"] = "request_limit"
+                    raise AuditLimit("request_limit")
+                spacing = (OPENREVIEW_REQUEST_SPACING_SECONDS if host == "api2.openreview.net"
+                           else 3.1 if host == "export.arxiv.org" else 1.0)
+                await self.runner.sleep(max(0, spacing - (self.runner.clock() - self.runner.host_started.get(host, 0)),
+                                           self.runner.host_cooldowns.get(host, 0) - self.runner.clock()))
+                # Other hosts can use the allowance while this host sleeps.
+                if self.runner.request_count >= self.runner.max_requests:
+                    self.row["transport_limit"] = "request_limit"
+                    raise AuditLimit("request_limit")
+                self.runner.host_started[host] = self.runner.clock()
+                self.runner.request_count += 1
+                self.row["requests"] += 1
+                sent = self.runner.clock()
+                event = {"url": safe_url(str(request.url)), "status": None, "bytes": 0, "attempt": attempt + 1}
+                self.row["http"].append(event)
+                if attempt:
+                    self.row["rate_limit_recovery_attempted"] = True
+                try:
+                    response = await self.inner.handle_async_request(request)
+                except BaseException as exc:
+                    event.update(error_type=type(exc).__name__, elapsed_seconds=round(self.runner.clock() - sent, 3))
+                    raise
+                challenge = response.headers.get("x-vercel-mitigated") == "challenge" or response.headers.get("cf-mitigated") == "challenge"
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                event.update(status=response.status_code,
+                             content_type=content_type if re.fullmatch(r"[\w.+-]+/[\w.+-]+", content_type) else "",
+                             retry_after_present=bool(response.headers.get("retry-after")),
+                             rate_limit_exhausted=response.headers.get("x-ratelimit-remaining") == "0",
+                             access_challenge=challenge)
+                delay = retry_after_seconds(response.headers.get("retry-after", ""))
+                if delay is not None:
+                    event["retry_after_seconds"] = delay
+                limited = response.status_code == 429 or (response.status_code == 403 and event["rate_limit_exhausted"])
+                if limited:
+                    # One recovery for this public API host, never a paid
+                    # platform or a challenge. Every original failure remains
+                    # in the HTTP ledger, even when the retry succeeds.
+                    retry = (self.row["kind"] in {"openreview", "openreview-group"}
+                             and host == "api2.openreview.net" and request.method == "GET"
+                             and response.status_code == 429 and not challenge
+                             and delay is not None and delay <= MAX_RETRY_AFTER_SECONDS
+                             and attempt == 0 and not self.runner.host_recoveries.get(host))
+                    if retry:
+                        self.runner.host_recoveries[host] = 1
+                        self.runner.host_cooldowns[host] = self.runner.clock() + max(1.0, delay)
+                        self.row["rate_limit_recovery_scheduled"] = True
+                    else:
+                        self.runner.blocked_hosts.add(host)
+                chunks, length = [], 0
+                try:
+                    async for chunk in response.aiter_bytes():
+                        length += len(chunk)
+                        if length > 10_000_000:
+                            self.row["transport_limit"] = "response_size_limit"
+                            raise AuditLimit("response_size_limit")
+                        chunks.append(chunk)
+                finally:
+                    event["bytes"] = length
+                    event["elapsed_seconds"] = round(self.runner.clock() - sent, 3)
+                    await response.aclose()
+                headers = dict(response.headers)
+                # The bytes are already decompressed by httpx.
+                headers.pop("content-encoding", None)
+                headers.pop("content-length", None)
+                decoded = httpx.Response(response.status_code, headers=headers, content=b"".join(chunks), request=request)
+                if attempt and response.status_code == 200:
+                    self.row["rate_limit_recovered"] = True
+            if not retry:
+                break
         if self.row["kind"] == "official" and response.status_code == 200 and "index_diagnostics" not in self.row:
             parser = _AnchorParser()
             parser.feed(decoded.text)
@@ -231,7 +258,7 @@ class RecordingTransport(httpx.AsyncBaseTransport):
 
 
 class SourceAudit:
-    def __init__(self, *, transport=None, include_authenticated=False, include_platforms=False, timeout=45, budget=900, max_requests=300, concurrency=3):
+    def __init__(self, *, transport=None, include_authenticated=False, include_platforms=False, timeout=45, budget=900, max_requests=300, concurrency=3, clock=None, sleeper=None):
         self.transport = transport or httpx.AsyncHTTPTransport()
         self.include_authenticated = include_authenticated
         # Explicit opt-in: one minimal request per enabled platform (Reddit
@@ -240,6 +267,9 @@ class SourceAudit:
         self.timeout, self.budget, self.max_requests, self.concurrency = timeout, budget, max_requests, concurrency
         self.request_count = 0
         self.host_locks, self.host_started = {}, {}
+        self.host_cooldowns, self.host_recoveries = {}, {}
+        self.clock = clock or time.monotonic
+        self.sleep = sleeper or asyncio.sleep
         self.blocked_hosts = set()
 
     async def run(self, entries=None, *, reference_time=None):
@@ -298,7 +328,7 @@ class SourceAudit:
                             reason = f"http_{row['http'][-1]['status']}"
                         row.update(status="failed", reason=reason)
                         if row.get("transport_limit"):
-                            row.update(status="not_executed" if row["transport_limit"] != "response_size_limit" else "not_tested", reason=row["transport_limit"])
+                            row.update(status="failed" if row["requests"] else "not_executed", reason=row["transport_limit"])
                     row["elapsed_seconds"] = round(time.monotonic() - entry_started, 3)
                     return row
             try:
@@ -329,10 +359,17 @@ class SourceAudit:
             return await self.probe_platform(entry, row)
         if entry.kind == "official":
             source = PriorityResearchPageSource(pages=[entry.url], per_page=1, lookback_days=60,
-                                               client_factory=lambda **kwargs: self.client(row, **kwargs))
+                                               client_factory=lambda **kwargs: self.client(row, **kwargs),
+                                               bibliography_resolver=BibliographyResolver(
+                                                   enabled=self.include_authenticated and config.PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED,
+                                                   max_requests=1))
             evidence = await source.fetch()
             coverage = source.coverage()
-            page = coverage["pages"].get(entry.url, {})
+            page = dict(coverage["pages"].get(entry.url, {}))
+            if "resolved_index_url" in page:
+                page["resolved_index_url"] = safe_url(page["resolved_index_url"])
+            if "index_data_urls" in page:
+                page["index_data_urls"] = [safe_url(url) for url in page["index_data_urls"]]
             row["coverage"] = page
             if coverage["request_failed"] or coverage["parse_zero_links"] or coverage["detail_failures"] or coverage.get("unresolved_citations"):
                 raise ValueError("Official index/detail failed its production parser")
@@ -342,7 +379,7 @@ class SourceAudit:
         params = dict(entry.params)
         headers = {}
         if entry.credential == "OPENALEX_API_KEY":
-            params["api_key"] = config.OPENALEX_API_KEY
+            headers["Authorization"] = f"Bearer {config.OPENALEX_API_KEY}"
         if entry.credential == "GITHUB_TOKEN":
             headers = {"Authorization": f"Bearer {config.GITHUB_TOKEN}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
         if entry.kind == "orcid":
@@ -411,9 +448,15 @@ class SourceAudit:
             raise ValueError("Platform acceptance is not authorized")
         async with self.client(row) as client:
             if entry.key == "tavily":
+                if config.TAVILY_MONTHLY_CREDIT_LIMIT > 0:
+                    from tavily_protocol import read_account_usage
+                    row["account_usage_credits"] = await read_account_usage(client, config.TAVILY_API_KEY)
+                    if row["account_usage_credits"] + 1 > config.TAVILY_MONTHLY_CREDIT_LIMIT:
+                        raise ValueError("Tavily monthly credit limit reached")
                 response = await client.post(entry.url, headers={"Authorization": f"Bearer {config.TAVILY_API_KEY}"}, json={
                     "query": "artificial intelligence research discussion", "search_depth": "basic",
                     "max_results": 1, "include_answer": False, "include_raw_content": False, "include_usage": True,
+                    "auto_parameters": False,
                 })
             elif entry.key == "semantic-scholar":
                 response = await client.get(entry.url, headers={"x-api-key": config.SEMANTIC_SCHOLAR_API_KEY}, params={
@@ -445,6 +488,8 @@ class SourceAudit:
             items = payload.get("results")
             credits = (payload.get("usage") or {}).get("credits") if isinstance(payload.get("usage"), dict) else None
             row["platform_usage_credits"] = credits if type(credits) is int and credits >= 0 else None
+            if payload.get("error") or type(credits) is not int or not 0 <= credits <= 1:
+                raise ValueError("Tavily error/credit usage contract failed")
         elif entry.key == "semantic-scholar":
             items = payload.get("data")
         elif entry.key == "reddit":
@@ -497,11 +542,24 @@ class SourceAudit:
 def render_summary(result):
     lines = ["# 逐入口信源验收", "", f"参考时钟：{result['reference_time']}",
              f"入口：{result['returned_entries']}/{result['planned_entries']}；状态：{result['counts']}；请求：{result['request_count']}",
-             "", result["boundary"], "", "| 入口 | 状态 | 原因/归因 | 解析/回读 |", "|---|---|---|---|"]
+             "", result["boundary"], "", "| 入口 / URL | 状态 | 原因/归因 | 解析/回读 |", "|---|---|---|---|"]
     for row in result["entries"]:
         diagnosis = row.get("diagnosis") or diagnose_entry(row)
-        lines.append(f"| {row['key']} | {row['status']} | {row.get('reason', '')} / {diagnosis['category']} | {row['parsed']}/{row['persisted']} |")
+        identity = (row['key'] + ' / ' + safe_url(row.get('url', ''))).replace('|', '\\|')
+        lines.append(f"| {identity} | {row['status']} | {row.get('reason', '')} / {diagnosis['category']} | {row['parsed']}/{row['persisted']} |")
     return "\n".join(lines) + "\n"
+
+
+def diagnostic_rows(result):
+    """Console-friendly metadata only; never exception text or API bodies."""
+    for row in result["entries"]:
+        if row["status"] != "passed" or row.get("rate_limit_recovery_scheduled"):
+            yield {"entry": row["key"], "url": safe_url(row.get("url", "")),
+                   "status": row["status"], "reason": row.get("reason", ""),
+                   "diagnosis": (row.get("diagnosis") or diagnose_entry(row))["category"],
+                   "http_statuses": [event.get("status") for event in row.get("http", [])],
+                   "missing_credentials": row.get("missing_credentials", []),
+                   "rate_limit_recovered": row.get("rate_limit_recovered", False)}
 
 
 def diagnose_entry(row):
@@ -552,6 +610,16 @@ def diagnose_entry(row):
         category, action = "network_transport_failure", "检查 DNS、代理、TLS 与远端连接；仅凭该错误不能区分本地网络和提供方故障。"
     elif (row.get("coverage") or {}).get("unresolved_citations"):
         category, action = "bibliography_primary_links_unresolved", "部分书目没有可核验的一手标识/URL；已识别原点保留，不把未解析书目记为覆盖完成。"
+    elif (row.get("coverage") or {}).get("catalog_diagnostics", {}).get("status") == "invalid_registered_catalog":
+        category, action = "registered_catalog_contract_changed", "已注册结构化目录缺失或契约变化；拒绝执行脚本/猜路由，保留目录失败。"
+    elif ((row.get("coverage") or {}).get("catalog_diagnostics", {}).get("pagination_pending")
+          or (row.get("coverage") or {}).get("catalog_diagnostics", {}).get("pending_records")):
+        category, action = "catalog_pagination_or_primary_url_pending", "结构化卡片已读取，但分页或一手 URL 未闭合；保留逐条身份，不把首屏样本当完整覆盖。"
+    elif ((row.get("coverage") or {}).get("status") == "parse_zero_links"
+          and code == 200 and type(last.get("bytes")) is int and 0 <= last["bytes"] < 512
+          and not (row.get("index_diagnostics") or {}).get("anchors")
+          and not (row.get("index_diagnostics") or {}).get("scripts")):
+        category, action = "noncontent_index_response", "200 但响应极小且无目录结构；先核对响应/访问策略，不直接归因为解析器或零发布。"
     elif (row.get("coverage") or {}).get("status") == "parse_zero_links":
         category, action = "index_structure_or_wrong_catalog", "200 但没有研究条目：检查主页/迁移页/动态数据或解析器，不能当成没有发布。"
     elif (row.get("coverage") or {}).get("detail_failures"):

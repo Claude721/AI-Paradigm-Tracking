@@ -10,6 +10,9 @@ from urllib.parse import urlparse
 import httpx
 
 import config
+from database.provider_budget import billing_period
+from tavily_protocol import read_account_usage
+from paradigms.search_receipts import record_search
 from paradigms.models import (
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
@@ -25,7 +28,7 @@ TAVILY_SEARCH_API = "https://api.tavily.com/search"
 class SocialWebSearchClient:
     """搜索公开索引；结果是讨论线索，不是平台全量声量统计。"""
 
-    def __init__(self, max_requests: int | None = None):
+    def __init__(self, max_requests: int | None = None, *, budget_store=None):
         self.max_requests = (
             config.TAVILY_REQUEST_SAFETY_LIMIT
             if max_requests is None
@@ -34,6 +37,10 @@ class SocialWebSearchClient:
         self.requests_used = 0
         self._budget_lock = asyncio.Lock()
         self._budget_warning_emitted = False
+        self.budget_store = budget_store
+        self.monthly_limit = config.TAVILY_MONTHLY_CREDIT_LIMIT
+        self._verified_month = ""
+        self._usage_failure = ""
 
     async def search(
         self,
@@ -44,16 +51,22 @@ class SocialWebSearchClient:
             not config.TAVILY_SOCIAL_SEARCH_ENABLED
             or not config.TAVILY_API_KEY
         ):
+            record_search(candidate, "tavily_social_web", "not_configured" if config.TAVILY_SOCIAL_SEARCH_ENABLED else "disabled", reason="no_key" if config.TAVILY_SOCIAL_SEARCH_ENABLED else "disabled_by_config")
             candidate.community_coverage["tavily_social_web"] = (
-                "未配置 Tavily，未执行跨站公开索引搜索"
+                "Tavily 已关闭，未执行跨站公开索引搜索"
+                if not config.TAVILY_SOCIAL_SEARCH_ENABLED
+                else "Tavily 已开启但未配置 Key，社区查询保留待办"
             )
             return []
         title, identifier = _search_identity(candidate)
         if not title:
+            record_search(candidate, "tavily_social_web", "failed", reason="missing_search_identity")
             return []
-        if not await self._reserve_request():
+        allowed, reservation, period, reason = await self._reserve_request(client)
+        if not allowed:
+            record_search(candidate, "tavily_social_web", "not_executed", reason=reason)
             candidate.community_coverage["tavily_social_web"] = (
-                "触发用户显式配置的 Tavily credit safety limit；本候选未执行搜索"
+                f"Tavily 额度检查未通过：{reason}；本候选未执行搜索，不代表零讨论"
             )
             return []
         query = (
@@ -90,27 +103,54 @@ class SocialWebSearchClient:
         domains = config.TAVILY_DISCOVERY_DOMAINS
         if domains:
             request_payload["include_domains"] = domains
-        response = await client.post(
-            TAVILY_SEARCH_API,
-            headers={
-                "Authorization": f"Bearer {config.TAVILY_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=request_payload,
-        )
+        payload, confirmed = None, False
+        try:
+            response = await client.post(
+                TAVILY_SEARCH_API,
+                headers={"Authorization": f"Bearer {config.TAVILY_API_KEY}", "Content-Type": "application/json"},
+                json=request_payload, follow_redirects=False,
+            )
+            try:
+                payload = response.json()
+            except ValueError:
+                pass
+            if response.status_code >= 400:
+                record_search(candidate, "tavily_social_web", "failed", reason=f"http_{response.status_code}")
+                candidate.community_coverage["tavily_social_web"] = f"已发起 Tavily 搜索，但返回 HTTP {response.status_code}"
+            if reservation is not None:
+                credits = (payload.get("usage") or {}).get("credits") if isinstance(payload, dict) and isinstance(payload.get("usage"), dict) else None
+                if type(credits) is int and credits >= 0:
+                    self.budget_store.settle(reservation, credits=credits)
+                    confirmed = True
+                    if credits > 1:
+                        self._usage_failure = "unexpected_credit_cost"
+                        raise ValueError("Unexpected Tavily basic search credit cost")
+                else:
+                    if response.status_code >= 400:
+                        return []  # finally keeps the unconfirmed reservation.
+                    raise ValueError("Tavily search credit usage is unconfirmed")
+        finally:
+            if reservation is not None and not confirmed:
+                self.budget_store.settle(reservation)
+                self._usage_failure = "unconfirmed_request_usage"
         if response.status_code >= 400:
             candidate.community_coverage["tavily_social_web"] = (
                 f"已发起 Tavily 搜索，但返回 HTTP {response.status_code}"
             )
             logger.warning("Tavily 社交网页搜索失败: HTTP %s", response.status_code)
+            record_search(candidate, "tavily_social_web", "failed", reason=f"http_{response.status_code}")
             return []
         candidate.community_coverage["tavily_social_web"] = (
             "已执行社区与独立技术博客的公开网页索引搜索；结果非平台全量，"
             "未直接读取的页面只作为发现线索"
         )
-        return _parse_results(response.json(), candidate, title)
+        if not isinstance(payload, dict) or payload.get("error") or not isinstance(payload.get("results"), list):
+            raise ValueError("Invalid Tavily search response")
+        results = _parse_results(payload, candidate, title)
+        record_search(candidate, "tavily_social_web", "completed", count=len(results))
+        return results
 
-    async def _reserve_request(self) -> bool:
+    async def _reserve_request(self, client):
         async with self._budget_lock:
             if self.max_requests > 0 and self.requests_used >= self.max_requests:
                 if not self._budget_warning_emitted:
@@ -119,9 +159,36 @@ class SocialWebSearchClient:
                         self.max_requests,
                     )
                     self._budget_warning_emitted = True
-                return False
+                return False, None, "", "request_safety_limit"
+            period, reservation = billing_period(), None
+            if self.monthly_limit > 0:
+                if self.budget_store is None:
+                    return False, None, period, "durable_budget_store_missing"
+                if self._verified_month != period:
+                    self._usage_failure = ""
+                    self._verified_month = period
+                    through = self.budget_store.watermark("tavily", period)
+                    try:
+                        account_usage = await read_account_usage(client, config.TAVILY_API_KEY)
+                        # Never map remote usage to the frozen campaign month.
+                        if billing_period() != period:
+                            self._verified_month = ""
+                            return False, None, period, "billing_period_changed"
+                        self.budget_store.observe("tavily", period, account_usage, through=through)
+                    except asyncio.CancelledError:
+                        self._verified_month = ""
+                        raise
+                    except httpx.HTTPStatusError as exc:
+                        self._usage_failure = f"usage_http_{exc.response.status_code}"
+                    except Exception as exc:
+                        self._usage_failure = "usage_check_" + type(exc).__name__
+                if self._usage_failure:
+                    return False, None, period, self._usage_failure
+                reservation = self.budget_store.reserve("tavily", period, limit=self.monthly_limit)
+                if reservation is None:
+                    return False, None, period, "monthly_credit_limit"
             self.requests_used += 1
-            return True
+            return True, reservation, period, ""
 
 
 def _parse_results(

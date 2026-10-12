@@ -203,6 +203,7 @@ def main() -> int:
                 "run_audit.py",
                 "healthcheck.py",
                 "smokecheck.py",
+                "tavily_protocol.py",
                 "source_audit.py",
                 "setup_env.py",
                 "runtime_clock.py",

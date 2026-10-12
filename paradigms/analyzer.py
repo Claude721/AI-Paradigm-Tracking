@@ -26,6 +26,7 @@ from .models import (
 )
 from .evidence_validation import certify_synthesis_discussion
 from .async_utils import gather_scoped
+from .search_receipts import incomplete_searches, search_receipt_summary
 from .rubric import (
     evaluate_rubric,
     legacy_dimension_scores,
@@ -1213,6 +1214,8 @@ class ParadigmSynthesizer:
         return candidates
 
     async def _synthesize_one(self, candidate: ParadigmCandidate) -> None:
+        if incomplete_searches(candidate):
+            raise RuntimeError("社区查询未闭合，禁止综合为技术判断")
         evidence_payload = _bounded_synthesis_evidence(candidate.evidence)
         prompt = self.skill_loader.render(
             "paradigm_synthesis",
@@ -1236,6 +1239,8 @@ class ParadigmSynthesizer:
             mental_model_method=self.skill_loader.load("technical-mental-model"),
             lineage_parent=candidate.lineage_parent,
             evidence=json.dumps(evidence_payload, ensure_ascii=False),
+            community_coverage=json.dumps(candidate.community_coverage, ensure_ascii=False),
+            community_search_receipts=json.dumps(search_receipt_summary(candidate), ensure_ascii=False),
         )
         run_audit.event(
             "paradigm_synthesis",

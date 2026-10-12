@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 # available only to bounded source checks; model/mail settings are never used.
 os.environ["AI_RADAR_SKIP_DOTENV"] = "true"
 
-from source_audit import SourceAudit, build_entries, render_summary
+from source_audit import SourceAudit, build_entries, render_summary, diagnostic_rows
 from healthcheck import configuration_syntax_checks
 
 
@@ -62,6 +62,14 @@ def main():
     (args.output_dir / "source_audit_latest.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     (args.output_dir / "source_audit_latest.md").write_text(render_summary(result), encoding="utf-8")
     print(json.dumps({key: result[key] for key in ("planned_entries", "counts", "request_count", "elapsed_seconds", "acceptance_complete")}, ensure_ascii=False))
+    for row in diagnostic_rows(result):
+        print(json.dumps(row, ensure_ascii=False))
+    # Publish the same redacted table on both success AND failure; the shell
+    # exits after this process, so a later success-only step cannot do this.
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY", "")
+    if summary_path:
+        with Path(summary_path).open("a", encoding="utf-8") as summary:
+            summary.write(render_summary(result))
     # Do not greenify an incomplete audit. Disabled/unconfigured optional
     # endpoints are declared exclusions, not passed source checks.
     return 0 if result["acceptance_complete"] else 1

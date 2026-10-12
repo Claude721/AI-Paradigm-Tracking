@@ -12,6 +12,7 @@ from runtime_clock import research_now, research_days
 import httpx
 
 import config
+from paradigms.search_receipts import record_search
 from paradigms.models import (
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
@@ -48,15 +49,18 @@ class RedditEvidenceClient:
         candidate: ParadigmCandidate,
     ) -> list[TechnicalEvidence]:
         if not self.configured:
+            record_search(candidate, "reddit_official", "not_configured" if config.REDDIT_API_ACCESS_APPROVED else "disabled", reason="missing_oauth_configuration" if config.REDDIT_API_ACCESS_APPROVED else "disabled_by_config")
             return []
         token = await self._token(client)
         if not token:
+            record_search(candidate, "reddit_official", "failed", reason="oauth_token_failed")
             candidate.community_coverage["reddit_official"] = (
                 "已配置 Reddit Data API，但本轮 OAuth Token 获取失败"
             )
             return []
         work_title, identifier = _search_identity(candidate)
         if not work_title:
+            record_search(candidate, "reddit_official", "failed", reason="missing_search_identity")
             return []
         query = f'"{_clean_query(work_title)}"'
         if identifier:
@@ -79,12 +83,16 @@ class RedditEvidenceClient:
             candidate.community_coverage["reddit_official"] = (
                 f"已尝试 Reddit OAuth 搜索，但返回 HTTP {response.status_code}"
             )
+            record_search(candidate, "reddit_official", "failed", reason=f"http_{response.status_code}")
             return []
         cutoff = research_now() - timedelta(
             days=research_days()
         )
         matches = []
-        for child in ((response.json().get("data") or {}).get("children") or []):
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict) or not isinstance(payload["data"].get("children"), list):
+            raise ValueError("Invalid Reddit search response")
+        for child in payload["data"]["children"]:
             post = child.get("data") or {}
             if not _post_is_related(candidate, work_title, post):
                 continue
@@ -99,8 +107,10 @@ class RedditEvidenceClient:
             return_exceptions=True,
         )
         results = []
+        comment_failures = 0
         for post, comments in zip(matches[:5], comment_batches):
             if isinstance(comments, Exception):
+                comment_failures += 1
                 comments = []
             post_id = str(post.get("id", ""))
             permalink = str(post.get("permalink", ""))
@@ -134,6 +144,8 @@ class RedditEvidenceClient:
         candidate.community_coverage["reddit_official"] = (
             f"已执行 Reddit OAuth 搜索；相关讨论命中 {len(results)} 条"
         )
+        record_search(candidate, "reddit_official", "failed" if comment_failures else "completed",
+                      reason="comment_hydration_failed" if comment_failures else "", count=len(results))
         return results
 
     async def _token(self, client: httpx.AsyncClient) -> str:
@@ -168,17 +180,17 @@ class RedditEvidenceClient:
     ) -> list[str]:
         post_id = str(post.get("id", ""))
         if not post_id:
-            return []
+            raise ValueError("Missing Reddit post identity")
         response = await client.get(
             f"{REDDIT_API_BASE}/comments/{post_id}",
             headers=headers,
             params={"sort": "top", "limit": 10, "depth": 1, "raw_json": 1},
         )
         if response.status_code >= 400:
-            return []
+            response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list) or len(payload) < 2:
-            return []
+            raise ValueError("Invalid Reddit comment response")
         children = ((payload[1].get("data") or {}).get("children") or [])
         comments = []
         for child in children:

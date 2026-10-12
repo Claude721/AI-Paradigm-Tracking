@@ -22,6 +22,7 @@ _SOURCE_FILES = (
     "main.py", "config.py", "runtime_clock.py", "runtime_provenance.py",
     "run_audit.py", "healthcheck.py", "smokecheck.py", "research_watchlist.py",
     "source_audit.py",
+    "tavily_protocol.py",
     "requirements.txt",
 )
 _DATA_SUFFIXES = {

@@ -50,7 +50,12 @@ class SemanticScholarClient:
         async with httpx.AsyncClient(timeout=30, headers=self.headers) as client:
             response = await self._get(client, f"{S2_BASE}/paper/search", params)
             response.raise_for_status()
-            matches = response.json().get("data", [])
+            payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                raise ValueError("Invalid Semantic Scholar search response")
+            matches = payload["data"]
+            if any(not isinstance(item, dict) or not isinstance(item.get("title"), str) for item in matches):
+                raise ValueError("Invalid Semantic Scholar paper record")
             paper = _best_title_match(evidence.title, matches)
             if not paper:
                 return None, []
@@ -104,10 +109,16 @@ class SemanticScholarClient:
                     "fields": "title,year,url,venue,citationCount,externalIds",
                 },
             )
-            if details_response.status_code >= 400 or papers_response.status_code >= 400:
-                continue
+            details_response.raise_for_status()
+            papers_response.raise_for_status()
             details = details_response.json()
-            papers = papers_response.json().get("data", [])
+            payload = papers_response.json()
+            if (not isinstance(details, dict) or not isinstance(details.get("name"), str)
+                    or str(details.get("authorId", "")) != str(author_id)
+                    or not isinstance(payload, dict) or not isinstance(payload.get("data"), list)
+                    or any(not isinstance(item, dict) for item in payload["data"])):
+                raise ValueError("Invalid Semantic Scholar author response")
+            papers = payload["data"]
             external = details.get("externalIds") or {}
             profile_urls = {"semantic_scholar": details.get("url", "")}
             if details.get("homepage"):

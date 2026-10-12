@@ -31,6 +31,7 @@ from sources.official_repository_release_source import (
     OfficialRepositoryReleaseSource,
 )
 from sources.priority_research_source import PriorityResearchPageSource
+from sources.official_detail_queue import official_detail_policy
 from sources.research_feed_source import ResearchFeedSource
 
 from .landscape import (
@@ -95,7 +96,7 @@ class ParadigmDiscovery:
         )
         self.follow_builders = FollowBuildersSource()
         self.priority_pages = PriorityResearchPageSource(
-            lookback_days=self.high_signal_lookback_days
+            lookback_days=self.high_signal_lookback_days, stage_cache=stage_cache,
         )
         self.official_repositories = OfficialRepositoryReleaseSource(
             lookback_days=self.high_signal_lookback_days
@@ -134,7 +135,7 @@ class ParadigmDiscovery:
             self.official_repositories,
         ]
 
-    def _plan_signatures(self):
+    def _plan_signatures(self, *, include_adapters=True):
         # Credentials and runtime/concurrency counters are deliberately absent.
         settings = {
             "research-blog": [config.RESEARCH_FEED_URLS],
@@ -149,10 +150,12 @@ class ParadigmDiscovery:
         plans = {}
         for source in self._sources():
             value = {field: getattr(source, field) for field in ("lookback_days", "high_signal_lookback_days", "seed_arxiv_ids", "venues", "searches", "pages", "organizations", "feed_base_url") if hasattr(source, field)}
-            if isinstance(source, PriorityResearchPageSource):
+            if isinstance(source, PriorityResearchPageSource) and include_adapters:
                 # An adapter/catalog correction must invalidate its discovery
                 # receipt; unchanged sources and durable task scope survive.
                 value["catalog_adapters"] = [source_record(url) for url in source.pages]
+                value["bibliography_resolution"] = config.PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED
+                value["detail_parser_policy"] = official_detail_policy()
             if isinstance(source, HighSignalForumSource):
                 value["feeds"] = source._feeds()
             value["settings"] = settings.get(source.source_name, [])
@@ -273,6 +276,7 @@ class ParadigmDiscovery:
         coverage["recall_lanes"] = self.arxiv.recall_coverage()
         coverage["source_health"] = source_health
         coverage["source_plan_signatures"] = self._plan_signatures()
+        coverage["source_scope_signatures"] = self._plan_signatures(include_adapters=False)
         coverage["official_pages"] = self.priority_pages.coverage()
         coverage["official_repositories"] = self.official_repositories.coverage()
         coverage["curated_kol_sources"] = self.kol_feeds.coverage()
@@ -309,6 +313,18 @@ class ParadigmDiscovery:
             coverage=coverage,
         )
 
+    def retry_sources(self, previous: DiscoveryBatch) -> set[str]:
+        """Include obsolete positive receipts, not just recorded failures."""
+        from paradigms.completion import discovery_retry_sources
+        selected = discovery_retry_sources(previous.coverage)
+        prior_plans = previous.coverage.get("source_plan_signatures") or {}
+        if prior_plans:
+            current_plans = self._plan_signatures()
+            selected.update(name for name, value in (previous.coverage.get("source_health") or {}).items()
+                            if value.get("status") not in {"not_configured", "disabled"}
+                            and prior_plans.get(name) != current_plans.get(name))
+        return selected
+
     async def retry(self, previous: DiscoveryBatch) -> DiscoveryBatch:
         """Retry failed capabilities at the original clock; retain healthy lanes.
 
@@ -316,17 +332,35 @@ class ParadigmDiscovery:
         no longer has their source configured. A source set change is explicit
         incompatibility, not evidence that the original search was performed.
         """
-        from paradigms.completion import discovery_retry_sources
-        selected = discovery_retry_sources(previous.coverage)
-        if not selected:
-            return previous
+        selected = self.retry_sources(previous)
         prior_plans = previous.coverage.get("source_plan_signatures") or {}
         if prior_plans:
             current_plans = self._plan_signatures()
-            if any(prior_plans.get(name) != current_plans.get(name) for name in selected):
-                raise RuntimeError("未完成入口的召回范围发生变化；不能把换配置当作原批次覆盖完成")
+            current_scopes = self._plan_signatures(include_adapters=False)
+            prior_scopes = previous.coverage.get("source_scope_signatures") or {}
+            for name in selected:
+                if prior_plans.get(name) == current_plans.get(name):
+                    continue
+                same_scope = prior_scopes.get(name) == current_scopes.get(name) if name in prior_scopes else False
+                if name not in prior_scopes and name == "priority-research-page":
+                    # Legacy snapshots contain no separated scope hash. Only
+                    # a complete explicit page manifest and frozen window can
+                    # prove an adapter-only change. Counts alone never suffice.
+                    pages = (previous.coverage.get("official_pages") or {}).get("pages")
+                    windows = (previous.coverage.get("recall_windows") or {}).get("source_windows") or {}
+                    same_scope = (isinstance(pages, dict) and set(pages) == set(self.priority_pages.pages)
+                                  and windows.get("official_research_pages") == self.priority_pages.lookback_days)
+                if not same_scope:
+                    raise RuntimeError("未完成入口的召回范围发生变化；不能把换配置当作原批次覆盖完成")
+        if not selected:
+            return previous
         fresh = await self.run(source_names=selected)
         coverage = copy.deepcopy(previous.coverage)
+        for name in selected:
+            for field in ("source_plan_signatures", "source_scope_signatures"):
+                signatures = fresh.coverage.get(field) or {}
+                if name in signatures:
+                    coverage.setdefault(field, {})[name] = signatures[name]
         for name in selected:
             current = fresh.coverage["source_health"][name]
             prior = (previous.coverage.get("source_health") or {}).get(name, {})
@@ -376,7 +410,9 @@ class ParadigmDiscovery:
         except TimeoutError:
             status = "timed_out"
             error = "TimeoutError"
-            results = []
+            # Only the official adapter exposes typed results committed to its
+            # durable queue before cancellation. Keep them, never mark closed.
+            results = list(getattr(source, "partial_results", [])) if isinstance(source, PriorityResearchPageSource) else []
             logger.error(
                 "[%s] 发现源超过 %ss 墙上时间，已取消；本轮覆盖不完整",
                 name,
