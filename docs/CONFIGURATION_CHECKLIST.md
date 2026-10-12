@@ -52,6 +52,8 @@ MAIN_AGENT_MODEL=qwen3.7-plus
 
 `SMOKE_CHECK_TIMEOUT_SECONDS` 是每个真实能力冒烟的总时限，推荐 `30`。单端点接口只验证一次最小请求和响应结构；官方页面、OpenReview venue、RSS 和 Follow Builders 等多入口能力最多按配置顺序 failover 5 个入口，首个成功即停止。冒烟不复用生产分页器、生产解析器或 SQLite 持久化回环，不会因为一个“每页 3 条”的参数反而把数千条结果全部翻完；绿色结果只说明最小能力可用，不能替代完整运行验收。
 
+主、子模型的 Smoke 只有 provider、模型、地址和实际凭据全部相同才共用一次检查；同名模型的不同角色 Key/地址必须分别验证，不能用一个健康角色掩盖另一个鉴权/入口故障。去重身份仅存内存，不把凭据写入日志。真实响应还须完整 stop，截断的 `OK` 也不能 passed。
+
 OpenAlex：
 
 1. 打开 https://openalex.org/settings/api 并注册/登录。

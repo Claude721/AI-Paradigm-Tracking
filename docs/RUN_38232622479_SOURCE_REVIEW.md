@@ -1,5 +1,7 @@
 # 2026-10-12 Runner 信源验收
 
+后续新版同清单复验见 [run 38239955723](RUN_38239955723_SOURCE_REVIEW.md)：Wayve 云端通过，整体仍有 9 失败/1 未测试。本文保留首轮 10 失败的历史事实，不以新结果覆盖。
+
 已按用户授权将 `81b89468259d37c20dbc59daf5e585458fffcf28` 推送到 `main`，并启动 [run 38232622479](https://github.com/Claude721/AI-Paradigm-Tracking/actions/runs/38232622479)。参数：`source_check_only=true`、`smoke_only=false`、`reset_state=false`、`source_platform_checks=false`。没有生产状态、研究模型、SMTP 或续跑调用。
 
 Runner Python 3.12.15，源码指纹 `7418c291a71993371b640fb14d9ce0d9c626b6c4c079af9ad86574f778d0f8d2` 与本地 657 项发布门一致，云端发布门也通过。160/160 项返回：146 passed、10 failed、1 not_tested、3 disabled；205 请求、183.876 秒。工作流因输入未闭合正确失败，不是成功空研究。原始 ZIP/日志不提交。

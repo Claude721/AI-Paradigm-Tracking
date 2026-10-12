@@ -187,3 +187,33 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(create.await_count, 2)
         self.assertEqual(len(run_audit.llm_calls), 2)
         self.assertTrue(all(item["status"] == "failed" and item["usage_reported"] for item in run_audit.llm_calls))
+
+    async def test_smoke_same_label_different_credentials_or_endpoint_not_skipped(self):
+        from smokecheck import _check_models
+        good = SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop",
+                               message=SimpleNamespace(content="OK"))], usage=SimpleNamespace(total_tokens=4))
+        create_good = AsyncMock(return_value=good)
+        create_bad = AsyncMock(side_effect=RuntimeError("endpoint contract failed"))
+        clients = [SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=call)))
+                   for call in (create_good, create_bad)]
+        for other in (profile(role="main", api_key="different-private-key"),
+                      profile(role="main", base_url="https://other.invalid/v1"),
+                      profile(role="main", provider="other")):
+            with patch("smokecheck.resolve_all", return_value=(profile(), other)), \
+                 patch("smokecheck.build_client", side_effect=[(item, MODEL) for item in clients]) as build:
+                results = await _check_models()
+            self.assertEqual([result.status for result in results], ["passed", "failed"])
+            self.assertEqual(build.call_count, 2)
+            self.assertNotIn("different-private-key", str(results))
+
+    async def test_smoke_equivalent_roles_deduplicate_only_identical_capability(self):
+        from smokecheck import _check_models
+        response = SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop",
+                                   message=SimpleNamespace(content="OK"))], usage=SimpleNamespace(total_tokens=4))
+        create = AsyncMock(return_value=response)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        with patch("smokecheck.resolve_all", return_value=(profile(), profile(role="main", base_url=BASE_URL + "/"))), \
+             patch("smokecheck.build_client", return_value=(client, MODEL)):
+            results = await _check_models()
+        self.assertEqual([result.status for result in results], ["passed", "skipped"])
+        self.assertEqual(create.await_count, 1)

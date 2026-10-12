@@ -355,12 +355,15 @@ async def _check(
 
 async def _check_models() -> list[SmokeResult]:
     results = []
-    seen: set[str] = set()
+    # Same model name does not prove the second role's endpoint/key works.
+    # The credential stays only in this in-memory identity, never diagnostics.
+    seen: set[tuple[str, str, str, str]] = set()
     for role, resolved in zip(("sub", "main"), resolve_all()):
-        if resolved.label in seen:
+        identity = (resolved.provider, resolved.model, resolved.base_url.rstrip("/"), resolved.api_key)
+        if identity in seen:
             results.append(_skipped(f"Qwen {role}", f"与另一角色共用 {resolved.label}，不重复计费"))
             continue
-        seen.add(resolved.label)
+        seen.add(identity)
         started = time.monotonic()
         try:
             client, model = build_client(role)

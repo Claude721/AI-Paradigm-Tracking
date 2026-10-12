@@ -625,7 +625,8 @@ class SmokeCheckContractTests(unittest.TestCase):
                 completions=SimpleNamespace(create=AsyncMock(side_effect=too_slow))
             )
         )
-        resolved = SimpleNamespace(label="dashscope/qwen3.7-plus")
+        resolved = SimpleNamespace(label="dashscope/qwen3.7-plus", provider="dashscope",
+                                   model="qwen3.7-plus", base_url="https://offline.invalid/v1", api_key="offline-test")
         with (
             patch("smokecheck.resolve_all", return_value=[resolved, resolved]),
             patch("smokecheck.build_client", return_value=(client, "qwen3.7-plus")),
@@ -655,7 +656,8 @@ class SmokeCheckContractTests(unittest.TestCase):
                 )
             )
         )
-        resolved = SimpleNamespace(label="dashscope/qwen3.7-plus")
+        resolved = SimpleNamespace(label="dashscope/qwen3.7-plus", provider="dashscope",
+                                   model="qwen3.7-plus", base_url="https://offline.invalid/v1", api_key="offline-test")
         with (
             patch("smokecheck.resolve_all", return_value=[resolved, resolved]),
             patch("smokecheck.build_client", return_value=(client, "qwen3.7-plus")),
