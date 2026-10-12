@@ -14,7 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import config
 from paradigms.search_receipts import search_receipt_summary
-from agents.llm_utils import build_client
+from agents.llm_utils import build_client, completed_content
 from paradigms.models import (
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
@@ -260,6 +260,7 @@ class ParadigmReportGenerator:
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+                content = completed_content(response)
                 run_audit.record_llm(
                     stage=stage,
                     role="main",
@@ -267,9 +268,7 @@ class ParadigmReportGenerator:
                     subject=f"{subject} / attempt-{attempt + 1}",
                     response=response,
                 )
-                return _strip_code_fence(
-                    response.choices[0].message.content or ""
-                )
+                return _strip_code_fence(content)
             except Exception as exc:
                 last_error = exc
                 run_audit.record_llm(

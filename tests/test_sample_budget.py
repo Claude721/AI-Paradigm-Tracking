@@ -169,6 +169,19 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SampleIsolationTests(unittest.IsolatedAsyncioTestCase):
+    def test_verification_summary_preserves_disabled_scope_not_zero_discussion(self):
+        from scripts.one_route_check import _verification_summary
+        from paradigms.models import ParadigmCandidate, ResearcherProfile
+        candidate = ParadigmCandidate(key="sample", name="离线样例", thesis="", problem_shift="", mechanism="")
+        candidate.community_coverage = {"x_official": "未开启；未作平台全量检索"}
+        candidate.community_search_receipts = {"x_official": {"status":"disabled", "reason":"not_enabled", "result_count":0}}
+        candidate.researchers = [ResearcherProfile(name="Alex Chen", contact_search_notes=["未配置身份接口"])]
+        summary = _verification_summary(candidate)
+        self.assertEqual(summary["publisher_tier"], "unknown")
+        self.assertEqual(summary["contact_lookup_completed_count"], 0)
+        self.assertEqual(summary["search_receipts"]["x_official"]["status"], "disabled")
+        self.assertIn("未开启", summary["community_coverage"]["x_official"])
+
     def test_configuration_cannot_enable_platforms_mail_or_resumes(self):
         from scripts.one_route_check import isolate_environment
         import os

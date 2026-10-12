@@ -249,6 +249,25 @@ def parse_json_object(content: str) -> dict:
     return data
 
 
+def completed_content(response) -> str:
+    """A syntactically valid prefix is not a completed model judgment.
+
+    Validate after cost admission has received usage, before business parsing
+    or success accounting. No response body is included in the exception.
+    Missing attribute is tolerated for existing injected/offline clients; SDK
+    choice objects carry the attribute and must explicitly finish with stop.
+    """
+    choice = response.choices[0]
+    reason = getattr(choice, "finish_reason", None)
+    if hasattr(choice, "finish_reason") and reason != "stop":
+        label = reason if reason in {"length", "content_filter", "tool_calls", "function_call"} else "unknown"
+        raise ValueError("模型输出未完整结束；finish_reason=" + label)
+    content = choice.message.content
+    if content is not None and not isinstance(content, str):
+        raise TypeError("模型回答必须为文本")
+    return content or ""
+
+
 def parse_json_response(content: str) -> dict:
     """解析旧版项目评分响应，并校验 1-10 分。"""
     data = parse_json_object(content)

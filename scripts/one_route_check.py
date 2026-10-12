@@ -114,6 +114,9 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
         result["explanation"] = candidate.technical_explanation
         result["discussion_judgment"] = candidate.trend_interpretation
         result["people_count"] = len(candidate.researchers)
+        # Persist facts about the test boundary, not temporary community bodies
+        # or a claim that absent/disabled platform coverage means no discussion.
+        result["verification_summary"] = _verification_summary(candidate)
         if result["route_decision"] not in {"report", "observe", "reject"}:
             raise ValueError("最终 Rubric 未闭合")
         if not is_reportable(candidate):
@@ -131,6 +134,20 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
         result["route_test_draft"] = draft
         result["status"] = "route_quality_passed"
         result["quality_boundary"] = "仅单路线生产写作闸门通过；未验收整周召回、总编、生产状态、去重或 SMTP，不是正式报告。"
+
+
+def _verification_summary(candidate):
+    from paradigms.search_receipts import search_receipt_summary
+    from paradigms.models import is_verified_substantive_discussion
+    return {
+        "publisher_tier": candidate.publisher_tier,
+        "publisher_evidence_count": len(candidate.publisher_evidence),
+        "verified_substantive_discussion_count": sum(
+            is_verified_substantive_discussion(item, route_key=candidate.key) for item in candidate.evidence),
+        "community_coverage": candidate.community_coverage,
+        "search_receipts": search_receipt_summary(candidate),
+        "contact_lookup_completed_count": sum(person.contact_lookup_completed for person in candidate.researchers),
+    }
 
 
 async def execute(args):

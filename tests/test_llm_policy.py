@@ -10,7 +10,7 @@ import httpx
 from openai import AsyncOpenAI
 
 import config
-from agents.llm_utils import ModelPolicyClient, ResolvedModel, build_client, request_policy
+from agents.llm_utils import ModelPolicyClient, ResolvedModel, build_client, request_policy, completed_content
 from agents.sample_budget import SampleBudgetClient, BASE_URL, MODEL, PRICE_DATE
 from database.paradigm_store import (_deep_checkpoint_input_signature,
                                      _trajectory_checkpoint_policy_signature)
@@ -136,3 +136,54 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
             check = _raw_environment_syntax_check()
         self.assertEqual(check.status, "missing")
         self.assertIn("LLM_ENABLE_THINKING", str(check))
+
+    def test_legal_json_or_markdown_prefix_is_not_a_completed_response(self):
+        for content in ('{"hypotheses": [{}]}', '## 看似完整的标题\n足够可读的前缀。'):
+            for reason in ("length", "content_filter", "tool_calls", "function_call", None, "", "private-body"):
+                response = SimpleNamespace(choices=[SimpleNamespace(finish_reason=reason,
+                    message=SimpleNamespace(content=content))])
+                with self.assertRaises(ValueError) as captured:
+                    completed_content(response)
+                self.assertNotIn(content, str(captured.exception))
+                self.assertNotIn("private-body", str(captured.exception))
+        good = SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop",
+                    message=SimpleNamespace(content="完整回答"))])
+        self.assertEqual(completed_content(good), "完整回答")
+
+    async def test_truncated_extraction_keeps_pending_and_accounts_confirmed_usage(self):
+        from paradigms.analyzer import ParadigmAnalyzer
+        from tests.test_research_service import origin
+        from run_audit import run_audit
+        run_audit.reset()
+        self.addCleanup(run_audit.reset)
+        response = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=1000, completion_tokens=5000,
+                                      total_tokens=6000), choices=[SimpleNamespace(finish_reason="length",
+                                      message=SimpleNamespace(content='{"hypotheses": [{}]}'))])
+        create = AsyncMock(return_value=response)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        items = await ParadigmAnalyzer(client=client, model="offline").run([origin(1)])
+        self.assertEqual(create.await_count, 2)
+        self.assertNotIn(items[0].rubric_assessment.get("decision"), {"deep_dive", "observe", "reject"})
+        self.assertEqual(len(run_audit.llm_calls), 2)
+        self.assertTrue(all(item["usage_reported"] and item["finish_reason"] == "length"
+                            and item["status"] == "failed" for item in run_audit.llm_calls))
+
+    async def test_truncated_report_is_not_delivered_or_double_accounted(self):
+        from reports.paradigm_generator import ParadigmReportGenerator
+        from run_audit import run_audit
+        run_audit.reset()
+        self.addCleanup(run_audit.reset)
+        response = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=100, completion_tokens=2200,
+                                      total_tokens=2300), choices=[SimpleNamespace(finish_reason="length",
+                                      message=SimpleNamespace(content="## 完整外观\n中文结论。"))])
+        create = AsyncMock(return_value=response)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        with tempfile.TemporaryDirectory() as directory:
+            generator = ParadigmReportGenerator(output_dir=Path(directory), client=client, model="offline")
+            with self.assertRaises(ValueError):
+                await generator._request_markdown("offline", stage="report_route", subject="离线路线",
+                                                   temperature=0, max_tokens=2200)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+        self.assertEqual(create.await_count, 2)
+        self.assertEqual(len(run_audit.llm_calls), 2)
+        self.assertTrue(all(item["status"] == "failed" and item["usage_reported"] for item in run_audit.llm_calls))

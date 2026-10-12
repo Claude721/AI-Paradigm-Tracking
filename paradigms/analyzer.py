@@ -12,7 +12,7 @@ import sqlite3
 from dataclasses import fields
 
 import config
-from agents.llm_utils import build_client, parse_json_object, resolve_model, request_policy
+from agents.llm_utils import build_client, parse_json_object, resolve_model, request_policy, completed_content
 from run_audit import run_audit
 from skills.loader import SkillLoader
 
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def _stage_cache_signature(role, model, prompt, identity):
     resolved = resolve_model(role)
-    value = {"version": 1, "role": role, "model": model or resolved.model,
+    value = {"version": 2, "role": role, "model": model or resolved.model,
              "provider": resolved.provider, "base_url": resolved.base_url,
              "request_policy": request_policy(resolved, model=model),
              "prompt": prompt, "identity": identity}
@@ -256,9 +256,7 @@ class ParadigmAnalyzer:
                     max_tokens=max(1200, min(4000, 450 * len(evidence))),
                     response_format={"type": "json_object"},
                 )
-                payload = parse_json_object(
-                    response.choices[0].message.content or "{}"
-                )
+                payload = parse_json_object(completed_content(response) or "{}")
                 rows = payload.get("decisions")
                 if not isinstance(rows, list):
                     raise ValueError("缺少 decisions 数组")
@@ -408,9 +406,7 @@ class ParadigmAnalyzer:
                     ),
                     response_format={"type": "json_object"},
                 )
-                payload = parse_json_object(
-                    response.choices[0].message.content or "{}"
-                )
+                payload = parse_json_object(completed_content(response) or "{}")
                 hypotheses = payload.get("hypotheses")
                 payloads = hypotheses if isinstance(hypotheses, list) else [payload]
                 parsed = [
@@ -706,9 +702,7 @@ class ParadigmAnalyzer:
                     max_tokens=6000,
                     response_format={"type": "json_object"},
                 )
-                payload = parse_json_object(
-                    response.choices[0].message.content or "{}"
-                )
+                payload = parse_json_object(completed_content(response) or "{}")
                 raw_mechanisms = payload.get("mechanisms")
                 if not isinstance(raw_mechanisms, list):
                     raise ValueError("缺少 mechanisms 数组")
@@ -809,9 +803,7 @@ class ParadigmAnalyzer:
                     max_tokens=3500,
                     response_format={"type": "json_object"},
                 )
-                payload = parse_json_object(
-                    response.choices[0].message.content or "{}"
-                )
+                payload = parse_json_object(completed_content(response) or "{}")
                 assessment_payload = payload.get("assessment")
                 if isinstance(assessment_payload, dict):
                     payload = assessment_payload
@@ -1110,7 +1102,7 @@ class ResearcherTrajectoryAnalyzer:
                         model=model, messages=messages, temperature=0.1,
                         max_tokens=1100, response_format={"type": "json_object"},
                     )
-                    content = response.choices[0].message.content or "{}"
+                    content = completed_content(response) or "{}"
                     try:
                         payload = _validated_trajectory_payload(parse_json_object(content))
                     except (TypeError, ValueError) as exc:
@@ -1299,9 +1291,7 @@ class ParadigmSynthesizer:
                     max_tokens=5600,
                     response_format={"type": "json_object"},
                 )
-                payload = parse_json_object(
-                    response.choices[0].message.content or "{}"
-                )
+                payload = parse_json_object(completed_content(response) or "{}")
                 if partial_payload:
                     payload = _merge_structured_payload(partial_payload, payload)
                 partial_payload = payload

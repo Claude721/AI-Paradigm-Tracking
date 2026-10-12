@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import httpx
 
 import config
-from agents.llm_utils import build_client, resolve_all
+from agents.llm_utils import build_client, resolve_all, completed_content
 from research_watchlist import KOL_SOURCES
 
 
@@ -373,7 +373,7 @@ async def _check_models() -> list[SmokeResult]:
                 ),
                 timeout=config.SMOKE_CHECK_TIMEOUT_SECONDS,
             )
-            content = (response.choices[0].message.content or "").strip()
+            content = completed_content(response).strip()
             contract_ok = content.casefold().rstrip(".!。！") == "ok"
             usage = getattr(response, "usage", None)
             total_tokens = int(getattr(usage, "total_tokens", 0) or 0)

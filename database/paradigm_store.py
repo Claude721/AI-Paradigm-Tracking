@@ -29,8 +29,8 @@ from paradigms.completion import ResearchNotCompleteError, require_completed_res
 
 logger = logging.getLogger(__name__)
 
-DEEP_SYNTHESIS_CHECKPOINT_VERSION = 2
-DEEP_TRAJECTORY_CHECKPOINT_VERSION = 1
+DEEP_SYNTHESIS_CHECKPOINT_VERSION = 3
+DEEP_TRAJECTORY_CHECKPOINT_VERSION = 2
 DEEP_SYNTHESIS_CHECKPOINT_MAX_AGE = timedelta(hours=48)
 
 
