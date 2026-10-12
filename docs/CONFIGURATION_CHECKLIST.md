@@ -35,6 +35,7 @@ LLM_MODEL=qwen3.7-plus
 LLM_API_KEY=你的百炼API-Key
 LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_REQUEST_TIMEOUT_SECONDS=180
+LLM_ENABLE_THINKING=false
 SMOKE_CHECK_TIMEOUT_SECONDS=30
 
 SUB_AGENT_PROVIDER=dashscope
@@ -46,6 +47,8 @@ MAIN_AGENT_MODEL=qwen3.7-plus
 `SUB_AGENT_API_KEY` 和 `MAIN_AGENT_API_KEY` 可以留空继承 `LLM_API_KEY`；如果分别填写，也应使用有效的 DashScope Key。
 
 `LLM_REQUEST_TIMEOUT_SECONDS` 是单次请求的硬上限。推荐保持 `180`；程序关闭 SDK 隐式重试，由各 Agent 自己执行一次有审计记录的重试，避免长报告在 GitHub Actions 中无边界等待。
+
+`LLM_ENABLE_THINKING=false` 是已核验北京 `qwen3.7-plus` 的新默认：统一客户端显式发送非思考模式，并把各阶段输出上限转换成 `max_completion_tokens`，约束思考与回答之和。Smoke、正式研究和有界单路线使用同一契约；未知模型/代理不会收到猜测参数。显式开启思考仍受原总输出上限约束，不自动提高 tokens/时限，需另行验证结构完整性与质量。模式变化使抽取、综合和人物缓存失效。首次真实样本的两次默认思考请求均因总输出截断失败，见 [模型复核](RUN_38235929382_MODEL_REVIEW.md)。不需要新增 Secret 或轮换 Key；Workflow Variable 留空即 false。
 
 `SMOKE_CHECK_TIMEOUT_SECONDS` 是每个真实能力冒烟的总时限，推荐 `30`。单端点接口只验证一次最小请求和响应结构；官方页面、OpenReview venue、RSS 和 Follow Builders 等多入口能力最多按配置顺序 failover 5 个入口，首个成功即停止。冒烟不复用生产分页器、生产解析器或 SQLite 持久化回环，不会因为一个“每页 3 条”的参数反而把数千条结果全部翻完；绿色结果只说明最小能力可用，不能替代完整运行验收。
 

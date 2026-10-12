@@ -1947,9 +1947,10 @@ def _deep_checkpoint_input_signature(candidate: ParadigmCandidate) -> str:
         ),
         "screening_rubric": candidate.screening_rubric,
     }
-    from agents.llm_utils import resolve_model
+    from agents.llm_utils import resolve_model, request_policy
     profile = resolve_model("main")
     payload["model_profile"] = [profile.provider, profile.model, profile.base_url]
+    payload["request_policy"] = request_policy(profile)
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
@@ -1958,6 +1959,11 @@ def _deep_checkpoint_input_signature(candidate: ParadigmCandidate) -> str:
 def _trajectory_checkpoint_policy_signature() -> str:
     root = Path(__file__).resolve().parents[1]
     policy = hashlib.sha256()
+    from agents.llm_utils import resolve_model, request_policy
+    profile = resolve_model("main")
+    policy.update(json.dumps({"provider": profile.provider, "model": profile.model,
+                             "base_url": profile.base_url, "request_policy": request_policy(profile)},
+                            sort_keys=True).encode("utf-8"))
     policy.update(str(DEEP_TRAJECTORY_CHECKPOINT_VERSION).encode("ascii"))
     for relative in (
         "skills/researcher_trajectory/SKILL.md",

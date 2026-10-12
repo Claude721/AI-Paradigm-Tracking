@@ -174,13 +174,15 @@ class SampleIsolationTests(unittest.IsolatedAsyncioTestCase):
         import os
         with patch.dict(os.environ, {"SMTP_PASSWORD":"private", "TAVILY_API_KEY":"private",
                                     "OPENALEX_API_KEY":"private", "MAIN_AGENT_API_KEY":"private",
-                                    "LLM_API_KEY":"authorized-model-key", "EMAIL_PUSH_ENABLED":"true"}, clear=True):
+                                    "LLM_API_KEY":"authorized-model-key", "LLM_ENABLE_THINKING":"true",
+                                    "EMAIL_PUSH_ENABLED":"true"}, clear=True):
             isolate_environment()
             self.assertEqual(os.environ["LLM_API_KEY"], "authorized-model-key")
             for key in ("SMTP_PASSWORD", "TAVILY_API_KEY", "OPENALEX_API_KEY", "MAIN_AGENT_API_KEY"):
                 self.assertNotIn(key, os.environ)
             self.assertEqual(os.environ["EMAIL_PUSH_ENABLED"], "false")
             self.assertEqual(os.environ["PARADIGM_AUTO_RESUME_ENABLED"], "false")
+            self.assertEqual(os.environ["LLM_ENABLE_THINKING"], "false")
 
     async def test_real_sqlite_origin_identity_uses_actual_stage_contract(self):
         from scripts.one_route_check import run_sample

@@ -131,6 +131,9 @@ LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "")
 LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
 LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "")
 LLM_MODEL: str = os.getenv("LLM_MODEL", "")
+# Explicit mode for the verified official Qwen endpoint, not a generic
+# provider parameter. Default bounded JSON work does not spend on reasoning.
+LLM_ENABLE_THINKING: bool = _env_bool("LLM_ENABLE_THINKING", False)
 LLM_REQUEST_TIMEOUT_SECONDS: int = max(
     30,
     _env_int("LLM_REQUEST_TIMEOUT_SECONDS", 180),

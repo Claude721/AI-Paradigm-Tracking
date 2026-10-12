@@ -12,6 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Literal
+from types import SimpleNamespace
 
 from openai import AsyncOpenAI
 
@@ -69,13 +70,17 @@ class ResolvedModel:
         if self.provider == "ollama":
             key_display = "免密(本地)"
 
-        return [
+        lines = [
             f"  {role_name}:",
             f"    Provider : {self.provider:15s} ← {self.provider_from}",
             f"    Model    : {self.model:15s} ← {self.model_from}",
             f"    API Key  : {key_display:15s} ← {self.api_key_from}",
             f"    Base URL : {self.base_url[:40]:15s} ← {self.base_url_from}",
         ]
+        policy = request_policy(self)
+        if policy:
+            lines.append(f"    思考模式 : {'开启' if policy['enable_thinking'] else '关闭'}；输出上限约束思考与回答之和")
+        return lines
 
 
 def _pick(agent_val: str, global_val: str, default_val: str) -> tuple[str, str]:
@@ -139,12 +144,61 @@ def resolve_all() -> tuple[ResolvedModel, ResolvedModel]:
     return resolve_model("sub"), resolve_model("main")
 
 
+def request_policy(resolved: ResolvedModel, *, model: str = "") -> dict:
+    """Only verified model/endpoint pairs receive provider-specific options.
+
+    This value is also part of durable model-result cache identities. Never
+    infer capabilities from a model-name prefix or send Qwen knobs to proxies.
+    """
+    selected = model or resolved.model
+    if (resolved.provider == "dashscope"
+        and resolved.base_url.rstrip("/") == PROVIDER_DEFAULTS["dashscope"]["base_url"]
+        and selected in {"qwen3.7-plus", "qwen3.7-plus-2026-05-26"}):
+        return {"version": 1, "enable_thinking": config.LLM_ENABLE_THINKING,
+                "output_limit": "max_completion_tokens"}
+    return {}
+
+
+class ModelPolicyClient:
+    """Apply the same explicit request contract in Smoke and all model stages.
+
+    Delegate SDK lifecycle/base_url/retry attributes so monetary admission can
+    validate the actual transport. The request cap bounds reasoning + answer,
+    even when thinking is explicitly enabled; it is not a silent budget raise.
+    """
+    def __init__(self, client: AsyncOpenAI, resolved: ResolvedModel):
+        self._client = client
+        self._resolved = resolved
+        self._policy = request_policy(resolved)
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    async def create(self, **kwargs):
+        payload = dict(kwargs)
+        if payload.get("model") == self._resolved.model and self._policy:
+            body = dict(payload.get("extra_body") or {})
+            mode = self._policy["enable_thinking"]
+            if "enable_thinking" in body and body["enable_thinking"] != mode:
+                raise ValueError("请求思考模式与已解析配置不一致")
+            body["enable_thinking"] = mode
+            payload["extra_body"] = body
+            if "max_tokens" in payload:
+                maximum = payload.pop("max_tokens")
+                if ("max_completion_tokens" in payload
+                    and payload["max_completion_tokens"] != maximum):
+                    raise ValueError("请求包含冲突的输出上限")
+                payload["max_completion_tokens"] = maximum
+        return await self._client.chat.completions.create(**payload)
+
+
 def build_client(
     role: AgentRole = "main",
     *,
     timeout_seconds: int | float | None = None,
-) -> tuple[AsyncOpenAI, str]:
-    """构建 AsyncOpenAI 客户端，返回 (client, model_name)"""
+) -> tuple[ModelPolicyClient, str]:
+    """构建带显式供应商契约的客户端，返回 (client, model_name)"""
     resolved = resolve_model(role)
     logger.info(f"初始化 LLM 客户端: {resolved.label} (role={role})")
     client = AsyncOpenAI(
@@ -155,7 +209,7 @@ def build_client(
         # 避免一个请求在 Actions 中无审计地等待数倍超时。
         max_retries=0,
     )
-    return client, resolved.model
+    return ModelPolicyClient(client, resolved), resolved.model
 
 
 def parse_json_object(content: str) -> dict:

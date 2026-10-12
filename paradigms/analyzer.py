@@ -12,7 +12,7 @@ import sqlite3
 from dataclasses import fields
 
 import config
-from agents.llm_utils import build_client, parse_json_object, resolve_model
+from agents.llm_utils import build_client, parse_json_object, resolve_model, request_policy
 from run_audit import run_audit
 from skills.loader import SkillLoader
 
@@ -41,6 +41,7 @@ def _stage_cache_signature(role, model, prompt, identity):
     resolved = resolve_model(role)
     value = {"version": 1, "role": role, "model": model or resolved.model,
              "provider": resolved.provider, "base_url": resolved.base_url,
+             "request_policy": request_policy(resolved, model=model),
              "prompt": prompt, "identity": identity}
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 

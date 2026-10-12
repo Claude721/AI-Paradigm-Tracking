@@ -33,7 +33,8 @@ def isolate_environment():
         "EMAIL_PUSH_REQUIRED": "false", "PARADIGM_AUTO_RESUME_ENABLED": "false",
         "KOL_X_SOURCE_ENABLED": "false", "TAVILY_SOCIAL_SEARCH_ENABLED": "false",
         "SEMANTIC_SCHOLAR_ENABLED": "false", "REDDIT_API_ACCESS_APPROVED": "false",
-        "LLM_PROVIDER": "dashscope", "LLM_MODEL": MODEL, "LLM_BASE_URL": BASE_URL})
+        "LLM_PROVIDER": "dashscope", "LLM_MODEL": MODEL, "LLM_BASE_URL": BASE_URL,
+        "LLM_ENABLE_THINKING": "false"})
 
 
 async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, reference_time=None):
@@ -134,7 +135,7 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
 
 async def execute(args):
     isolate_environment()
-    from agents.llm_utils import build_client
+    from agents.llm_utils import build_client, request_policy, resolve_model
     import config
     from run_audit import run_audit
     from runtime_provenance import runtime_provenance
@@ -145,6 +146,7 @@ async def execute(args):
     result = {"status": "failed", "runtime": runtime_provenance(), "arxiv_id": args.arxiv_id,
               "authorization": "最多一条路线；20 元内；无邮件、生产状态或自动续跑",
               "production_v0_accepted": False}
+    result["model_request_policy"] = request_policy(resolve_model("sub"))
     raw, model = build_client("sub")
     try:
         guarded = SampleBudgetClient(raw, path=directory / "cost.json", budget_cny=args.budget_cny,

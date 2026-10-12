@@ -37,6 +37,7 @@ jobs:
     env:
       AI_RADAR_SKIP_DOTENV: "true"
       LLM_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      LLM_ENABLE_THINKING: "false"
       GITHUB_TOKEN: ${{ github.token }}
       EMAIL_PUSH_ENABLED: "false"
       EMAIL_PUSH_REQUIRED: "false"
