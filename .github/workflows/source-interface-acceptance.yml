@@ -1,0 +1,71 @@
+name: NYU与Tavily独立接口验收（无模型、无邮件）
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 只运行本次明确授权的接口；不会检查其他平台
+        required: true
+        type: choice
+        default: nyu
+        options: [nyu, tavily, both]
+      bibliography_requests:
+        description: NYU新增OpenAlex身份查询上限（1至8）
+        required: true
+        default: "8"
+        type: string
+      live_authorized:
+        description: 明确授权所选接口；Tavily最多1个已有credit，PAYG未关闭则不搜索
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paradigm-radar-source-interface-acceptance
+  cancel-in-progress: false
+
+jobs:
+  source-interfaces:
+    if: inputs.live_authorized
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AI_RADAR_SKIP_DOTENV: "true"
+      OPENALEX_API_KEY: ${{ inputs.scope != 'tavily' && secrets.OPENALEX_API_KEY || '' }}
+      TAVILY_API_KEY: ${{ inputs.scope != 'nyu' && secrets.TAVILY_API_KEY || '' }}
+      TAVILY_SOCIAL_SEARCH_ENABLED: ${{ vars.TAVILY_SOCIAL_SEARCH_ENABLED || 'true' }}
+      TAVILY_MONTHLY_CREDIT_LIMIT: ${{ vars.TAVILY_MONTHLY_CREDIT_LIMIT || '1000' }}
+      PRIORITY_RESEARCH_PAGES: ${{ vars.PRIORITY_RESEARCH_PAGES }}
+      RESEARCH_WATCHLIST_MODE: ${{ vars.RESEARCH_WATCHLIST_MODE || 'merge' }}
+      EMAIL_PUSH_ENABLED: "false"
+      EMAIL_PUSH_REQUIRED: "false"
+      PARADIGM_AUTO_RESUME_ENABLED: "false"
+      SAMPLE_SCOPE: ${{ inputs.scope }}
+      SAMPLE_BIBLIOGRAPHY_REQUESTS: ${{ inputs.bibliography_requests }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+      - name: 离线发布门（禁止网络、模型和邮件）
+        run: python scripts/offline_checks.py
+      - name: 本次授权的接口子集（不调用主流程）
+        run: >-
+          python scripts/source_interface_check.py --live-authorized
+          --scope "$SAMPLE_SCOPE" --bibliography-requests "$SAMPLE_BIBLIOGRAPHY_REQUESTS"
+      - name: 保存去敏验收证据（无生产状态或临时数据库）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paradigm-radar-source-interfaces-${{ github.run_id }}
+          path: |
+            logs/source_interfaces/*.json
+            logs/source_interfaces/*.md
+            logs/offline_checks.json
+          retention-days: 14

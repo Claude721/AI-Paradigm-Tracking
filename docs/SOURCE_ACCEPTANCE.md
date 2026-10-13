@@ -20,6 +20,29 @@
 
 脚本故意忽略 `.env`。不要把密钥放入命令行、聊天或文档；需要带凭据验收时由安全进程环境注入。
 
+## 独立 NYU/Tavily 接口验收
+
+只验证已获授权的子集时使用 `source-interface-acceptance.yml`，不要为此勾选会检查所有已启用平台的 `source_platform_checks`。选 `scope=nyu/tavily/both`，NYU 查询上限 1–8；必须另勾选 `live_authorized=true`，默认不执行。现阶段仅准备代码，仍等待所有者授权真实接口请求，不代表已经执行。
+
+无网络列清单：
+
+```bash
+python scripts/source_interface_check.py --scope both --list
+```
+
+已明确授权、由安全进程环境提供凭据时的本地入口（不读取 `.env`）：
+
+```bash
+python scripts/source_interface_check.py --scope nyu --bibliography-requests 8 --live-authorized
+python scripts/source_interface_check.py --scope tavily --live-authorized
+```
+
+NYU URL 绑定登记目录，不依赖 `official:N` 的位置；丢失、重复或关闭选中入口、缺 Key 或非法配置时，整个计划在首个 HTTP 前拒绝。显式授权最多 8 次身份查询，不改变生产开关/数据库；第 9 个引用和身份/详情故障继续 pending。Tavily 先 `/usage`，明确核验既有账户/Key 额度及 `paygo_limit=0`，再最多一次 basic 搜索；未知限额、PAYG 开启、月度保护关闭或额度不足均不搜索。不会修改账户、变量或其他平台开关。
+
+总上限 14 HTTP / 300 秒、单入口 120 秒，无模型/邮件/正式研究/生产状态；JSON 保留完整声明清单及未测试身份。`selected_protocols_passed` 不等于 V0：完整验收/生产覆盖/生产 V0 字段始终 false，NYU 未闭合引用仍让样本失败。原全清单验收不改变。失败前配置原因只输出固定变量名/代码；运行异常不把未知请求/费用写成 0。
+
+## 普通逐入口命令与限制
+
 请求前复用零网络配置语法检查，不要求模型/SMTP 密钥；拼错布尔值不会静默变为 disabled，错误 venue、Feed 地址或超界参数会先明确退出，只显示变量名。
 
 ```bash

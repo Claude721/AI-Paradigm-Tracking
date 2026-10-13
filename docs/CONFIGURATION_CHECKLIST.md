@@ -4,6 +4,8 @@
 
 2026-10-12 新增书目身份补全控制：`PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED=false` 默认不新增 OpenAlex 搜索；显式开启需已配置 `OPENALEX_API_KEY`，`PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT=8` 限制每个生产进程的新请求（1–100），成功身份使用原状态续跑。关闭或达到限额不能把未解析书目当完成；这不是月度成本控制。普通公开 audit 不因该开关而获得 API 授权，需同时 `--include-authenticated`，最多一次身份协议样本。详见 [输入闭合修复](INPUT_CLOSURE_REPAIR_20261012.md)。
 
+2026-10-13 独立 `source-interface-acceptance.yml` 可在明确授权后只验 NYU/Tavily 子集，无新增生产 Variable。它的 `bibliography_requests=1..8` 仅对本次临时 NYU 验收生效，不修改上述正式开关；Tavily 必须已启用、配置 Key/月度保护，账户 PAYG 明确关闭且现有账户/Key 额度至少 1。未知限额/已耗尽/缺 Key 不发搜索，不升级套餐，不检测其他平台或模型/SMTP。详见 [独立接口验收](SOURCE_ACCEPTANCE.md#独立-nyutavily-接口验收)。
+
 > 本地生产密钥填写到根目录 `.env`；GitHub 部署填写到 Actions Secrets。不要粘贴到聊天、截图或提交到 Git。独立验收脚本忽略 `.env`。配置模板见 `.env.example`。
 
 当前工程候选使用 schema v9：保留 v8 的固定批次并增加 Tavily 月度 credit 账本，自动迁移 v1–v8 状态且保留历史结果，继续 `reset_state=false`。逐入口 `source_check_only` 优先于 `smoke_only`，不运行模型、邮件或恢复生产数据库。预算续跑仍默认关闭，额外研究 run 会增加 API 消耗，只有所有者明确开启才自动排队。升级不等于生产 V0 验收，迁移、续跑与回退边界见 `CLOUD_AUTOMATION.md`。

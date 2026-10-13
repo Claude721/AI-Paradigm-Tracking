@@ -41,6 +41,7 @@ from sources.document_limits import response_byte_limit
 from sources.research_feed_source import ResearchFeedSource
 
 CONTRACT_VERSION = 3
+NYU_BIBLIOGRAPHY_URL = "https://wp.nyu.edu/cilvr/cilvr-group-publications/"
 
 
 def safe_url(value: str) -> str:
@@ -260,12 +261,20 @@ class RecordingTransport(httpx.AsyncBaseTransport):
 
 
 class SourceAudit:
-    def __init__(self, *, transport=None, include_authenticated=False, include_platforms=False, timeout=45, budget=900, max_requests=300, concurrency=3, clock=None, sleeper=None):
+    def __init__(self, *, transport=None, include_authenticated=False, include_platforms=False, timeout=45, budget=900, max_requests=300, concurrency=3, clock=None, sleeper=None, bibliography_requests=None, tavily_included_only=False):
+        if bibliography_requests is not None and (
+                type(bibliography_requests) is not int or not 1 <= bibliography_requests <= 8
+                or not include_authenticated):
+            raise ValueError("Explicit bibliography acceptance requires authentication and 1-8 requests")
+        if type(tavily_included_only) is not bool or (tavily_included_only and not include_platforms):
+            raise ValueError("Included-credit acceptance requires explicit platform authorization")
         self.transport = transport or httpx.AsyncHTTPTransport()
         self.include_authenticated = include_authenticated
         # Explicit opt-in: one minimal request per enabled platform (Reddit
         # additionally needs OAuth). Never implied by include_authenticated.
         self.include_platforms = include_platforms
+        self.bibliography_requests = bibliography_requests
+        self.tavily_included_only = tavily_included_only
         self.timeout, self.budget, self.max_requests, self.concurrency = timeout, budget, max_requests, concurrency
         self.request_count = 0
         self.host_locks, self.host_started = {}, {}
@@ -288,6 +297,11 @@ class SourceAudit:
             store = ParadigmStore(Path(directory) / "audit.db")
             async def run_one(entry):
                 row = {**entry.public(), "status": "pending", "requests": 0, "http": [], "parsed": 0, "persisted": 0}
+                if entry.kind == "official" and entry.url == NYU_BIBLIOGRAPHY_URL and self.bibliography_requests is not None:
+                    row["bibliography_request_limit"] = self.bibliography_requests
+                    # At most 8 identity GETs plus a bounded public index/detail
+                    # sample. This never changes the normal 6-request audit.
+                    row["entry_request_limit"] = self.bibliography_requests + 4
                 if entry.kind == "kol" and (entry.metadata.get("record") or {}).get("substack_public_archive"):
                     # Same total budget; a finite public archive needs several
                     # tiny metadata pages plus at most one rendered-post sample.
@@ -381,12 +395,13 @@ class SourceAudit:
             return await self.probe_platform(entry, row)
         if entry.kind == "official":
             meta_sample = (source_record(entry.url) or {}).get('public_catalog') == 'meta_publications_v1'
+            explicit_bibliography = entry.url == NYU_BIBLIOGRAPHY_URL and self.bibliography_requests is not None
             source = PriorityResearchPageSource(pages=[entry.url], per_page=1, lookback_days=60,
                                                catalog_page_limit=1 if meta_sample else None,
                                                client_factory=lambda **kwargs: self.client(row, **kwargs),
                                                bibliography_resolver=BibliographyResolver(
-                                                   enabled=self.include_authenticated and config.PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED,
-                                                   max_requests=1))
+                                                   enabled=self.include_authenticated and (explicit_bibliography or config.PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED),
+                                                   max_requests=self.bibliography_requests if explicit_bibliography else 1))
             evidence = await source.fetch()
             coverage = source.coverage()
             page = dict(coverage["pages"].get(entry.url, {}))
@@ -484,9 +499,13 @@ class SourceAudit:
             raise ValueError("Platform acceptance is not authorized")
         async with self.client(row) as client:
             if entry.key == "tavily":
+                if self.tavily_included_only and config.TAVILY_MONTHLY_CREDIT_LIMIT <= 0:
+                    raise ValueError("Included-credit acceptance requires the monthly guard")
                 if config.TAVILY_MONTHLY_CREDIT_LIMIT > 0:
                     from tavily_protocol import read_account_usage
-                    row["account_usage_credits"] = await read_account_usage(client, config.TAVILY_API_KEY)
+                    row["account_usage_credits"] = await read_account_usage(client, config.TAVILY_API_KEY,
+                        require_included_credit=self.tavily_included_only)
+                    row["included_credit_verified"] = self.tavily_included_only
                     if row["account_usage_credits"] + 1 > config.TAVILY_MONTHLY_CREDIT_LIMIT:
                         raise ValueError("Tavily monthly credit limit reached")
                 response = await client.post(entry.url, headers={"Authorization": f"Bearer {config.TAVILY_API_KEY}"}, json={
