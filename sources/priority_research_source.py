@@ -56,6 +56,7 @@ class PriorityResearchPageSource:
         client_factory=None,
         stage_cache=None,
         catalog_sleeper=None,
+        catalog_page_limit=None,
         bibliography_resolver=None,
     ):
         self.lookback_days = max(lookback_days, 1)
@@ -81,6 +82,7 @@ class PriorityResearchPageSource:
         self.client_factory = client_factory
         self.stage_cache = stage_cache
         self.catalog_sleeper = catalog_sleeper or asyncio.sleep
+        self.catalog_page_limit = catalog_page_limit
         self.bibliography_resolver = bibliography_resolver or BibliographyResolver(
             stage_cache=stage_cache, enabled=config.PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED,
             max_requests=config.PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT,
@@ -138,15 +140,69 @@ class PriorityResearchPageSource:
             )
             discovered: list[tuple[str, _ResearchLink]] = []
             bibliography_rows = {}
-            for index_url, response in zip(
-                self.pages, index_responses
-            ):
+
+            async def read_detail(link):
+                if link.fetch_url:
+                    landing = await bounded_get(client, link.url)
+                    landing.raise_for_status()
+                    if str(landing.url) != link.url:
+                        raise ValueError("Registered article landing redirected")
+                return await bounded_get(client, link.fetch_url or _download_url(link.url))
+
+            async def complete_detail(index_url, link):
+                page = self.page_coverage[index_url]
+                try:
+                    response = await read_detail(link)
+                    outside_before = page["detail_outside_window"]
+                    verifications = []
+                    evidence = self._parse_detail(index_url, link, response, cutoff, bibliography_rows,
+                                                  bibliography_verifications=verifications)
+                    if evidence is not None:
+                        detail_queues[index_url].complete(link, evidence, outside=False)
+                        cached_results.append(evidence)
+                        page["evidence"] += 1
+                    elif page["detail_outside_window"] > outside_before:
+                        detail_queues[index_url].complete(link, None, outside=True)
+                    for row, published_at in verifications:
+                        self.bibliography_resolver.verified(row, published_at, detail_contract=detail_queues[index_url].contract)
+                except Exception as exc:
+                    page["detail_failures"] += 1
+                    logger.warning("官方详情执行失败 %s: %s", link.url, type(exc).__name__)
+                finally:
+                    page["detail_pending"] = detail_queues[index_url].pending_count
+
+            # Seed normal detail queues before a potentially large finite
+            # catalogue walk. Cancellation must not starve unrelated indexes
+            # of their durable downstream tasks.
+            indexed = sorted(zip(self.pages,index_responses), key=lambda item:
+                (source_record(item[0]) or {}).get("public_catalog") == "meta_publications_v1")
+            for index_url, response in indexed:
+                metadata = source_record(index_url) or {}
+                index_attempts = []
+                if metadata.get("public_catalog") == "meta_publications_v1":
+                    # Finish already queued ordinary details before walking a
+                    # large catalogue. A later cancellation must not repeatedly
+                    # starve all other official entries of their actual HTTP.
+                    await asyncio.gather(*(complete_detail(page, link) for page, link in discovered))
+                    discovered.clear()
+                    # Keep the declared entry and its failure receipt. This is
+                    # a registered same-owner catalogue, not a search mirror,
+                    # known-paper seed or access-control workaround.
+                    from sources.meta_catalog import CATALOG_URL
+                    index_attempts.append({"url": index_url,
+                        "status": response.status_code if not isinstance(response, Exception) else None,
+                        "reason": "legacy_index_not_catalogue" if not isinstance(response, Exception) else type(response).__name__})
+                    try:
+                        response = await bounded_get(client, CATALOG_URL)
+                    except Exception as exc:
+                        response = exc
                 if isinstance(response, Exception):
                     self.page_coverage[index_url] = {
                         "status": "request_failed",
                         "error": type(response).__name__,
                         "discovered_links": 0,
                         "evidence": 0,
+                        "index_attempts": index_attempts,
                     }
                     logger.warning("官方研究入口读取失败 %s: %s", index_url, response)
                     continue
@@ -158,16 +214,17 @@ class PriorityResearchPageSource:
                         "error": f"HTTP {response.status_code}",
                         "discovered_links": 0,
                         "evidence": 0,
+                        "index_attempts": index_attempts,
                     }
                     logger.warning("官方研究入口返回失败 %s: %s", index_url, exc)
                     continue
                 try:
-                    links = _discover_index_links(response.text, str(response.url), source_url=index_url)
+                    links = ([] if metadata.get("public_catalog") == "meta_publications_v1" else
+                             _discover_index_links(response.text, str(response.url), source_url=index_url))
                 except Exception as exc:
                     self.page_coverage[index_url] = {"status": "parse_zero_links", "error": type(exc).__name__,
                                                      "discovered_links": 0, "evidence": 0}
                     continue
-                metadata = source_record(index_url) or {}
                 unresolved_citations = 0
                 bibliography_diagnostics = {}
                 if metadata.get("bibliography_arxiv"):
@@ -175,7 +232,8 @@ class PriorityResearchPageSource:
                     links.extend(citation_links)
                     try:
                         rows = await self.bibliography_resolver.resolve(client, index_url,
-                            bibliography_diagnostics["pending_records"], lookback_days=self.lookback_days)
+                            bibliography_diagnostics["pending_records"], lookback_days=self.lookback_days,
+                            explicit_records=bibliography_diagnostics.pop("explicit_records", []))
                     except Exception as exc:
                         rows = [{"key": hashlib.sha256(index_url.encode()).hexdigest(), "title": "",
                                  "status": "pending", "reason": type(exc).__name__}]
@@ -188,6 +246,18 @@ class PriorityResearchPageSource:
                 script_urls = _publication_script_urls(response.text, str(response.url), metadata)
                 script_failures = 0
                 catalog_diagnostics = {}
+                if metadata.get("public_catalog") == "meta_publications_v1":
+                    from sources.meta_catalog import fetch_catalog
+                    try:
+                        catalog_links, catalog_diagnostics = await fetch_catalog(
+                            lambda url: bounded_get(client, url), index_url=index_url,
+                            lookback_days=self.lookback_days, stage_cache=self.stage_cache,
+                            sleeper=self.catalog_sleeper, first_response=response, max_pages=self.catalog_page_limit)
+                        links.extend(_ResearchLink(**item) for item in catalog_links)
+                        script_failures += catalog_diagnostics["pagination_pending"]
+                    except Exception as exc:
+                        script_failures += 1
+                        catalog_diagnostics = {"status": "invalid_registered_catalog", "error": type(exc).__name__}
                 if metadata.get("public_catalog") == "qwen_public_collections_v1":
                     from sources.qwen_catalog import fetch_catalog
                     try:
@@ -257,9 +327,10 @@ class PriorityResearchPageSource:
                 recent_links = [
                     link
                     for link in allowed_links
-                    if not link.published_at
+                    if link.url not in catalog_diagnostics.get('outside_window_conflicting_publications', [])
+                    and (not link.published_at
                     or not _parse_date(link.published_at)
-                    or _parse_date(link.published_at) >= cutoff
+                    or _parse_date(link.published_at) >= cutoff)
                 ]
                 try:
                     queue = OfficialDetailQueue(index_url, self.lookback_days, self.stage_cache)
@@ -317,6 +388,7 @@ class PriorityResearchPageSource:
                     "bibliography_diagnostics": bibliography_diagnostics,
                     "catalog_diagnostics": catalog_diagnostics,
                     "resolved_index_url": str(response.url),
+                    "index_attempts": index_attempts,
                 }
                 if self.per_page > 0 and len(pending_links) > self.per_page:
                     message = (
@@ -338,38 +410,6 @@ class PriorityResearchPageSource:
                         logger.warning(message, *arguments)
                 for link in selected_links:
                     discovered.append((index_url, link))
-
-            async def read_detail(link):
-                if link.fetch_url:
-                    # A dynamic reader-facing landing is only acceptable with
-                    # its registered article API, and both must be accessible.
-                    landing = await bounded_get(client, link.url)
-                    landing.raise_for_status()
-                    if str(landing.url) != link.url:
-                        raise ValueError("Registered article landing redirected")
-                return await bounded_get(client, link.fetch_url or _download_url(link.url))
-
-            async def complete_detail(index_url, link):
-                page = self.page_coverage[index_url]
-                try:
-                    response = await read_detail(link)
-                    outside_before = page["detail_outside_window"]
-                    verifications = []
-                    evidence = self._parse_detail(index_url, link, response, cutoff, bibliography_rows,
-                                                  bibliography_verifications=verifications)
-                    if evidence is not None:
-                        detail_queues[index_url].complete(link, evidence, outside=False)
-                        cached_results.append(evidence)
-                        page["evidence"] += 1
-                    elif page["detail_outside_window"] > outside_before:
-                        detail_queues[index_url].complete(link, None, outside=True)
-                    for row, published_at in verifications:
-                        self.bibliography_resolver.verified(row, published_at, detail_contract=detail_queues[index_url].contract)
-                except Exception as exc:
-                    page["detail_failures"] += 1
-                    logger.warning("官方详情执行失败 %s: %s", link.url, type(exc).__name__)
-                finally:
-                    page["detail_pending"] = detail_queues[index_url].pending_count
 
             # Each healthy detail commits before a slow/cancelled peer; no
             # all-response barrier ahead of the downstream source checkpoint.
@@ -913,11 +953,27 @@ class _BibliographicParser(_ArticleParser):
         super().handle_endtag(tag)
 
 
+def _citation_title(text, year_end):
+    # Anchor to the title immediately after the citation year. A quote inside
+    # the title is not its end; NYU contains e.g. “ ”AI Watermarking”: … ”.
+    # Multiple plausible closing delimiters stay ambiguous rather than sending
+    # a truncated prefix to exact-title identity lookup.
+    tail = text[year_end:].lstrip(" .,;")
+    if not tail or tail[0] not in {'“', '"'}:
+        return ""
+    closing = '”' if tail[0] == '“' else '"'
+    ends = list(re.finditer(re.escape(closing) + r"(?=\s*(?:[,;.]|$))", tail[1:]))
+    if len(ends) != 1:
+        return ""
+    title = _compact_text(tail[1:ends[0].start() + 1])
+    return title if 5 <= len(title) <= 800 else ""
+
+
 def _discover_bibliographic_publications(html_text, *, cutoff=None, diagnostics=None):
     parser = _BibliographicParser()
     parser.feed(html_text)
     links, unresolved, total, outside_years = {}, 0, 0, 0
-    pending_records = []
+    pending_records, explicit_records = [], []
     for text in parser.paragraphs:
         # A citation year is not a publication timestamp. Resolve the explicit
         # arXiv ID through its canonical landing page and normal detail parser.
@@ -932,7 +988,7 @@ def _discover_bibliographic_publications(html_text, *, cutoff=None, diagnostics=
             outside_years += 1
             continue
         identifier = re.search(r"\barXiv\s*:\s*(\d{4}\.\d{4,5}(?:v\d+)?)\b", text, re.I)
-        title = re.search(r'[“"]([^”"]{5,800})[”"]', text)
+        title = _citation_title(text, year.end())
         # Only explicit identifiers qualify; a journal/conference name or a
         # paper title is not permission to synthesize a primary URL.
         doi = re.search(r"(?:https?://doi\.org/|\bdoi\s*:\s*)(10\.\d{4,9}/[^\s<>\"”]+)", text, re.I)
@@ -940,7 +996,7 @@ def _discover_bibliographic_publications(html_text, *, cutoff=None, diagnostics=
             unresolved += 1
             pending_records.append({
                 "key": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                "title": _compact_text(title.group(1)) if title else "",
+                "title": title,
                 "citation_year": int(year.group(1)),
                 "author_text": _compact_text(text[:year.start()]).strip(" .,;"),
                 "status": "pending_primary_metadata",
@@ -949,14 +1005,17 @@ def _discover_bibliographic_publications(html_text, *, cutoff=None, diagnostics=
             continue
         url = ("https://arxiv.org/abs/" + identifier.group(1) if identifier
                else "https://doi.org/" + doi.group(1).rstrip(".,;"))
-        links[url] = _ResearchLink(title=_compact_text(title.group(1)), url=url)
+        links[url] = _ResearchLink(title=title, url=url)
+        explicit_records.append({"key": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "title": title, "citation_year": int(year.group(1)),
+            "author_text": _compact_text(text[:year.start()]).strip(" .,;"), "explicit_url": url})
     if diagnostics is not None:
         diagnostics.update(citation_records=total, outside_window_by_year=outside_years,
                            resolved_arxiv_urls=sum(url.startswith("https://arxiv.org/") for url in links),
                            resolved_doi_urls=sum(url.startswith("https://doi.org/") for url in links),
                            unresolved_in_window=unresolved,
                            unresolved_boundary="window_year_candidates_not_verified_recent_publications",
-                           pending_records=pending_records)
+                           pending_records=pending_records, explicit_records=explicit_records)
     return list(links.values()), unresolved
 
 

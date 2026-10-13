@@ -93,7 +93,7 @@ class BibliographyResolver:
         return hashlib.sha256(json.dumps([1, index_url, lookback_days,
             research_now().isoformat(), key], ensure_ascii=False).encode()).hexdigest()
 
-    async def resolve(self, client, index_url, records, *, lookback_days):
+    async def resolve(self, client, index_url, records, *, lookback_days, explicit_records=()):
         manifest_key = self.signature(index_url, lookback_days, "manifest")
         old = self.stage_cache.cache_get("bibliography_manifest", manifest_key) if self.stage_cache else None
         if old is not None and not isinstance(old, dict):
@@ -102,6 +102,14 @@ class BibliographyResolver:
         if not isinstance(manifest, dict):
             raise ValueError("Invalid bibliography manifest")
         manifest.update({record["key"]: record for record in records})
+        # A parser repair may recover an explicit ID for a historically pending
+        # citation. Rebind that existing task, never delete it or synthesize an
+        # OpenAlex identity. New direct-ID citations use the normal detail queue.
+        for record in explicit_records:
+            if record.get("key") in manifest:
+                if not primary_url(record.get("explicit_url")):
+                    raise ValueError("Invalid explicit bibliography identifier")
+                manifest[record["key"]] = dict(record)
         for key, record in manifest.items():
             if (not isinstance(record, dict) or record.get("key") != key
                     or not isinstance(record.get("title"), str)
@@ -128,8 +136,16 @@ class BibliographyResolver:
             signature = self.signature(index_url, lookback_days, key)
             cached = cached_results[key]
             attempts = (cached or {}).get("attempt_count", 0)
-            if cached is not None and cached.get("status") in {"resolved_url", "primary_verified"}:
-                if not primary_url(cached.get("url")) or not re.fullmatch(r"https://openalex.org/W\d+", str(cached.get("work_id", ""))):
+            explicit = primary_url(record.get("explicit_url"))
+            if explicit and not (cached and cached.get("status") == "primary_verified" and cached.get("url") == explicit):
+                result = {"status": "resolved_url", "url": explicit,
+                    "identity_basis": "explicit_source_identifier",
+                    "reason": "primary_date_and_content_verification_pending"}
+            elif cached is not None and cached.get("status") in {"resolved_url", "primary_verified"}:
+                known_work = re.fullmatch(r"https://openalex.org/W\d+", str(cached.get("work_id", "")))
+                explicit_identity = (cached.get("identity_basis") == "explicit_source_identifier"
+                                     and explicit and cached.get("url") == explicit)
+                if not primary_url(cached.get("url")) or not (known_work or explicit_identity):
                     raise ValueError("Invalid bibliography identity checkpoint")
                 result = dict(cached)
                 # A primary receipt is not reset merely by restarting. The
@@ -175,7 +191,7 @@ class BibliographyResolver:
 
     def require_primary(self, row):
         if row.get("status") == "primary_verified":
-            result = {key: row[key] for key in ("url", "work_id", "attempt_count")}
+            result = {key: row[key] for key in ("url", "work_id", "identity_basis", "attempt_count") if key in row}
             result.update(status="resolved_url", reason="primary_date_and_content_verification_pending")
             self.save(row["input_signature"], result)
             row.pop("primary_published_at", None)
@@ -183,7 +199,7 @@ class BibliographyResolver:
             row.update(result)
 
     def verified(self, row, published_at, *, detail_contract):
-        result = {key: row[key] for key in ("url", "work_id", "attempt_count")}
+        result = {key: row[key] for key in ("url", "work_id", "identity_basis", "attempt_count") if key in row}
         result.update(status="primary_verified", reason="primary_metadata_verified",
                       primary_published_at=published_at, primary_detail_contract=detail_contract)
         # The adapter has already durably saved the primary detail. Expose the

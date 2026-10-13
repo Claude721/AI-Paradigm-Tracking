@@ -14,16 +14,25 @@ from datetime import datetime, timedelta, timezone
 from runtime_clock import research_now
 from email.utils import parsedate_to_datetime
 from html import unescape
+from pathlib import Path
+import hashlib
 from urllib.parse import urlencode
 
 import httpx
 
 import config
 from sources.feed_contract import feed_nodes, feed_text, feed_link
+from sources.document_limits import bounded_document_get
 from paradigms.models import EvidenceType, TechnicalEvidence, nonnegative_number
 from research_watchlist import KOL_SOURCES, KOL_SOURCE_VERSION
 
 logger = logging.getLogger(__name__)
+
+
+def curated_feed_policy():
+    root = Path(__file__).parent
+    return hashlib.sha256(b''.join((root/name).read_bytes() for name in
+        ('curated_intelligence_source.py', 'substack_archive.py', 'feed_contract.py', 'document_limits.py'))).hexdigest()
 
 
 _AI_ANCHORS = (
@@ -67,9 +76,39 @@ class CuratedKOLSource:
 
     source_name = "curated-kol-feeds"
 
-    def __init__(self, lookback_days: int = 30) -> None:
+    def __init__(self, lookback_days: int = 30, *, stage_cache=None, client_factory=None, sleeper=None) -> None:
         self.lookback_days = max(lookback_days, 1)
         self._coverage: dict[str, object] = {}
+        self.stage_cache = stage_cache
+        self.client_factory = client_factory or httpx.AsyncClient
+        self.sleeper = sleeper or asyncio.sleep
+
+    async def read_entry(self, client, record, feed_url, *, detail_limit=None):
+        receipt = {'complete':False, 'feed_url':feed_url, 'attempts':[]}
+        response = None
+        try:
+            response = await bounded_document_get(client, feed_url)
+            response.raise_for_status()
+            items, filtered = _parse_feed(response.text, feed_url=feed_url,
+                lookback_days=self.lookback_days, record=record, forum=None)
+            receipt.update(complete=True, protocol='rss_atom')
+            return items, filtered, receipt
+        except Exception as exc:
+            receipt['attempts'].append({'url':feed_url, 'status':response.status_code if response else None,
+                                        'reason':type(exc).__name__})
+            if not record.get('substack_public_archive'):
+                receipt['reason'] = type(exc).__name__
+                return [], 0, receipt
+        try:
+            from sources.substack_archive import fetch_archive
+            values, filtered, diagnostics = await fetch_archive(lambda url: bounded_document_get(client,url),
+                record=record, feed_url=feed_url, lookback_days=self.lookback_days,
+                stage_cache=self.stage_cache, sleeper=self.sleeper, detail_limit=detail_limit)
+            receipt.update(complete=diagnostics['complete'], protocol='registered_public_archive', archive=diagnostics)
+            return values, filtered, receipt
+        except Exception as exc:
+            receipt['reason'] = type(exc).__name__
+            return [], 0, receipt
 
     async def safe_fetch(self) -> list[TechnicalEvidence]:
         if not config.KOL_SOURCE_ENABLED:
@@ -122,13 +161,13 @@ class CuratedKOLSource:
             )
             for index, url in enumerate(config.KOL_CUSTOM_FEED_URLS)
         )
-        async with httpx.AsyncClient(
+        async with self.client_factory(
             timeout=25,
             follow_redirects=True,
             headers={"User-Agent": "AI-Paradigm-Radar/3.3 (public RSS reader)"},
         ) as client:
             responses = await asyncio.gather(
-                *(client.get(url) for _, url in records),
+                *(self.read_entry(client,record,url) for record, url in records),
                 return_exceptions=True,
             )
 
@@ -136,25 +175,19 @@ class CuratedKOLSource:
         failures: list[str] = []
         completed = 0
         filtered = 0
+        receipts = {}
         for (record, feed_url), response in zip(records, responses):
             if isinstance(response, Exception):
                 failures.append(f"{record['id']}:{type(response).__name__}")
                 continue
-            try:
-                response.raise_for_status()
-                parsed, rejected = _parse_feed(
-                    response.text,
-                    feed_url=feed_url,
-                    lookback_days=self.lookback_days,
-                    record=record,
-                    forum=None,
-                )
-                items.extend(parsed)
-                filtered += rejected
+            parsed, rejected, receipt = response
+            receipts[feed_url] = receipt
+            items.extend(parsed)
+            filtered += rejected
+            if receipt['complete']:
                 completed += 1
-            except Exception as exc:
-                failures.append(f"{record['id']}:{type(exc).__name__}")
-                logger.warning("KOL Feed 解析失败 %s: %s", feed_url, exc)
+            else:
+                failures.append(f"{record['id']}:{receipt.get('reason','ArchivePending')}")
         deduplicated = list({item.fingerprint: item for item in items}.values())
         self._coverage = {
             "catalog_version": KOL_SOURCE_VERSION,
@@ -162,6 +195,7 @@ class CuratedKOLSource:
             "configured_feeds": len(records),
             "completed_feeds": completed,
             "failed_feeds": failures,
+            "feed_receipts": receipts,
             "relevance_filtered_items": filtered,
             "returned_items": len(deduplicated),
             "x_directory_entries": sum(bool(item.get("x_handle")) for item in KOL_SOURCES),

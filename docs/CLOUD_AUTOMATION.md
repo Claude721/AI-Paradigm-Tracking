@@ -38,6 +38,8 @@ NYU 书目回执与详情按当前策略配对恢复，不再每次重置已核�
 
 手动 `source_check_only=true` **优先于 `smoke_only`**：跳过配置 doctor、Smoke、生产状态恢复/保存、研究、报告、全部邮件路径和续跑排队；仍执行离线发布门和 artifact 上传。只检查公开 HTTP 输入、真实生产解析器及临时 SQLite 读写回环；OpenAlex/GitHub 使用既有只读凭据。脚本默认 900 秒、300 次全局请求、45 秒单入口、6 次单入口请求；生产官方页与验收共用解压后的普通响应 10 MB、真实 PDF 文件签名响应 40 MB 上限。429/配额耗尽后同主机剩余项记为未执行。
 
+2026-10-13：仅已注册 Gary Marcus / Zvi 的公开归档入口允许每项最多 12 次，原总预算/单入口时间不变。仍保留原 RSS 项和失败回执；公开归档须闭合样本时间窗口，最多读一篇公开正文，其余正文仍 pending。Meta audit 明确为首目录页 / 最多一篇详情协议样本，真实故障仍失败，后续 `pagination_pending` / 详情尾项保留，不宣称全出版覆盖；生产默认完整有限分页，与本轮已实测的 165 页恢复分开。协议样本通过不闭合生产研究，也不代表订阅全文或独立讨论认证。默认源范围及生产数据库未修改。
+
 独立 CLI 在请求前仍复用零网络配置语法检查，不要求模型或 SMTP 密钥；`flase` 等无效开关、非法入口或越界整数不会被静默解析为关闭/默认值。
 
 在 `paradigm-radar-audit-*` 中下载 `source_audit_latest.json`、`source_audit_latest.md` 和 `source_audit.log`。HTTP 200 登录页、解析空索引、错误 JSON、详情失败都会明确失败；原始正文、查询凭据和生产数据库不进入验收制品。手动 `source_platform_checks` 默认 false；显式 true 才授权已启用平台的最小协议样本：Tavily 最多一次 basic 搜索，月度保护开启时先只读账户用量；X/Semantic Scholar 各一次，已批准 Reddit 先 OAuth 再一次搜索。Tavily/X 可能消耗额度，不调用研究模型、不启用关闭的平台、不自动加钱。缺凭据、失败/未测试/未执行阻止验收完成，不发故障邮件。即使样本全通过，`campaign_coverage_complete` 仍为 false，不证明生产全分页/研究闭合。见 [逐入口验收](SOURCE_ACCEPTANCE.md) 与 [Key 复验指南](SOURCE_API_KEY_VERIFICATION.md)。

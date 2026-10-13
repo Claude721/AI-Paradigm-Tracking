@@ -108,7 +108,7 @@ class ParadigmDiscovery:
             lookback_days=self.broad_lookback_days, stage_cache=stage_cache,
         )
         self.kol_feeds = CuratedKOLSource(
-            lookback_days=self.high_signal_lookback_days
+            lookback_days=self.high_signal_lookback_days, stage_cache=stage_cache,
         )
         self.high_signal_forums = HighSignalForumSource(
             lookback_days=self.high_signal_lookback_days
@@ -158,6 +158,10 @@ class ParadigmDiscovery:
                 value["detail_parser_policy"] = official_detail_policy()
             if isinstance(source, HighSignalForumSource):
                 value["feeds"] = source._feeds()
+            if isinstance(source, CuratedKOLSource) and include_adapters:
+                from sources.curated_intelligence_source import curated_feed_policy
+                value["public_archive_adapters"] = [item.get("substack_public_archive") for item in KOL_SOURCES]
+                value["feed_parser_policy"] = curated_feed_policy()
             value["settings"] = settings.get(source.source_name, [])
             plans[source.source_name] = hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         return plans

@@ -25,7 +25,7 @@ from database.paradigm_store import ParadigmStore
 from paradigms.discovery import _raw_to_origin, _hf_to_support, _follow_builder_to_support, _follow_builder_blog_to_origin
 from paradigms.landscape import arxiv_query_plan, arxiv_priority_author_query_plan
 from paradigms.models import TechnicalEvidence, technical_evidence_from_dict, _evidence_datetime
-from research_watchlist import KOL_SOURCES, OFFICIAL_GITHUB_ORGANIZATIONS
+from research_watchlist import KOL_SOURCES, OFFICIAL_GITHUB_ORGANIZATIONS, source_record
 from runtime_clock import research_window
 from runtime_provenance import runtime_provenance, source_fingerprint, ROOT as PROVENANCE_ROOT
 from sources.arxiv_source import ArxivSource, ARXIV_API, TECHNICAL_REPORT_QUERY
@@ -168,7 +168,7 @@ class RecordingTransport(httpx.AsyncBaseTransport):
                 if host in self.runner.blocked_hosts:
                     self.row["transport_limit"] = "provider_rate_limited"
                     raise AuditLimit("provider_rate_limited")
-                if self.runner.request_count >= self.runner.max_requests or self.row["requests"] >= 6:
+                if self.runner.request_count >= self.runner.max_requests or self.row["requests"] >= self.row.get("entry_request_limit", 6):
                     self.row["transport_limit"] = "request_limit"
                     raise AuditLimit("request_limit")
                 spacing = (OPENREVIEW_REQUEST_SPACING_SECONDS if host == "api2.openreview.net"
@@ -288,6 +288,10 @@ class SourceAudit:
             store = ParadigmStore(Path(directory) / "audit.db")
             async def run_one(entry):
                 row = {**entry.public(), "status": "pending", "requests": 0, "http": [], "parsed": 0, "persisted": 0}
+                if entry.kind == "kol" and (entry.metadata.get("record") or {}).get("substack_public_archive"):
+                    # Same total budget; a finite public archive needs several
+                    # tiny metadata pages plus at most one rendered-post sample.
+                    row["entry_request_limit"] = 12
                 if not entry.enabled:
                     row.update(status="disabled", reason="disabled_by_configuration")
                     return row
@@ -357,10 +361,28 @@ class SourceAudit:
         return httpx.AsyncClient(**kwargs, transport=RecordingTransport(self.transport, self, row))
 
     async def probe(self, entry, row):
+        if entry.kind == "kol":
+            from sources.curated_intelligence_source import CuratedKOLSource
+            source = CuratedKOLSource(lookback_days=60, sleeper=self.sleep)
+            async with self.client(row) as client:
+                evidence, filtered, receipt = await source.read_entry(client, entry.metadata.get("record") or {}, entry.url, detail_limit=1)
+            receipt["feed_url"] = safe_url(receipt["feed_url"])
+            for attempt in receipt["attempts"]:
+                attempt["url"] = safe_url(attempt["url"])
+            row["coverage"] = receipt
+            archive = receipt.get("archive") or {}
+            sampled = (receipt.get("protocol") == "registered_public_archive" and archive.get("catalogue_complete")
+                       and archive.get("sample_limit") == 1 and not archive.get("failed_public_posts"))
+            if not receipt["complete"] and not sampled:
+                raise ValueError("KOL feed/equivalent public archive did not close")
+            return evidence, {"filtered":filtered,"coverage":receipt,
+                "sample_boundary":"公开 RSS 或同作者归档完整时间窗口索引、最多一篇公开正文样本；尾项仍 pending，不证明全文认证/独立承接"}
         if entry.kind == "separate-acceptance":
             return await self.probe_platform(entry, row)
         if entry.kind == "official":
+            meta_sample = (source_record(entry.url) or {}).get('public_catalog') == 'meta_publications_v1'
             source = PriorityResearchPageSource(pages=[entry.url], per_page=1, lookback_days=60,
+                                               catalog_page_limit=1 if meta_sample else None,
                                                client_factory=lambda **kwargs: self.client(row, **kwargs),
                                                bibliography_resolver=BibliographyResolver(
                                                    enabled=self.include_authenticated and config.PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED,
@@ -373,11 +395,23 @@ class SourceAudit:
             if "index_data_urls" in page:
                 page["index_data_urls"] = [safe_url(url) for url in page["index_data_urls"]]
             row["coverage"] = page
-            if coverage["request_failed"] or coverage["parse_zero_links"] or coverage["detail_failures"] or coverage.get("unresolved_citations"):
+            catalog = page.get('catalog_diagnostics') or {}
+            expected_tail = (meta_sample and catalog.get('selection_limit_origin') == 'caller_sample'
+                and catalog.get('request_limit') == 1 and catalog.get('pages_completed') == 1
+                and catalog.get('reason') == 'catalogue_request_safety_limit'
+                and catalog.get('pagination_pending') == 1 and not catalog.get('failure_history'))
+            page['catalog_sample_complete'] = bool(expected_tail) if meta_sample else None
+            # Only the explicitly declared sample tail is exempt from the
+            # protocol check. It remains pending in production coverage; any
+            # actual page/detail/identity failure still rejects this sample.
+            actual_failures = coverage['detail_failures'] - int(bool(expected_tail))
+            if coverage["request_failed"] or coverage["parse_zero_links"] or actual_failures or coverage.get("unresolved_citations"):
                 raise ValueError("Official index/detail failed its production parser")
             if page.get("status") == "parsed" and not evidence and not page.get("detail_outside_window"):
                 raise ValueError("Selected official detail produced no verifiable evidence")
-            return evidence, {"coverage": page, "sample_boundary": "最多一条详情；不证明分页与全部发布覆盖"}
+            return evidence, {"coverage": page, "sample_boundary": (
+                "Meta 首个已验证出版目录页、最多一条详情；后续目录/详情仍 pending，不证明完整分页或生产覆盖"
+                if meta_sample else "最多一条详情；不证明分页与全部发布覆盖")}
         params = dict(entry.params)
         headers = {}
         if entry.credential == "OPENALEX_API_KEY":

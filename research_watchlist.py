@@ -336,12 +336,14 @@ KOL_SOURCES: tuple[dict, ...] = (
         "id": "gary-marcus", "name": "Gary Marcus",
         "aliases": ("Gary Marcus",), "focus": "AI 能力边界、认知与产业批评",
         "homepage": "https://garymarcus.substack.com/", "feed_urls": ("https://garymarcus.substack.com/feed",),
+        "substack_public_archive": {"url":"https://garymarcus.substack.com/archive", "publication_id":888615},
         "x_handle": "GaryMarcus", "origin_policy": "secondary_only",
     },
     {
         "id": "zvi-mowshowitz", "name": "Zvi Mowshowitz",
         "aliases": ("Zvi Mowshowitz",), "focus": "AI 前沿动态、治理与社区讨论",
         "homepage": "https://thezvi.substack.com/", "feed_urls": ("https://thezvi.substack.com/feed",),
+        "substack_public_archive": {"url":"https://thezvi.substack.com/archive", "publication_id":573100},
         "x_handle": "TheZvi", "origin_policy": "secondary_only",
     },
     {
@@ -382,7 +384,7 @@ RESEARCH_SOURCES: tuple[dict, ...] = (
     {"url": "https://openai.com/research/index/", "owner": "openai", "tier": "established"},
     {"url": "https://www.anthropic.com/research", "owner": "anthropic", "tier": "established"},
     {"url": "https://deepmind.google/research/", "owner": "google-deepmind", "tier": "established", "allowed_domains": ("deepmind.google", "storage.googleapis.com")},
-    {"url": "https://ai.meta.com/research/publications/", "owner": "meta-fair", "tier": "established", "allowed_domains": ("ai.meta.com",)},
+    {"url": "https://ai.meta.com/research/publications/", "owner": "meta-fair", "tier": "established", "public_catalog": "meta_publications_v1", "allowed_domains": ("ai.meta.com",)},
     {"url": "https://www.microsoft.com/en-us/research/lab/ai-frontiers/publications/", "owner": "microsoft-research", "tier": "established"},
     {"url": "https://research.nvidia.com/labs/gear/publications/", "owner": "nvidia-research", "tier": "established", "allowed_domains": ("research.nvidia.com", "nvidia.com"), "index_script_pattern": r"^/labs/gear/_next/static/chunks/pages/publications-[a-zA-Z0-9]+\.js$"},
     {"url": "https://mistral.ai/news/?category=research", "owner": "mistral", "tier": "established"},
@@ -423,7 +425,7 @@ RESEARCH_SOURCES: tuple[dict, ...] = (
     {"url": "https://bair.berkeley.edu/blog/", "owner": "bair", "tier": "verified"},
     {"url": "https://crfm.stanford.edu/", "owner": "stanford-crfm", "tier": "verified", "index_path": "/blog.html", "detail_path_pattern": r"^/20\d{2}/\d{2}/\d{2}/[^/]+\.html$"},
     {"url": "https://www.ri.cmu.edu/publications/", "owner": "cmu-ri", "tier": "verified", "allowed_domains": ("ri.cmu.edu",), "detail_path_pattern": r"^/[^/]{12,}/?$"},
-    {"url": "https://wp.nyu.edu/cilvr/cilvr-group-publications/", "owner": "nyu-cilvr", "tier": "verified", "bibliography_arxiv": True, "bibliography_year_bound": True, "bibliography_adapter_version": 3, "allowed_domains": ("doi.org",)},
+    {"url": "https://wp.nyu.edu/cilvr/cilvr-group-publications/", "owner": "nyu-cilvr", "tier": "verified", "bibliography_arxiv": True, "bibliography_year_bound": True, "bibliography_adapter_version": 4, "allowed_domains": ("doi.org",)},
 )
 
 

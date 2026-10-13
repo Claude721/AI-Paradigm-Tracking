@@ -1,6 +1,6 @@
 # 逐入口信源验收
 
-更新：2026-10-12。用于验证输入与接口，不是完整研究、报告或生产 V0 认证。它不会减少生产研究范围、清空 backlog 或把缺口改写为“没有更新”。最新云端结果见 [run 38027283680](RUN_38027283680_SOURCE_REVIEW.md)，后续局部修复/样本见 [输入闭合修复](INPUT_CLOSURE_REPAIR_20261012.md)，云端操作见 [Key 复验指南](SOURCE_API_KEY_VERIFICATION.md)。
+更新：2026-10-13。用于验证输入与接口，不是完整研究、报告或生产 V0 认证。它不会减少生产研究范围、清空 backlog 或把缺口改写为“没有更新”。已验云端基线见 [run 38239955723](RUN_38239955723_SOURCE_REVIEW.md)，后续适配与公开样本见 [本轮入口修复](SOURCE_REPAIR_20261013.md)，云端操作见 [Key 复验指南](SOURCE_API_KEY_VERIFICATION.md)。所有者要求保留全部入口为交付必需项。
 
 ## 云端先做什么
 
@@ -30,6 +30,10 @@ python scripts/source_audit.py --entry official:5 --budget-seconds 100 --max-req
 ```
 
 默认输出 `logs/source_audit_latest.json/md`，已被 Git 忽略。默认 900 秒总预算、300 次总请求、45 秒单入口、6 次单入口请求；arXiv 与 OpenReview 同主机至少 3.1 秒，其他主机至少 1 秒。OpenReview 公开 GET 的普通 429 若有合法且不超过 60 秒的 `Retry-After`，允许整轮该主机一次共享冷却/恢复；恢复仍计入原请求/时间上限，原始 429 留在账本。挑战、长/未知等待、重复限流及其他提供方仍熔断，其他来源继续。已尝试却无法继续的对象记失败，真正零请求项才记未执行。生产官方页与验收共用流式解压上限：普通响应 10 MB，真实 PDF 文件签名响应 40 MB；扩展名/MIME 不足，超限关闭连接并保留失败，不记成功空结果。私网字面 IP、localhost、带 userinfo 和非 HTTP(S) 地址拒绝访问，重定向逐跳核对；不声称这是完整 DNS 重绑定防护。
+
+唯一新增请求例外：已注册的 Gary Marcus / Zvi 公开归档，每项最多 12 次，仍共用原 300 次/900 秒总预算和 45 秒入口预算。RSS 失败先保留回执，再读取同一作者公开 `/archive` 与 `sort=new` 分页；必须闭合样本 60 天索引，最多一篇公开正文样本，未读尾项在 `pending_public_posts` 保留。`passed` 只证明这个索引/正文样本协议，不证明全部正文、付费全文或独立承接。公开数据声明阻止 AI 抓取、身份/日期冲突和未知格式都拒绝；不登录、不解锁订阅、不执行 JS。
+
+Meta 同源出版目录的生产覆盖必须有限分页穷尽，不能看见旧卡片或已知论文子集就停止。临时 audit 与学术查询一样只验证首个已解析目录页、最多一篇详情，不为每次协议测试下载 165 页历史目录；JSON 明确记录 `catalog_sample_complete` 与尚未闭合的 `pagination_pending` / 详情尾项，`catalog_diagnostics.complete=false` 不能用于生产交付。真实页/身份/详情失败仍拒绝样本。生产默认完整分页并固定窗口保存；本轮已另做 165 页有限目录/同窗恢复实测，不是依赖这个首屏协议声明全量通过。
 
 `--include-authenticated` 仅开放有界 OpenAlex/GitHub。`--include-platforms` 是额外明确授权：Tavily 最多一次 basic 搜索，月度保护开启时先一次只读 `/usage`；X 最多 10 条的一次搜索、Semantic Scholar 一次、Reddit OAuth 加一次最小搜索。不启用关闭的平台，不自动补格式或重试付费请求。Tavily 用量未知/额度耗尽不搜索，成功样本必须确认本次 credits，关闭 auto_parameters；独立验收不恢复生产额度账本，不是账户级费用硬保证。未配置与 disabled 不算通过；启用入口缺少凭据也阻止 `acceptance_complete`。`--entry` / `--kind` 是局部诊断，始终不算完整验收；即使所选样本 passed，退出码仍为 1。
 
