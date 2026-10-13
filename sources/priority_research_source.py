@@ -759,6 +759,7 @@ class _ArticleParser(HTMLParser):
         super().__init__()
         self.base_url = base_url
         self.title = ""
+        self._citation_title = ""
         self.published_at = ""
         self.modified_at = ""
         self.authors: list[str] = []
@@ -854,13 +855,28 @@ class _ArticleParser(HTMLParser):
                 self.modified_at = self.modified_at or attributes.get("content", "")
             if key in {"author", "citation_author"}:
                 author = _compact_text(attributes.get("content", ""))
+                # arXiv's citation_author is explicitly family, given. Keep
+                # all name tokens, but present the same given-family form as
+                # its scholarly API; never reinterpret generic author lists.
+                if (key == 'citation_author' and urlparse(self.base_url).hostname == 'arxiv.org'
+                        and author.count(',') == 1 and not author.startswith(('http://', 'https://'))):
+                    family, given = (part.strip() for part in author.split(','))
+                    if family and given:
+                        author = f'{given} {family}'
                 if author and not author.startswith(("http://", "https://")):
                     self.authors.append(author)
             if key == "og:site_name":
                 self.site_name = self.site_name or _compact_text(
                     attributes.get("content", "")
                 )
-            if key in {"og:title", "citation_title", "twitter:title"}:
+            if key == 'citation_title':
+                value = _compact_text(attributes.get('content', ''))
+                if value:
+                    if self._citation_title and normalized_title(value) != normalized_title(self._citation_title):
+                        raise ValueError('Conflicting scholarly document titles')
+                    self._citation_title = value
+                    self.title = value
+            elif key in {"og:title", "twitter:title"}:
                 self.title = self.title or _compact_text(
                     attributes.get("content", "")
                 )

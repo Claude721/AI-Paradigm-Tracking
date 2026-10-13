@@ -20,6 +20,27 @@ from sources.priority_research_source import (
 
 
 class SourceDocumentBoundaryTests(unittest.TestCase):
+    def test_scholarly_title_overrides_arxiv_browser_id_without_guessing_names(self):
+        parser = _ArticleParser('https://arxiv.org/abs/2606.32026')
+        parser.feed('<title>[2606.32026] AdaJEPA: An Adaptive Latent World Model</title>'
+            '<meta property="og:title" content="arXiv display label">'
+            '<meta name="citation_title" content="AdaJEPA: An Adaptive Latent World Model">'
+            '<meta name="citation_author" content="Wang, Ying">'
+            '<meta name="citation_author" content="LeCun, Yann">')
+        self.assertEqual(parser.title, 'AdaJEPA: An Adaptive Latent World Model')
+        self.assertEqual(parser.authors, ['Ying Wang', 'Yann LeCun'])
+        parser.feed('<meta name="citation_author" content="https://example.com, Ada">')
+        self.assertEqual(parser.authors, ['Ying Wang', 'Yann LeCun'])
+        generic = _ArticleParser('https://lab.example/article')
+        generic.feed('<meta name="author" content="Alice, Bob"><meta name="citation_author" content="Chen, Ada">')
+        self.assertEqual(generic.authors, ['Alice, Bob', 'Chen, Ada'])
+
+    def test_conflicting_scholarly_titles_are_not_a_last_field_wins_identity(self):
+        parser = _ArticleParser('https://arxiv.org/abs/2606.32026')
+        with self.assertRaises(ValueError):
+            parser.feed('<meta name="citation_title" content="AdaJEPA">'
+                        '<meta name="citation_title" content="Different Work">')
+
     def test_article_parser_ignores_navigation_related_links_and_dates(self):
         parser = _ArticleParser("https://lab.example/news/cedar")
         parser.feed("""

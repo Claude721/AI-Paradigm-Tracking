@@ -68,6 +68,23 @@ class BibliographyDetailReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.coverage()["unresolved_citations"], 0)
         self.assertEqual(self.calls, [("wp.nyu.edu", "/cilvr/cilvr-group-publications/"), ("arxiv.org", "/abs/2605.10002")])
 
+    async def test_actual_browser_title_order_and_family_given_metadata_close_sqlite_receipt(self):
+        self.names = ('a',)
+        original = self.handler
+        def browser_metadata(request):
+            response = original(request)
+            if request.url.host == 'arxiv.org':
+                return httpx.Response(200, text='<title>[2605.10001] Adaptive a architecture</title>'
+                    + response.text.replace('content="Ada Chen"', 'content="Chen, Ada"'))
+            return response
+        with research_window(NOW), patch.object(config, 'OPENALEX_API_KEY', 'offline-only'), patch.object(self, 'handler', browser_metadata):
+            source = self.source(limit=0); values = await source.safe_fetch()
+            self.assertEqual(len(values),1); self.assertEqual(source.fetch_status,'completed')
+            self.assertEqual(values[0].title,'Adaptive a architecture');self.assertEqual(values[0].authors,['Ada Chen'])
+            self.assertEqual(source.coverage()['unresolved_citations'],0)
+            rows=source.page_coverage[INDEX]['bibliography_diagnostics']['resolution_tasks']
+            self.assertEqual(rows[0]['status'],'primary_verified')
+
     async def test_verified_outside_window_receipts_close_and_resume_without_details(self):
         self.published = "2026-04-01"
         with research_window(NOW), patch.object(config, "OPENALEX_API_KEY", "offline-only"):
