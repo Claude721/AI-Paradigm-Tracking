@@ -27,7 +27,7 @@ from .models import (
 )
 from .researcher_identity import merge_researcher_profiles
 from .async_utils import gather_scoped
-from .search_receipts import incomplete_searches, record_search
+from .search_receipts import blocking_searches, record_search
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ class EvidenceEnricher:
                 candidate.evidence = _dedupe_evidence(
                     candidate.evidence, route_key=candidate.key
                 )
-                if incomplete_searches(candidate):
+                if blocking_searches(candidate, allow_partial=getattr(self, "allow_partial_sources", False)):
                     # Return the incomplete object, not None (which means a
                     # successful no-update judgment). The scheduler partitions
                     # these objects before synthesis or completion receipts.
@@ -242,7 +242,7 @@ class EvidenceEnricher:
         candidate.evidence = _dedupe_evidence(
             candidate.evidence, route_key=candidate.key
         )
-        if incomplete_searches(candidate):
+        if blocking_searches(candidate, allow_partial=getattr(self, "allow_partial_sources", False)):
             return  # Never pay for downstream judgments on incomplete inputs.
         # Semantic Scholar 只有在显式启用且配置获批 Key 时才调用。无论其是否
         # 启用，都用当前论文作者建立人物种子，并通过 OpenAlex/ORCID 补齐身份。

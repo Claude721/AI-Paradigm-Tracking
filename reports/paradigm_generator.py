@@ -95,6 +95,8 @@ class ParadigmReportGenerator:
         ordered = sorted(candidates, key=lambda item: item.total_score, reverse=True)
         if not ordered:
             content = self._empty_report(date, stats)
+            if stats.get("delivery_contract_version") == 2:
+                content = _attach_coverage_boundary(content, stats)
         else:
             preflight = _report_input_violations(ordered)
             if preflight:
@@ -410,14 +412,21 @@ class ParadigmReportGenerator:
             "high_signal_discovery_lookback_days",
             stats.get("discovery_lookback_days", ordinary_window),
         )
+        scope_note = (
+            f"本期获取 {stats.get('origin_count', 0)} 份一手材料，按来源广度选定并完成 "
+            f"{stats['delivery_scope']['origin_completed']} 份材料的原点初筛，以及 "
+            f"{stats['delivery_scope']['deep_completed']} 条选定机制的深挖核验。"
+            if stats.get("delivery_contract_version") == 2 else
+            f"本期共扫描 {stats.get('origin_count', 0)} 份一手机制材料，已完成配置信源的召回与全部计划研究判断。"
+        )
         return f"""# AI 技术范式雷达
 
 > {date} · 普通发现 {ordinary_window} 天 · 高信号回补 {high_signal_window} 天
 
 ## 本期研究 Memo
 
-本期共扫描 {stats.get('origin_count', 0)} 份一手机制材料，已完成配置信源的召回与全部计划研究判断。
-没有路线同时跨过**技术外延、发布者可信度和外部承接**三道门槛，因此本期没有可交付的新路线或进展更新。
+{scope_note}
+在这些已经完成判断的研究对象中，没有路线同时跨过**技术外延、发布者可信度和外部承接**三道门槛，因此本期没有可交付的新路线或进展更新。
 这一结论适用于本期约定的信源、窗口和研究规则，不是对所有 AI 研究的全局否定。
 技术范式不会按周出现，本期不以局部 benchmark 改进或作者的宏大叙事填充报告。
 
@@ -845,6 +854,17 @@ def _researcher_dossier(profile: ResearcherProfile) -> dict:
 
 
 def _public_stats(stats: dict) -> dict:
+    if stats.get("delivery_contract_version") == 2:
+        scope = stats["delivery_scope"]
+        return {key: stats[key] for key in (
+            "origin_count", "ordinary_discovery_lookback_days", "high_signal_discovery_lookback_days",
+            "source_counts", "new_paradigms", "updated_paradigms", "result_kind"
+        ) if key in stats} | {
+            "research_scope": "本期有界取材和已核验路线，不是全网穷尽普查；执行待办只在运行审计中记录",
+            "evaluated_origin_count": scope["origin_completed"],
+            "usable_primary_source_count": len(scope["usable_primary_sources"]),
+            "source_issue_count": len(scope["source_issue_names"]),
+        }
     keys = {
         "origin_count",
         "ordinary_discovery_lookback_days",
@@ -1407,6 +1427,16 @@ def _attach_research_scope_boundary(content: str, stats: dict) -> str:
 def _attach_coverage_boundary(content: str, stats: dict) -> str:
     """Coverage defects belong in failure audit, not a formal research memo."""
     require_completed_research(stats, content=content)
+    if stats.get("delivery_contract_version") == 2:
+        content = re.sub(r"(?m)^> 本期取材范围：.*(?:\n|$)", "", content).rstrip()
+        proof = stats["delivery_scope"]
+        note = ("本期取材范围：从 " + str(len(proof["usable_primary_sources"])) +
+                " 个可用一手发现通道获取材料，完成 " + str(proof["origin_completed"]) +
+                " 份原点初筛与 " + str(proof["deep_completed"]) +
+                " 条选定机制深挖、" + str(proof["refresh_completed"]) +
+                " 条历史路线刷新。结论仅针对经核验的材料与路线，不代表全网穷尽；" +
+                str(len(proof["source_issue_names"])) + " 个发现通道存在访问或执行缺口，详见运行审计。")
+        return content.rstrip() + "\n\n> " + note + "\n"
     return content
 
 

@@ -121,7 +121,7 @@ def _send_sync(
     if is_paradigm:
         message["Subject"] = (
             f"AI 技术范式雷达｜{report_date}｜"
-            f"{stats.get('new_paradigms', 0)} 个新范式 + "
+            f"{stats.get('new_paradigms', 0)} 个新路线 + "
             f"{stats.get('updated_paradigms', 0)} 个进展"
         )
     else:
@@ -139,19 +139,28 @@ def _send_sync(
         message["X-AI-Radar-Delivery-Key"] = delivery_key
     if is_paradigm:
         status_line = "AI 技术范式雷达本期研究与交付已完成。"
+        if stats.get("delivery_contract_version") == 2:
+            scope = stats["delivery_scope"]
+            research_note = (
+                f"完成原点初筛：{scope['origin_completed']} 份；选定机制深挖：{scope['deep_completed']} 条；历史路线刷新：{scope['refresh_completed']} 条。\n"
+                "报告中的路线均已通过技术、人物及原文核验；取材范围和访问缺口详见报告与审计。\n\n"
+            )
+        else:
+            research_note = (
+                f"本轮完成机制抽取：{stats.get('analysis_completed_count', stats.get('analysis_count', 0))}/"
+                f"{stats.get('planned_analysis_count', 0)}\n"
+                "本期计划研究事务已全部闭合。\n\n"
+                + (f"本期累计机制判断：{stats['research_campaign']['origin_completed']}/{stats['research_campaign']['origin_planned']}；"
+                   f"研究批次执行 {stats['research_campaign']['attempt_count']} 次。\n\n" if stats.get("research_campaign") else "")
+            )
         body = (
             status_line
             + "\n\n"
             f"回看窗口：最近 {stats.get('ordinary_discovery_lookback_days', config.SOURCING_LOOKBACK_DAYS)} 天\n"
             f"扫描论文/技术博客：{stats.get('origin_count', 0)}\n"
-            f"首次捕捉范式：{stats.get('new_paradigms', 0)}\n"
+            f"首次捕捉路线：{stats.get('new_paradigms', 0)}\n"
             f"实质进展更新：{stats.get('updated_paradigms', 0)}\n\n"
-            f"本轮完成机制抽取：{stats.get('analysis_completed_count', stats.get('analysis_count', 0))}/"
-            f"{stats.get('planned_analysis_count', 0)}\n"
-            "本期计划研究事务已全部闭合。\n\n"
-            + (f"本期累计机制判断：{stats['research_campaign']['origin_completed']}/{stats['research_campaign']['origin_planned']}；"
-               f"研究批次执行 {stats['research_campaign']['attempt_count']} 次。\n\n" if stats.get("research_campaign") else "")
-            +
+            + research_note +
             f"LLM 调用：{stats.get('llm_call_count', 0)} 次\n"
             f"LLM 合计 tokens：{stats.get('llm_total_tokens', 0)}\n\n"
             "完整证据、人物轨迹、公开专业联系方式和运行审计见附件。"

@@ -51,12 +51,22 @@ def primary_url(value):
 
 def match_work(record, payload):
     if (not isinstance(payload, dict) or not isinstance(payload.get("results"), list)
+            or payload.get("error")
             or not isinstance(payload.get("meta"), dict)
             or type(payload["meta"].get("count")) is not int
             or payload["meta"]["count"] < len(payload["results"])):
         raise ValueError("Invalid bibliography search response")
     if payload["meta"]["count"] > len(payload["results"]):
         return {"status": "pending", "reason": "identity_search_truncated"}
+    identities = []
+    for work in payload["results"]:
+        if (not isinstance(work, dict)
+                or not re.fullmatch(r"https://openalex.org/W\d+", str(work.get("id", "")))
+                or not isinstance(work.get("display_name"), str) or not work["display_name"].strip()):
+            raise ValueError("Invalid bibliography work record")
+        identities.append(work["id"])
+    if len(set(identities)) != len(identities):
+        raise ValueError("Duplicate bibliography work identity")
     matches = {work.get("id"): work for work in payload["results"]
                if isinstance(work, dict) and isinstance(work.get("display_name"), str)
                and normalized_title(work["display_name"]) == normalized_title(record["title"])}
@@ -159,7 +169,7 @@ class BibliographyResolver:
                 result = {"status": "pending", "reason": "provider_circuit_open"}
             elif self.requests_used >= self.max_requests:
                 result = {"status": "pending", "reason": "identity_request_safety_limit"}
-            elif not record.get("title") or not record.get("author_text"):
+            elif not normalized_title(record["title"]) or not record.get("author_text"):
                 result = {"status": "pending", "reason": "missing_citation_identity"}
             else:
                 self.requests_used += 1
@@ -169,7 +179,11 @@ class BibliographyResolver:
                 response = None
                 try:
                     response = await client.get("https://api.openalex.org/works", params={
-                        "search": '"' + record["title"] + '"',
+                        # This is bibliography identity lookup, not topical
+                        # full-text discovery. Normalize only the search phrase
+                        # (nested quotes/punctuation cannot become operators);
+                        # preserve the original title and exact local matching.
+                        "search.title": '"' + normalized_title(record["title"]) + '"',
                         "per-page": 100, "select": "id,display_name,publication_year,authorships,doi,primary_location,locations"},
                         headers={"Authorization": "Bearer " + config.OPENALEX_API_KEY}, follow_redirects=False)
                     if response.status_code in {401, 403, 429}:

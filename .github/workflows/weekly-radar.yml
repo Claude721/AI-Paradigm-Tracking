@@ -64,19 +64,21 @@ jobs:
     timeout-minutes: 90
     env:
       PIPELINE_MODE: paradigm
-      LLM_PROVIDER: dashscope
-      LLM_MODEL: qwen3.7-plus
-      LLM_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
-      LLM_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'dashscope' }}
+      LLM_MODEL: ${{ vars.LLM_MODEL || 'qwen3.7-plus' }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1' }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.DASHSCOPE_API_KEY }}
       LLM_REQUEST_TIMEOUT_SECONDS: ${{ vars.LLM_REQUEST_TIMEOUT_SECONDS || '180' }}
       LLM_ENABLE_THINKING: ${{ vars.LLM_ENABLE_THINKING || 'false' }}
       SMOKE_CHECK_TIMEOUT_SECONDS: ${{ vars.SMOKE_CHECK_TIMEOUT_SECONDS || '30' }}
-      SUB_AGENT_PROVIDER: dashscope
-      SUB_AGENT_MODEL: qwen3.7-plus
-      SUB_AGENT_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
-      MAIN_AGENT_PROVIDER: dashscope
-      MAIN_AGENT_MODEL: qwen3.7-plus
-      MAIN_AGENT_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      SUB_AGENT_PROVIDER: ${{ vars.SUB_AGENT_PROVIDER }}
+      SUB_AGENT_MODEL: ${{ vars.SUB_AGENT_MODEL }}
+      SUB_AGENT_BASE_URL: ${{ vars.SUB_AGENT_BASE_URL }}
+      SUB_AGENT_API_KEY: ${{ secrets.SUB_AGENT_API_KEY }}
+      MAIN_AGENT_PROVIDER: ${{ vars.MAIN_AGENT_PROVIDER }}
+      MAIN_AGENT_MODEL: ${{ vars.MAIN_AGENT_MODEL }}
+      MAIN_AGENT_BASE_URL: ${{ vars.MAIN_AGENT_BASE_URL }}
+      MAIN_AGENT_API_KEY: ${{ secrets.MAIN_AGENT_API_KEY }}
       OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
       SEMANTIC_SCHOLAR_ENABLED: ${{ vars.SEMANTIC_SCHOLAR_ENABLED || 'false' }}
       SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
@@ -116,12 +118,19 @@ jobs:
       PARADIGM_DEEP_SAFETY_LIMIT: ${{ vars.PARADIGM_DEEP_SAFETY_LIMIT || '0' }}
       PARADIGM_REPORT_SAFETY_LIMIT: ${{ vars.PARADIGM_REPORT_SAFETY_LIMIT || '0' }}
       PARADIGM_REFRESH_SAFETY_LIMIT: ${{ vars.PARADIGM_REFRESH_SAFETY_LIMIT || '0' }}
+      PARADIGM_RESEARCH_ORIGIN_LIMIT: ${{ vars.PARADIGM_RESEARCH_ORIGIN_LIMIT || '48' }}
+      PARADIGM_RESEARCH_DEEP_LIMIT: ${{ vars.PARADIGM_RESEARCH_DEEP_LIMIT || '8' }}
+      PARADIGM_RESEARCH_REFRESH_LIMIT: ${{ vars.PARADIGM_RESEARCH_REFRESH_LIMIT || '4' }}
+      PARADIGM_MIN_PRIMARY_SOURCES: ${{ vars.PARADIGM_MIN_PRIMARY_SOURCES || '2' }}
+      PARADIGM_SOURCE_QUERY_LIMIT: ${{ vars.PARADIGM_SOURCE_QUERY_LIMIT || '100' }}
+      PARADIGM_SOURCE_PAGE_LIMIT: ${{ vars.PARADIGM_SOURCE_PAGE_LIMIT || '2' }}
+      PARADIGM_OFFICIAL_DETAIL_LIMIT: ${{ vars.PARADIGM_OFFICIAL_DETAIL_LIMIT || '6' }}
       SOURCING_LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '7' }}
-      PARADIGM_RECALL_OVERLAP_DAYS: ${{ vars.PARADIGM_RECALL_OVERLAP_DAYS || '30' }}
+      PARADIGM_RECALL_OVERLAP_DAYS: ${{ vars.PARADIGM_RECALL_OVERLAP_DAYS || '14' }}
       PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED: ${{ vars.PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED || 'true' }}
       PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS: ${{ vars.PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS || '2' }}
       PARADIGM_MIN_SECONDARY_ENGAGEMENT: ${{ vars.PARADIGM_MIN_SECONDARY_ENGAGEMENT || '50' }}
-      PARADIGM_BOOTSTRAP_LOOKBACK_DAYS: ${{ vars.PARADIGM_BOOTSTRAP_LOOKBACK_DAYS || '60' }}
+      PARADIGM_BOOTSTRAP_LOOKBACK_DAYS: ${{ vars.PARADIGM_BOOTSTRAP_LOOKBACK_DAYS || '14' }}
       PARADIGM_SEED_ARXIV_IDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seed_arxiv_ids || '' }}
       PARADIGM_RESEARCHER_PROFILE_LIMIT: ${{ vars.PARADIGM_RESEARCHER_PROFILE_LIMIT || '6' }}
       PARADIGM_KEY_RESEARCHER_LIMIT: ${{ vars.PARADIGM_KEY_RESEARCHER_LIMIT || '3' }}
@@ -211,12 +220,13 @@ jobs:
             exit 0
           fi
 
-          # 状态使用不可变快照，避免 overwrite 先删除上一份好状态、随后上传
-          # 失败时失去回滚点。兼容迁移前的同名 paradigm-radar-state artifact。
-          artifact_rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts | map(select(.expired == false and (.name == "paradigm-radar-state" or (.name | startswith("paradigm-radar-state-"))))) | sort_by(.created_at) | reverse | .[] | [.archive_download_url, .name] | @tsv')"
+          # V0 uses a clean state epoch. Old failed-run artifacts remain
+          # recoverable but do not import their unbounded queues into V0.
+          artifact_rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts | map(select(.expired == false and (.name | startswith("paradigm-radar-v0-state-")))) | sort_by(.created_at) | reverse | .[] | [.archive_download_url, .name] | @tsv')"
           if [ -z "$artifact_rows" ]; then
-            echo "未找到状态 artifact。为避免意外冷启动，请手动以 reset_state=true 初始化。"
-            exit 1
+            echo "首次 V0 运行：从空研究状态启动，不加载旧失败批次。旧制品未删除。"
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           current_landscape="$(jq -r '.version' taxonomy/frontier_landscape.json)"
@@ -245,7 +255,7 @@ jobs:
             fi
             state_landscape="$(jq -r '.landscape_version // empty' "$candidate_dir/state-meta.json" 2>/dev/null || true)"
             if [ "$state_landscape" != "$current_landscape" ]; then
-              echo "前沿覆盖地图已变化：恢复旧数据库用于证据去重，并由程序补扫近 60 天新覆盖面"
+              echo "前沿覆盖地图已变化：恢复旧数据库用于证据去重，并按当前有界高信号窗口补扫新覆盖面"
             fi
             mkdir -p database
             cp "$candidate_dir/paradigm_radar.db" database/paradigm_radar.db
@@ -280,11 +290,11 @@ jobs:
         run: |
           mkdir -p logs
           set -o pipefail
-          audit_args=(--include-authenticated --budget-seconds 900 --max-requests 300)
+          audit_args=(--include-authenticated --v0-readiness --budget-seconds 900 --max-requests 300)
           if [ "$SOURCE_PLATFORM_CHECKS" = "true" ]; then audit_args+=(--include-platforms); fi
           python scripts/source_audit.py "${audit_args[@]}" 2>&1 | tee logs/source_audit.log
 
-      - name: 抓取、分析并在研究全部闭合后发送邮件
+      - name: 本期有界取材、核验并交付合格研究结论
         id: pipeline
         if: ${{ !inputs.source_check_only && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
         env:
@@ -320,7 +330,7 @@ jobs:
         if: ${{ always() && steps.prepare_state.outputs.available == 'true' }}
         uses: actions/upload-artifact@v7
         with:
-          name: paradigm-radar-state-${{ github.run_id }}
+          name: paradigm-radar-v0-state-${{ github.run_id }}
           path: |
             database/paradigm_radar.db
             database/state-meta.json

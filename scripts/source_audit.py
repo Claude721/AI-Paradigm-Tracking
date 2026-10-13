@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 # available only to bounded source checks; model/mail settings are never used.
 os.environ["AI_RADAR_SKIP_DOTENV"] = "true"
 
-from source_audit import SourceAudit, build_entries, render_summary, diagnostic_rows
+from source_audit import SourceAudit, build_entries, render_summary, diagnostic_rows, v0_source_readiness
 from healthcheck import configuration_syntax_checks
 
 
@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--kind", action="append", help="Select input kind(s); output remains explicitly partial")
     parser.add_argument("--entry", action="append", help="Select exact manifest identity(s); remains partial")
     parser.add_argument("--list", action="store_true", help="List redacted manifest without network")
+    parser.add_argument("--v0-readiness", action="store_true", help="Exit on sufficient sampled input capabilities, retaining all entry failures; not production certification")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "logs")
     args = parser.parse_args()
     if not 1 <= args.budget_seconds <= 1800 or not 1 <= args.max_requests <= 1000 or not 1 <= args.entry_timeout <= 120:
@@ -58,6 +59,8 @@ def main():
         result["acceptance_complete"] = False
         result["selected_kinds"] = args.kind or []
         result["selected_entries"] = args.entry or []
+    import config
+    result["v0_input_readiness"] = v0_source_readiness(result, minimum_sources=config.PARADIGM_MIN_PRIMARY_SOURCES)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "source_audit_latest.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     (args.output_dir / "source_audit_latest.md").write_text(render_summary(result), encoding="utf-8")
@@ -72,7 +75,7 @@ def main():
             summary.write(render_summary(result))
     # Do not greenify an incomplete audit. Disabled/unconfigured optional
     # endpoints are declared exclusions, not passed source checks.
-    return 0 if result["acceptance_complete"] else 1
+    return 0 if (result["v0_input_readiness"]["ready"] if args.v0_readiness else result["acceptance_complete"]) else 1
 
 
 if __name__ == "__main__":

@@ -163,17 +163,11 @@ def _check_env() -> None:
     from agents.llm_utils import resolve_all
 
     resolved_models = resolve_all()
-    missing_roles = [
-        model.role
-        for model in resolved_models
-        if model.provider != "ollama" and model.api_key == "placeholder"
-    ]
-    if missing_roles:
-        logger.warning(
-            "以下 Agent 的 API Key 未配置，分析将失败: %s。"
-            "请在 .env 中设置对应 API Key，或运行 python main.py --setup",
-            ", ".join(missing_roles),
-        )
+    from healthcheck import _model_check
+    invalid = [_model_check(model.role, model) for model in resolved_models]
+    invalid = [check for check in invalid if check.status == "missing"]
+    if invalid:
+        raise RuntimeError("研究模型配置无效；请核对 LLM_* / 角色覆盖配置：" + "；".join(check.note for check in invalid))
     if not config.GITHUB_TOKEN:
         logger.info(
             "GITHUB_TOKEN 未配置，技术范式流水线会跳过 GitHub Search，"
@@ -597,6 +591,8 @@ def _write_pipeline_result(result: dict) -> Path:
         "delivery_failure_kind": str(result.get("delivery_failure_kind", "")),
         "delivery_blocking_reasons": result.get("delivery_blocking_reasons", []),
         "research_campaign": result.get("research_campaign", {}),
+        "delivery_contract_version": result.get("delivery_contract_version"),
+        "delivery_scope": result.get("delivery_scope", {}),
         "recovered_delivery_quarantined": bool(
             result.get("recovered_delivery_quarantined")
         ),

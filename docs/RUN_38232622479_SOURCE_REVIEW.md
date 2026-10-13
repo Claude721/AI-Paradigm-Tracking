@@ -1,5 +1,7 @@
 # 2026-10-12 Runner 信源验收
 
+> 历史诊断记录：保留当时版本、授权与观测，不定义当前 V0 验收规则。文中的“全部物理入口/历史积压必须闭合”“不得重置状态”等要求已由 2026-10-13 用户澄清取代；当前按[有界研究设计](PARADIGM_RADAR_DESIGN.md)交付自身已核验的路线，故障仍保留审计。
+
 后续新版同清单复验见 [run 38239955723](RUN_38239955723_SOURCE_REVIEW.md)：Wayve 云端通过，整体仍有 9 失败/1 未测试。本文保留首轮 10 失败的历史事实，不以新结果覆盖。
 
 已按用户授权将 `81b89468259d37c20dbc59daf5e585458fffcf28` 推送到 `main`，并启动 [run 38232622479](https://github.com/Claude721/AI-Paradigm-Tracking/actions/runs/38232622479)。参数：`source_check_only=true`、`smoke_only=false`、`reset_state=false`、`source_platform_checks=false`。没有生产状态、研究模型、SMTP 或续跑调用。

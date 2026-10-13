@@ -1,8 +1,10 @@
 # 信源 API Key：安全复验指南
 
-更新：2026-10-12。本地未使用用户 OpenAlex/GitHub/Tavily/X/Semantic Scholar/Reddit 凭据，不能据此判断 GitHub Secrets 失效。公开网页的 403、429、404、访问挑战和解析错误也不是模型或信源 Key 无效的证据。**先验收注入与接口，再决定是否轮换，不要整体重置密钥。**
+更新：2026-10-13。本地不复制用户云端凭据；已授权 Runner 证据优先。公开网页的 403、429、404、访问挑战和解析错误不是模型或信源 Key 无效的证据。**先验收注入与接口，再决定是否轮换，不要整体重置密钥。**
 
-同日后续云端 run `38027283680`：OpenAlex 11 项、GitHub 27 项通过，不需先轮换这两类凭据。X 无 Token，所有者决定暂时关闭，将 Actions Variable `KOL_X_SOURCE_ENABLED=false`（既有 true 不会被新默认覆盖），不用申请 X Secret。Tavily 未测试，使用免费额度前先核对 Plan/Usage/PAYG，见 [X 搜索选项](X_SEARCH_OPTIONS.md) 与 [最新云端复核](RUN_38027283680_SOURCE_REVIEW.md)。
+最新 [独立验收 run 38370843944](RUN_38370843944_INTERFACE_REVIEW.md)：NYU 8 次 OpenAlex 查询全部 200，Tavily /usage 200，严格 included-only 保护因 PAYG 限额未知停止，未发搜索。没有需要先轮换这两个 Secret 的证据。用户随后要求暂不调用，不能自动复验。控制台 0/1000 说明当时月度余额充足，但不证明搜索已执行；该独立费用保护不应成为整个研究流程卡点。无需先充值或重配 Key，正式研究可从其他健康通道继续。
+
+较早的 2026-10-10 云端 run `38027283680`：OpenAlex 11 项、GitHub 27 项通过，不需先轮换这两类凭据。X 无 Token，所有者决定暂时关闭，将 Actions Variable `KOL_X_SOURCE_ENABLED=false`（既有 true 不会被新默认覆盖），不用申请 X Secret。当时 Tavily 未测试，使用免费额度前先核对 Plan/Usage/PAYG，见 [X 搜索选项](X_SEARCH_OPTIONS.md) 与[当时云端复核](RUN_38027283680_SOURCE_REVIEW.md)；之后 usage 200 的证据见上段。
 
 ## 1. 在 GitHub 验证已有凭据
 

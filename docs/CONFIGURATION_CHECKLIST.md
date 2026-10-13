@@ -1,185 +1,109 @@
-# AI 技术范式雷达：完整配置 Checklist
+# V0 配置清单
 
-单路线真实模型验收不复用正式研究配置：独立工作流仅注入已授权的 `DASHSCOPE_API_KEY` 和 GitHub 只读 token，费用不超过 20 元且价格核验当日有效；其他付费 API、SMTP、生产状态和自动续跑隔离。不要为了小样本把正式工作流清库或截断旧任务。详见 [单路线验收契约](ONE_ROUTE_ACCEPTANCE.md)。
+生产密钥仅放本地 .env 或 GitHub Actions Secrets，不写进聊天、Variables、日志或 Git。模板为 [.env.example](../.env.example)。
 
-2026-10-12 新增书目身份补全控制：`PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED=false` 默认不新增 OpenAlex 搜索；显式开启需已配置 `OPENALEX_API_KEY`，`PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT=8` 限制每个生产进程的新请求（1–100），成功身份使用原状态续跑。关闭或达到限额不能把未解析书目当完成；这不是月度成本控制。普通公开 audit 不因该开关而获得 API 授权，需同时 `--include-authenticated`，最多一次身份协议样本。详见 [输入闭合修复](INPUT_CLOSURE_REPAIR_20261012.md)。
+## 最小配置
 
-2026-10-13 独立 `source-interface-acceptance.yml` 可在明确授权后只验 NYU/Tavily 子集，无新增生产 Variable。它的 `bibliography_requests=1..8` 仅对本次临时 NYU 验收生效，不修改上述正式开关；Tavily 必须已启用、配置 Key/月度保护，账户 PAYG 明确关闭且现有账户/Key 额度至少 1。未知限额/已耗尽/缺 Key 不发搜索，不升级套餐，不检测其他平台或模型/SMTP。详见 [独立接口验收](SOURCE_ACCEPTANCE.md#独立-nyutavily-接口验收)。
+- PIPELINE_MODE=paradigm。
+- 一套能完成 Chat Completions / JSON 的模型 API，模型名、地址和 Key 对应。
+- 默认公开来源保持开启；运行时至少 2 个一手发现通道可用。OpenAlex 与 GitHub 推荐，但不是全部信源都必须配置/成功。
+- 如需邮件，SMTP 配置完整；已有发信功能不需要重新设计。
+- 自动续跑、X、未获批 Reddit 和未获批 Semantic Scholar 保持关闭。
 
-> 本地生产密钥填写到根目录 `.env`；GitHub 部署填写到 Actions Secrets。不要粘贴到聊天、截图或提交到 Git。独立验收脚本忽略 `.env`。配置模板见 `.env.example`。
+## 模型可替换
 
-当前工程候选使用 schema v9：保留 v8 的固定批次并增加 Tavily 月度 credit 账本，自动迁移 v1–v8 状态且保留历史结果，继续 `reset_state=false`。逐入口 `source_check_only` 优先于 `smoke_only`，不运行模型、邮件或恢复生产数据库。预算续跑仍默认关闭，额外研究 run 会增加 API 消耗，只有所有者明确开启才自动排队。升级不等于生产 V0 验收，迁移、续跑与回退边界见 `CLOUD_AUTOMATION.md`。
-
-本地逐入口检查使用 `python scripts/source_audit.py`，脚本**忽略 `.env`**，只读取显式进程环境；`--list` 只列去敏清单，不联网。`--include-authenticated` 只允许有界 OpenAlex/GitHub 请求，不授权 Tavily、X、Reddit 或模型/SMTP。没有凭据的入口保留 `not_configured`，不会记为通过；局部 `--entry` / `--kind` 选择始终标为不完整验收。具体边界和云端步骤见 [逐入口验收](SOURCE_ACCEPTANCE.md)。
-
-2026-10-10 新增 `--include-platforms` / 手动 input `source_platform_checks=true` 的独立授权检查；默认关闭，可能消耗 Tavily/X 额度，仅测试已启用平台，不触发模型或邮件，也不是新增生产 Variable。不要盲目轮换 Key；依照 [云端凭据复验指南](SOURCE_API_KEY_VERIFICATION.md) 区分未注入、401、403、429、套餐权限和公开页面访问挑战。
-
-同日云端 run `38027283680` 已验证 OpenAlex 11 项/GitHub 27 项，失败清单见 [复核](RUN_38027283680_SOURCE_REVIEW.md)。按所有者决定，X 官方 API 默认关闭；如果 Actions Variable 原来是 `KOL_X_SOURCE_ENABLED=true`，请明确改为 `false`，新默认值不会覆盖已有配置。仅关闭 X，不删除历史任务。Workflow 已补齐 `TAVILY_SOCIAL_SEARCH_ENABLED` 与 `TAVILY_SOCIAL_SEARCH_DOMAINS` 注入；前者是生产开关，后者供平台 Smoke 的域名范围使用，正式组合检索仍由 `TAVILY_DISCOVERY_DOMAINS` 控制。
-
-成对制品的容量诊断使用 `python scripts/inspect_capacity.py --database /解压路径/paradigm_radar.db --audit /同run路径/run_audit_latest.json`，仅 mode=ro 查询、不迁移、不读取 .env/密钥、不联网。模型请求取消现在记为未知用量并阻止自动预算链；客户端取消不证明服务端没有执行/收费。预筛前填/过期刷新转交不需要新 Variable，也没有改变模型或思考模式。
-
-## A. 必须配置
-
-- [ ] `PIPELINE_MODE=paradigm`
-- [ ] DashScope 模型配置完整
-- [ ] 主、子模型均为 `qwen3.7-plus`
-- [ ] `OPENALEX_API_KEY` 已配置
-- [ ] 至少配置两个有效 OpenReview venue
-- [ ] 回看窗口和周任务时区确认
-
-推荐模型配置：
+本地全局字段：
 
 ```env
-PIPELINE_MODE=paradigm
-
 LLM_PROVIDER=dashscope
 LLM_MODEL=qwen3.7-plus
-LLM_API_KEY=你的百炼API-Key
 LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_API_KEY=
 LLM_REQUEST_TIMEOUT_SECONDS=180
 LLM_ENABLE_THINKING=false
-SMOKE_CHECK_TIMEOUT_SECONDS=30
-
-SUB_AGENT_PROVIDER=dashscope
-SUB_AGENT_MODEL=qwen3.7-plus
-MAIN_AGENT_PROVIDER=dashscope
-MAIN_AGENT_MODEL=qwen3.7-plus
+SUB_AGENT_PROVIDER=
+SUB_AGENT_MODEL=
+SUB_AGENT_BASE_URL=
+SUB_AGENT_API_KEY=
+MAIN_AGENT_PROVIDER=
+MAIN_AGENT_MODEL=
+MAIN_AGENT_BASE_URL=
+MAIN_AGENT_API_KEY=
 ```
 
-`SUB_AGENT_API_KEY` 和 `MAIN_AGENT_API_KEY` 可以留空继承 `LLM_API_KEY`；如果分别填写，也应使用有效的 DashScope Key。
+Qwen 是兼容默认值，不是准入要求。可以填写其他提供方/代理的实际模型 ID、兼容地址和 Key；不支持 Chat Completions 或不能稳定输出完整 JSON 的接口需要更换/适配，不靠品牌名字判断能力。角色字段逐项继承全局，切换角色提供方时一起覆盖模型、地址、Key，防止旧地址与新 Key 混用。
 
-`LLM_REQUEST_TIMEOUT_SECONDS` 是单次请求的硬上限。推荐保持 `180`；程序关闭 SDK 隐式重试，由各 Agent 自己执行一次有审计记录的重试，避免长报告在 GitHub Actions 中无边界等待。
+Actions 对应：
 
-`LLM_ENABLE_THINKING=false` 是已核验北京 `qwen3.7-plus` 的新默认：统一客户端显式发送非思考模式，并把各阶段输出上限转换成 `max_completion_tokens`，约束思考与回答之和。Smoke、正式研究和有界单路线使用同一契约；未知模型/代理不会收到猜测参数。显式开启思考仍受原总输出上限约束，不自动提高 tokens/时限，需另行验证结构完整性与质量。模式变化使抽取、综合和人物缓存失效。首次真实样本的两次默认思考请求均因总输出截断失败，见 [模型复核](RUN_38235929382_MODEL_REVIEW.md)。不需要新增 Secret 或轮换 Key；Workflow Variable 留空即 false。
+| 类型 | 名称 | 说明 |
+|---|---|---|
+| Variables | LLM_PROVIDER / LLM_MODEL / LLM_BASE_URL | 留空仍兼容当前 DashScope 配置 |
+| Secret | LLM_API_KEY | 通用模型 Key；留空回退已有 DASHSCOPE_API_KEY |
+| Variables | SUB_AGENT_PROVIDER / MODEL / BASE_URL | 可选，留空继承全局 |
+| Secret | SUB_AGENT_API_KEY | 可选，留空继承全局 |
+| Variables | MAIN_AGENT_PROVIDER / MODEL / BASE_URL | 可选，留空继承全局 |
+| Secret | MAIN_AGENT_API_KEY | 可选，留空继承全局 |
 
-`SMOKE_CHECK_TIMEOUT_SECONDS` 是每个真实能力冒烟的总时限，推荐 `30`。单端点接口只验证一次最小请求和响应结构；官方页面、OpenReview venue、RSS 和 Follow Builders 等多入口能力最多按配置顺序 failover 5 个入口，首个成功即停止。冒烟不复用生产分页器、生产解析器或 SQLite 持久化回环，不会因为一个“每页 3 条”的参数反而把数千条结果全部翻完；绿色结果只说明最小能力可用，不能替代完整运行验收。
+表中的角色缩写分别表示 SUB_AGENT_MODEL、SUB_AGENT_BASE_URL、MAIN_AGENT_MODEL、MAIN_AGENT_BASE_URL。换全局模型时清空不需要的角色覆盖。不要为了换模型同时重置所有信源 Key。
 
-主、子模型的 Smoke 只有 provider、模型、地址和实际凭据全部相同才共用一次检查；同名模型的不同角色 Key/地址必须分别验证，不能用一个健康角色掩盖另一个鉴权/入口故障。去重身份仅存内存，不把凭据写入日志。真实响应还须完整 stop，截断的 `OK` 也不能 passed。
+Doctor 只核对配置完整、URL 格式和范围，不再限制 qwen3.7。Smoke 才验证真实连接和响应；同 provider/model/url/Key 才共用角色检查。未知模型/代理不会收到猜测的 Qwen 参数。已核验官方 Qwen 配置使用显式非思考与总输出限制，历史证据见 [模型复核](RUN_38238493094_MODEL_REVIEW.md)。
 
-OpenAlex：
+独立 one-route-acceptance.yml 仍有专门的单路线、20 元内、核验当日 Qwen 价格保护；它不是通用生产模型限制。换模型后不要直接复用旧价格执行该测试，见 [单路线说明](ONE_ROUTE_ACCEPTANCE.md)。
 
-1. 打开 https://openalex.org/settings/api 并注册/登录。
-2. 复制免费 API Key。
-3. 填写：
+## 研究量与取材
 
-```env
-OPENALEX_API_KEY=你的OpenAlex-Key
-```
+| Variable | 默认 | 语义 |
+|---|---:|---|
+| SOURCING_LOOKBACK_DAYS | 7 | 普通发现与本期发布窗口；Actions 手动用 lookback_days |
+| PARADIGM_RECALL_OVERLAP_DAYS | 14 | 正式报告、重点研究者、官方入口回补 |
+| PARADIGM_BOOTSTRAP_LOOKBACK_DAYS | 14 | 冷启动也保持有界，不引入 60 天积压 |
+| PARADIGM_RESEARCH_ORIGIN_LIMIT | 48 | 本期跨发布者/来源轮转选定原点，1–500 |
+| PARADIGM_RESEARCH_DEEP_LIMIT | 8 | 本轮深挖最多路线，1–50 |
+| PARADIGM_RESEARCH_REFRESH_LIMIT | 4 | 最久未检查历史路线，0–50；0 关闭刷新 |
+| PARADIGM_MIN_PRIMARY_SOURCES | 2 | 最少可用一手发现通道，1–9；不是独立复现数 |
+| PARADIGM_SOURCE_QUERY_LIMIT | 100 | arXiv 每查询原点上限，1–1000，仍保留各车道 |
+| PARADIGM_SOURCE_PAGE_LIMIT | 2 | OpenAlex 与已支持官方目录每查询分页上限，1–20 |
+| PARADIGM_OFFICIAL_DETAIL_LIMIT | 6 | 每官方入口本进程新增详情上限，1–100 |
 
-OpenReview 推荐起步配置：
+这些是研究排期和正常取材边界，不是技术淘汰，不声称全量完成。已有 GitHub Variables 会覆盖新默认，部署前把旧 30/60 天回补改为 14 或删除它们以使用默认。
 
-```env
-OPENREVIEW_VENUES=ICLR.cc/2026/Conference,NeurIPS.cc/2026/Conference,NeurIPS.cc/2026/Evaluations_and_Datasets_Track,ICML.cc/2026/Conference
-```
+以下额外熔断默认仍为 0：PARADIGM_DISCOVERY_SAFETY_LIMIT、PARADIGM_ANALYSIS_SAFETY_LIMIT、PARADIGM_DEEP_SAFETY_LIMIT、PARADIGM_REPORT_SAFETY_LIMIT、PARADIGM_REFRESH_SAFETY_LIMIT。0 仅取消额外熔断，不取消 V0 有界研究计划。熔断/超时/未选不写成 Rubric 淘汰。
 
-Venue ID 来自 OpenReview 页面 URL 中 `group?id=` 后面的部分，不能带结尾 `/`。每年会议切换时更新年份。
+PARADIGM_RUBRIC_PATH、FRONTIER_LANDSCAPE_PATH 默认留空使用仓库量表/地图。PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS=2、PARADIGM_MIN_SECONDARY_ENGAGEMENT=50 是客观承接辅助边界，不是模型主观分。PARADIGM_ALLOW_UPDATES=true，相同证据签名不重复交付。
 
-## B. 推荐增强项
+## 信源与增强
 
-- [ ] Semantic Scholar API Key（可选；没有学术邮箱就留空）
-- [ ] GitHub Token
-- [ ] 4 个以上官方研究 RSS/Atom Feed
-- [ ] 高优先级官方研究页面保留默认值或已核验覆盖
-- [ ] Follow Builders 二次传播 Feed 已启用
-- [ ] LessWrong / Alignment Forum 与内置 KOL Feed 保持启用（无需 Key）
-- [ ] 如需按工作标题搜索作者/KOL，配置 X API Bearer Token（可选）
-- [ ] SMTP 邮件推送
+| 配置 | 默认/要求 |
+|---|---|
+| OPENALEX_API_KEY（Secret） | 推荐；论文与人物身份增强，未配置降级，不匿名补查 |
+| OPENREVIEW_VENUES | 可选会议 group ID；按年份核对，不能填网页 URL |
+| RESEARCH_FEED_URLS | 可选官方 RSS/Atom；不能填普通 HTML 首页 |
+| RESEARCH_WATCHLIST_MODE | merge；自定义追加，replace 才替换内置目录 |
+| PRIORITY_RESEARCH_PAGES | 留空用内置名单，添加不等于发布者背书 |
+| PRIORITY_RESEARCH_LINK_SAFETY_LIMIT | 0；非零是官方详情额外熔断，仍受 V0 详情上限 |
+| PRIORITY_RESEARCH_CONCURRENCY | 6，范围 1–12 |
+| PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED | false；NYU 等无 ID 引用只有开启才搜索身份 |
+| PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT | 8，范围 1–100，每进程，不是月度额度 |
+| ESTABLISHED_RESEARCH_ORGANIZATIONS / MONITORED_RESEARCH_ORGANIZATIONS / PRIORITY_RESEARCHERS | 留空用内置；不要填整所大学/歧义裸词 |
+| LESSWRONG_SOURCE_ENABLED / ALIGNMENT_FORUM_SOURCE_ENABLED / KOL_SOURCE_ENABLED | true，公开 RSS，无 Key |
+| LESSWRONG_KARMA_THRESHOLD | 30，只是入选下限，不是精确 karma |
+| KOL_CUSTOM_FEED_URLS | 可选，自定义无核验身份默认二次解读 |
+| FOLLOW_BUILDERS_ENABLED / FOLLOW_BUILDERS_FEED_URL | true / 模板公开地址；不需要本地子模块 |
+| GITHUB_TOKEN | Actions 自动注入 github.token，不另建同名 Secret |
+| KOL_X_SOURCE_ENABLED / TWITTER_BEARER_TOKEN | false / 空；无免费 Token 不需要开启 |
+| TWITTER_WATCH_ACCOUNTS | 留空用目录，不假称覆盖所有即时发言 |
+| SEMANTIC_SCHOLAR_ENABLED / SEMANTIC_SCHOLAR_API_KEY | false / 空；获批后才开启，不匿名请求 |
+| REDDIT_API_ACCESS_APPROVED | false；获得符合用途的批准后再开启 |
+| REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_USER_AGENT | 获批后的 OAuth 配置，Secret 不放 Variables |
 
-Semantic Scholar（可选）：
+正常 HTTP/API/RSS 抓取，不使用 Computer Use。反爬和单入口访问失败保留审计，不拖住健康路线。无标识书目不进入技术证据，未解析不等于没有论文，也不否决其他原点。
 
-1. 打开 https://www.semanticscholar.org/product/api 。
-2. 选择 “Request an API Key”，Key 会通过邮件发送。
-3. 填写：
+参考起步 Feed：Google Research、BAIR、OpenAI RSS 可按实际情况配置。合法空 Feed、登录 HTML、错误 XML 和解析不到文章必须区分；不要仅由 200 判定成功。
 
-```env
-SEMANTIC_SCHOLAR_ENABLED=true
-SEMANTIC_SCHOLAR_API_KEY=你的Semantic-Scholar-Key
-```
-
-项目已经按照官方默认额度限制为每秒最多一个请求。Key 未获批时使用：
-
-```env
-SEMANTIC_SCHOLAR_ENABLED=false
-SEMANTIC_SCHOLAR_API_KEY=
-```
-
-此时程序会完整跳过 Semantic Scholar，绝不会退回匿名请求；人物身份改由 OpenAlex、ORCID 与已核验个人主页补齐。
-
-GitHub：
-
-1. 打开 https://github.com/settings/tokens 。
-2. 创建只读 Token；本项目只搜索公开仓库和读取已核验研究组织的新仓库/README，不需要仓库写权限。
-3. 填写：
-
-```env
-GITHUB_TOKEN=你的GitHub-Token
-```
-
-官方研究 Feed 推荐起步值：
-
-```env
-RESEARCH_FEED_URLS=https://research.google/blog/rss/,https://bair.berkeley.edu/blog/feed.xml,https://openai.com/news/rss.xml
-```
-
-只填写 RSS/Atom XML 地址，不能填写普通博客首页。单个 Feed 失效不阻止其他 Feed 继续研究，但已配置入口未闭合会阻断正式交付；不能把跳过等同于完整覆盖。
-
-高信号论坛与个人思想源使用内置、已验证的 RSS/Atom，默认无需任何 Secret：
+Tavily 可选配置：
 
 ```env
-LESSWRONG_SOURCE_ENABLED=true
-LESSWRONG_KARMA_THRESHOLD=30
-ALIGNMENT_FORUM_SOURCE_ENABLED=true
-KOL_SOURCE_ENABLED=true
-KOL_CUSTOM_FEED_URLS=
-KOL_X_SOURCE_ENABLED=false
-```
-
-LessWrong 的 `karmaThreshold=30` 是 frontpage Feed 的入选下限，不是系统取得的精确帖子 karma；curated Feed 也只证明编辑精选。内置 KOL 目录同时保存姓名、主页、已验证 Feed 和可选 X handle。自定义 Feed 没有内置身份元数据，默认只能作为二次解读；要让某位作者的原创文章具备机制原点资格，应在 `research_watchlist.py` 中补齐其主页、Feed、方向和 `origin_policy` 后提交代码。
-
-高优先级官方页面用于补足“重要机构没有 RSS、Technical Report 尚未进入 arXiv”的缺口。完整默认目录版本化保存在 `research_watchlist.py`，覆盖海内外基础模型公司、World Model/机器人组织和具名高校实验室。通常保持以下值即可：
-
-```env
-RESEARCH_WATCHLIST_MODE=merge
-PRIORITY_RESEARCH_PAGES=
-PRIORITY_RESEARCH_LINK_SAFETY_LIMIT=0
-PRIORITY_RESEARCH_CONCURRENCY=6
-PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED=false
-PRIORITY_BIBLIOGRAPHY_REQUEST_LIMIT=8
-ESTABLISHED_RESEARCH_ORGANIZATIONS=
-MONITORED_RESEARCH_ORGANIZATIONS=
-PRIORITY_RESEARCHERS=
-```
-
-`merge` 表示环境变量只追加少量自定义项，仓库更新时仍会获得新的内置名单；`replace` 才会完全替换默认目录。GitHub 中曾保存过旧版长名单也不需要删除，默认会去重合并。新增页面只提高召回优先级：只有内置目录记录了 owner 与 tier 的页面才继承发布者身份，用户追加页面只能同域抓取并降为 `verified`。
-
-`PRIORITY_RESEARCH_LINK_SAFETY_LIMIT=0` 尝试窗口内全部待抓详情；非零值只限制每个入口本进程新增详情尝试，不是编辑 Top-K 或完成分母。固定窗口的详情 URL 清单只增不减，失败/未尝试对象以低尝试次数优先续跑；当前索引不再列出旧失败 URL 也不会删除它。成功正文逐条保存，恢复时复用，不占新增尝试限额；超时保留已提交的健康同伴，所有 pending 仍阻断正式交付。注册适配器/解析策略升级会重开旧成功回执，但不能删除入口或更改原窗口来清零。信源 audit 最多一条详情的协议取样不证明该详情队列闭合。Qwen 保留登记入口 `https://qwenlm.github.io/publication/` 的原身份，内部访问新站；不要把新站地址当作等价自定义项追加后假定已有同一适配器。
-
-书目身份与详情额度分开：成功身份不重复 OpenAlex 查询，成功详情只有与同窗口、当前策略的标题/作者/日期核验配对才可复用。恢复不会无条件重置 `primary_verified`，也不会仅凭它跳过未保存正文。书目确认失败但正文已保存可补回执；不同标题、作者不匹配或旧策略仍待核验。默认关闭身份搜索并不代表真实书目已解析，已保存的健康结果不会因为关闭新增搜索被删除。
-
-官方 GitHub 组织名单同样版本化保存在 `research_watchlist.py`，复用现有 `GITHUB_TOKEN`，不新增 Secret/Variable。系统按仓库 `created_at` 发现发布事件，不依赖项目名关键词：若仓库链接可打开的一手论文/官方技术页，以外部材料为原点；若技术首先通过结构化 README 与代码接口定义，可形成 `original_implementation` 机制假说。普通 SDK、demo、awesome list、论文聚合和信息不足的 README 会被确定性排除；任何仓库仍须通过 Rubric 与外部承接闸门，stars/forks 不算独立复现。
-
-入口与名单分为四层：Priority pages 负责主动召回；`ESTABLISHED_RESEARCH_ORGANIZATIONS` 用于身份可核验、持续产出前沿研究的公司研究组织与具名实验室；`MONITORED_RESEARCH_ORGANIZATIONS` 保证模型厂商、机器人公司等被观察，但不会仅凭品牌自动放行；`PRIORITY_RESEARCHERS` 只在姓名精确匹配且已有主页、ORCID/OpenAlex 等公开身份后，提供人物轨迹线索。不要加入整所大学或 `AI Lab`、`Seed`、`GLM`、`ARC Lab` 等歧义裸词。完整名单与选择依据见 [前沿机构与研究者 Watchlist](FRONTIER_RESEARCH_WATCHLIST.md)。
-
-KOL、播客与技术博客二次传播候选：
-
-```env
-FOLLOW_BUILDERS_ENABLED=true
-FOLLOW_BUILDERS_FEED_URL=https://raw.githubusercontent.com/zarazhangrui/follow-builders/main
-```
-
-可选的 X 精确标题搜索：
-
-```env
-TWITTER_BEARER_TOKEN=你的X-API-Bearer-Token
-TWITTER_WATCH_ACCOUNTS=
-```
-
-`TWITTER_WATCH_ACCOUNTS` 留空时使用内置 KOL handle；X API 没有配置时自动跳过，个人主页/RSS 仍会工作。配置后有两条互补车道：按工作标题核验作者/二次讨论，以及按已知 handle 读取最近 7 天、同时包含 AI 对象和技术 intervention 的具名短文。后者只能先生成机制假说，短口号、转推、回复和普通动态会在模型前过滤；X Recent Search 的计划权限与覆盖边界必须以实际 Smoke 为准。小红书目前没有稳定的官方公开搜索 API，因此本项目不做不可靠的页面抓取。
-
-推荐先配置 Tavily 免费层，作为 X、Reddit、小红书和独立技术博客的公开网页发现兜底：
-
-```env
-TAVILY_API_KEY=tvly-你的Key
+TAVILY_API_KEY=
 TAVILY_SOCIAL_SEARCH_ENABLED=true
 TAVILY_SOCIAL_SEARCH_DOMAINS=x.com,twitter.com,reddit.com,xiaohongshu.com
 TAVILY_SOCIAL_MAX_RESULTS=12
@@ -188,206 +112,58 @@ TAVILY_REQUEST_SAFETY_LIMIT=0
 TAVILY_MONTHLY_CREDIT_LIMIT=1000
 ```
 
-免费计划额度以 Tavily 控制台当前显示为准；先确认 Plan/Usage，关闭 PAYG 或设置账户硬限额。项目对每个通过 Rubric 的深挖候选采用一次 `basic` 组合搜索，明确关闭 auto_parameters，不分别为三个平台重复消耗。`TAVILY_DISCOVERY_DOMAINS` 留空时执行全网发现，能找到独立技术博客；需要限制站点时再填域名。搜索结果只能说明页面被公开索引，不能证明完整覆盖或用相关度替代点赞、评论等声量指标。
+正式组合检索由 TAVILY_DISCOVERY_DOMAINS 控制，留空全网索引；SOCIAL_SEARCH_DOMAINS 供 Smoke。结果不是平台全量或独立承接，也没有可用来推断声量的互动数字。
 
-`TAVILY_REQUEST_SAFETY_LIMIT=0` 只是不设每进程请求上限；月度保护由 `TAVILY_MONTHLY_CREDIT_LIMIT=1000` 独立控制，必须为非负整数，`0` 明确关闭保护而不是免费。生产进程核验账户用量后，在 schema v9 状态中原子预留 credit；实际用量明确才结算，取消/崩溃/未知用量不退款，未知账户/请求用量停止后续搜索。月份按实际 UTC，不按冻结研究窗口；账本随 state artifact 恢复。它无法原子约束同账户其他客户端、供应商计数延迟或回退旧状态，不能替代提供方硬限额。
+月度保护先核验实际 UTC 账户用量，再在 SQLite 原子预留，未知请求扣费不退款并停止该提供方后续搜索。0 明确关闭月度保护，不表示免费；账本不能锁住其他客户端，提供方 PAYG/硬限额仍需所有者控制。新 V0 epoch 的首个用量观察读取实际账户使用量，不把清库当作供应商额度清零。
 
-Smoke/显式平台样本不恢复生产账本：启用月度保护时先一次只读 `/usage`，再最多一次 basic 搜索；用量缺失或额度耗尽不搜索。仍需授权，可能消耗 1 credit，不自动改套餐。显式开启但缺 Key 的 Tavily/X/已批准 Reddit/学术增强记录 `not_configured` 并保留待办，不能当作查询成功；确实不使用时需由所有者明确关闭。HTTP、协议错误和额度耗尽阻断对象完成，健康同伴继续；启用的 Semantic Scholar 失败不能冒充零匹配。
+独立 NYU/Tavily 验收的 included-only 费用保护更严格；它失败不等于生产 Key 无效。用户已暂不授权追加调用，不能自动复验或充值。见 [Key 指南](SOURCE_API_KEY_VERIFICATION.md)。
 
-Reddit 若要获得帖子分数、评论量和讨论正文，需要先向 Reddit 申请 Data API 访问。获批后配置：
+## 超时、并发与自动续跑
 
-```env
-REDDIT_API_ACCESS_APPROVED=true
-REDDIT_CLIENT_ID=你的OAuth客户端ID
-REDDIT_CLIENT_SECRET=你的OAuth客户端Secret
-REDDIT_USER_AGENT=python:ai-paradigm-radar:v1.0 (by /u/你的Reddit用户名)
-```
+| Variable | 默认 |
+|---|---:|
+| LLM_REQUEST_TIMEOUT_SECONDS | 180 |
+| SMOKE_CHECK_TIMEOUT_SECONDS | 30 |
+| PARADIGM_RUN_BUDGET_SECONDS | 3600 |
+| PARADIGM_STAGE_RESERVE_SECONDS | 1200 |
+| PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS | 600 |
+| PARADIGM_REPORT_TIMEOUT_SECONDS | 1200 |
+| PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS | 360 |
+| PARADIGM_REPORT_ROUTE_CONCURRENCY | 2 |
+| PARADIGM_REPORT_MAX_RENDER_ATTEMPTS | 3 |
+| PARADIGM_ANALYSIS_BATCH_SIZE / PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE | 6 / 24 |
+| PARADIGM_ORIGIN_PREFILTER_ENABLED | true |
+| PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE | 2 |
+| PARADIGM_DEEP_BATCH_SIZE / PARADIGM_DEEP_CONCURRENCY | 1 / 2 |
+| PARADIGM_RESEARCHER_PROFILE_LIMIT / PARADIGM_KEY_RESEARCHER_LIMIT | 6 / 3 |
+| PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED | true |
+| PARADIGM_AUTO_RESUME_ENABLED | false |
+| PARADIGM_AUTO_RESUME_MAX_RUNS / TOTAL_BUDGET_SECONDS / MAX_TOKENS | 4 / 14400 / 4000000 |
 
-- [ ] 已从 Reddit 收到 API 访问批准；尚未获批时保持 `false`
-- [ ] 若项目用于商业、投资或企业研究，申请中已明确用途并取得相应许可
-- [ ] User-Agent 唯一、可识别，包含应用名、版本和 Reddit 用户名
-- [ ] Client Secret 只放 `.env` 或 GitHub Repository secret
+最后一行分别为 PARADIGM_AUTO_RESUME_MAX_RUNS、PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS、PARADIGM_AUTO_RESUME_MAX_TOKENS。开启后也只处理健康状态上传后的同批纯预算延期；执行、覆盖故障和未知用量不自动扩大支出。tokens 是轮间停止线，不是人民币单轮硬费用上限。
 
-项目使用 OAuth 应用身份做低频标题搜索。Reddit 帖子与少量评论正文只在当轮综合时使用，随后清除；数据库和邮件保留原帖链接、互动指标和中文提炼结果。
+同窗续跑保持选定计划。正常跨周运行归档旧未交付研究计划，待投递 outbox 仍优先恢复。研究诊断仍可含 pending；交付 v2 的范围凭据单独验证，不把诊断清零。
 
-## C. 邮件推送（选择一个邮箱）
-
-- [ ] 邮箱已开启 SMTP
-- [ ] 使用应用密码/SMTP 授权码，而不是登录密码
-- [ ] 发件地址和收件地址已填写
-- [ ] SSL 与 STARTTLS 没有同时开启
-
-通用 SSL 配置：
+## 邮件与验收
 
 ```env
 EMAIL_PUSH_ENABLED=true
 EMAIL_PUSH_REQUIRED=true
-SMTP_HOST=邮箱服务商的SMTP服务器
+EMAIL_MAX_ATTACHMENT_BYTES=10000000
+SMTP_HOST=smtp.qq.com
 SMTP_PORT=465
-SMTP_USERNAME=完整发件邮箱
-SMTP_PASSWORD=SMTP授权码或应用密码
-SMTP_FROM=完整发件邮箱
-SMTP_TO=你的收件邮箱
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_FROM=
+SMTP_TO=
 SMTP_USE_SSL=true
 SMTP_USE_STARTTLS=false
-EMAIL_MAX_ATTACHMENT_BYTES=10000000
 ```
 
-常见服务器：
+应用密码/SMTP 授权码不是登录密码；SSL 与 STARTTLS 不得同时开启。Actions 默认 QQ SSL，SMTP_USERNAME/PASSWORD/TO 为 Secrets。发送失败不提前登记签名，已完成研究和合规报告保留。
 
-| 邮箱 | `SMTP_HOST` | 端口 | 模式 |
-|---|---|---:|---|
-| QQ 邮箱 | `smtp.qq.com` | 465 | SSL |
-| 163 邮箱 | `smtp.163.com` | 465 | SSL |
-| Gmail | `smtp.gmail.com` | 465 | SSL |
-| Outlook/Microsoft 365 | `smtp.office365.com` | 587 | STARTTLS |
+本地时区参数 SCHEDULE_DAY_OF_WEEK=fri、SCHEDULE_HOUR=9、SCHEDULE_MINUTE=15、SCHEDULE_TIMEZONE=Asia/Shanghai。只选一种调度，避免本机/云端重复。
 
-使用 Outlook 587 时改为：
+先零网络 Doctor 与离线门，再在获得授权后做 Smoke/正式运行。source_check_only 仅诊断输入，不测模型/SMTP。逐入口缺口不要求全部修完才能正式研究；--v0-readiness 只表示有足够有界输入能力样本，不证明生产 V0。正式验收检查实际研究、报告、邮件、状态和去重，不能只看 Actions 绿色。
 
-```env
-SMTP_PORT=587
-SMTP_USE_SSL=false
-SMTP_USE_STARTTLS=true
-```
-
-Gmail 需要先启用两步验证，再生成应用密码。
-
-`EMAIL_MAX_ATTACHMENT_BYTES` 是单份报告正文的安全上限，不包含小型审计附件。超过上限时任务会明确失败并保留 outbox，不会把候选标记为已交付；应先检查报告异常膨胀的原因，不建议直接无限调大。
-
-## D. Rubric 与运行熔断
-
-建议第一次整体运行保持默认值：
-
-```env
-PARADIGM_RUBRIC_PATH=
-FRONTIER_LANDSCAPE_PATH=
-PARADIGM_DISCOVERY_SAFETY_LIMIT=0
-PARADIGM_ANALYSIS_SAFETY_LIMIT=0
-PARADIGM_DEEP_SAFETY_LIMIT=0
-PARADIGM_REPORT_SAFETY_LIMIT=0
-PARADIGM_REFRESH_SAFETY_LIMIT=0
-PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED=true
-PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS=2
-PARADIGM_MIN_SECONDARY_ENGAGEMENT=50
-PARADIGM_ALLOW_UPDATES=true
-PARADIGM_RECALL_OVERLAP_DAYS=30
-PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60
-PARADIGM_SEED_ARXIV_IDS=
-PARADIGM_RESEARCHER_PROFILE_LIMIT=6
-PARADIGM_KEY_RESEARCHER_LIMIT=3
-PARADIGM_RUN_BUDGET_SECONDS=3600
-PARADIGM_STAGE_RESERVE_SECONDS=1200
-PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=600
-PARADIGM_REPORT_TIMEOUT_SECONDS=1200
-PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS=360
-PARADIGM_REPORT_ROUTE_CONCURRENCY=2
-PARADIGM_REPORT_MAX_RENDER_ATTEMPTS=3
-PARADIGM_ANALYSIS_BATCH_SIZE=6
-PARADIGM_ORIGIN_PREFILTER_ENABLED=true
-PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE=24
-PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE=2
-PARADIGM_DEEP_BATCH_SIZE=1
-PARADIGM_DEEP_CONCURRENCY=2
-PARADIGM_AUTO_RESUME_ENABLED=false
-PARADIGM_AUTO_RESUME_MAX_RUNS=4
-PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS=14400
-PARADIGM_AUTO_RESUME_MAX_TOKENS=4000000
-```
-
-技术去留由仓库中的 `rubrics/paradigm_rubric.json` 决定；行业覆盖由 `taxonomy/frontier_landscape.json` 决定。前者维护判断问题，后者维护基础模型、推理与软件 Agent、多模态/语音/3D、具身/自动驾驶、World Model、AI4S、系统/端侧/硬件、安全等发现范围。通常两个路径都留空，直接维护仓库内版本并提交。覆盖地图的 `version` 改变后，高信号车道会回看 60 天，新增领域的普通术语车道仍从本次任务窗口建立基线，不在 reset 后引入数万条历史宽匹配。60 天只用于恢复召回，报告中的“本期新发布”仍按 `SOURCING_LOOKBACK_DAYS` 判断。
-
-五个 `*_SAFETY_LIMIT` 均为 `0` 时不限制数量：本轮会评估全部召回材料，并深挖全部通过初筛 Rubric 的路线。非零值只是用户主动开启的成本/运行熔断，不是 Top-K；被熔断的内容在审计中标记为“未完成”，不得写成“未通过”。旧版主观分数/固定数量变量（例如 `PARADIGM_MIN_NOVELTY`、`PARADIGM_MAX_ANALYSIS_ITEMS`）已停用。当前仍使用的 `PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS` 与 `PARADIGM_MIN_SECONDARY_ENGAGEMENT` 只把可核验讨论条数或互动量转成客观 Rubric 选项，不是模型主观评分门槛。
-
-普通论文和正式报告使用两种不同的成本控制，但都不按数量淘汰材料。`PARADIGM_ORIGIN_PREFILTER_ENABLED=true` 时，普通论文以批量、逐 fingerprint、基数守恒的方式先判断是否具有进入完整 Rubric 的最低资格；只有明确非机制原点会终止，不确定、漏回或结构失败项仍保留。`PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE=2` 只限制单份报告一次出队评估多少机制，机制索引和完成结果跨轮恢复，总机制数不封顶；父报告进度在候选快照之后提交，异常最多重算而不漏项。
-
-`PARADIGM_RUN_BUDGET_SECONDS` 是另一类保护：它限制研究阶段的墙上时间，而不限制候选总量。系统先把全部发现结果写入数据库；机制执行队列在高信号与普通材料之间按 1:3 加权轮转，两类内部再交错本周新增与 FIFO backlog。旧状态中缺少可靠分类来源、仅由宽查询或标题误标的 Technical Report 会先按当前文档元数据和系统结构规则重新核验。到达软预算后，剩余项保留为 backlog。`PARADIGM_DISCOVERY_SAFETY_LIMIT` 只允许 arXiv 等尚未执行的传输车道提前收尾，不会再截掉已经从其他来源取得的材料；`PARADIGM_REFRESH_SAFETY_LIMIT` 非零时，历史路线按最久未尝试顺序跨周轮转，而不是每次刷新同一批。`PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS=600` 约束单个并行发现源，某个分页器卡死或返回错误结构时只取消该来源，并在内部审计中记为覆盖未闭合，绝不能伪装成零命中。研究进度与外部覆盖独立记账；任一轴未闭合都禁止正式交付，任务非零退出，仅保存内部检查点与审计。研究与覆盖均闭合后，候选快照才进入持久化 outbox；多路线报告按路线生成、每条通过即写入 checkpoint，最终总编只处理有界摘要并由程序装配正文。`PARADIGM_REPORT_REQUEST_TIMEOUT_SECONDS` 是单次路线/框架请求上限，`PARADIGM_REPORT_TIMEOUT_SECONDS` 是整次渲染上限；前者超时可业务重试，后者中断后由下一轮续跑。`PARADIGM_REPORT_MAX_RENDER_ATTEMPTS=3` 是跨进程持久化的渲染尝试上限：缺少人物/一手来源等输入契约，或内置修订后仍不满足确定性交付质量契约时立即隔离；网络、超时等其他渲染错误达到上限后隔离。候选会原子退回 `pending_deep`，隔离任务只保留审计记录，不再阻塞后续报告。这个变量不限制 SMTP 重试，也不能用来绕过报告质量闸门。
-
-GitHub job 的硬超时为 90 分钟，默认研究预算 `3600` 秒、报告上限 `1200` 秒，两者合计 80 分钟，为安装、离线测试、邮件和 artifact 保留约 10 分钟；不要把两者同时继续调高，也不要在 Actions 中设为 `0`，静态体检会阻断云端禁用软预算。发现源完成后，系统才按实际剩余时间应用 `PARADIGM_STAGE_RESERVE_SECONDS`，从而避免长冷启动提前吃空机制抽取窗口；`PARADIGM_ANALYSIS_BATCH_SIZE`、`PARADIGM_DEEP_BATCH_SIZE` 与 `PARADIGM_REPORT_ROUTE_CONCURRENCY` 都只是执行粒度，不是 Top-K。模型漏回输入或返回外来对象时，程序会按身份/基数契约隔离到单条并保留待重试，不需要通过减小 batch size 掩盖问题。
-
-静态体检直接读取环境变量原文，因此错误拼写不会再被配置解析器的默认值掩盖。布尔值请只用 `true/false`（也兼容 `1/0`、`yes/no`、`on/off`），整数变量不能写单位或中文；越出文档范围的并发、超时和端口同样会阻断云端生产运行。
-
-`PARADIGM_RESEARCHER_PROFILE_LIMIT` 是兼容性的档案安全上限，`PARADIGM_KEY_RESEARCHER_LIMIT` 才控制每条路线实际核验与写入报告的关键人物数。默认优先一作、官方标注的通讯/负责人、末位资深作者与重点研究者；普通共同作者仍留在论文作者名单中，但不会因缺少联系方式阻断路线交付。写入报告的人物名会排除邮箱、URL、TeX/版式残片、数字与拼接联系方式；OpenAlex 已知 ID 和姓名搜索结果都需要当前论文题目对齐。仅“查过 OpenAlex”的旧记录不够，人物还必须具备最低背景、完成联系入口检索，并有直接身份锚点或当前工作交叉核验。
-
-第一次运行前必须先做专用 smoke test。模型必须按契约回复 `OK`，SMTP 只登录不发信，不会创建报告或修改范式数据库。探针不导入或调用生产召回器：arXiv 只查一个稳定 ID，GitHub 只发一次 Search，OpenAlex Works/Authors 各请求一页；官方研究页、RSS、Follow Builders 与 OpenReview venue 使用最多 5 个入口的顺序 failover，首个合法响应即停止。它不会执行领域、人物、报告、生产来源解析、详情页、cursor/offset 分页或 SQLite 序列化回环。一个公共站点的 403 会进入该能力的入口失败账本；只有有界样本全部不可用才判定整个能力失败。Smoke 通过后仍必须执行一次 `reset_state=false` 的完整运行，验证来源到持久化再到分析的生产路径。
-
-### 固定批次与预算续跑
-
-首跑冻结窗口、seed 和发现快照，后续 `python main.py` 会先推进这个批次。`python main.py --resume-research` 严格只恢复原批次；不存在时失败，不建立新任务。修改回看窗口不会改变未完成批次的日期。只有交付确认后，下一次正常运行才能建立新窗口；历史 backlog 不从分母移除。
-
-`PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE` 范围 1—32，默认 24，只影响普通资格预筛；高信号完整抽取仍由分析批大小控制。`PARADIGM_DEEP_CONCURRENCY` 范围 1—4，默认 2，控制独立路线端到端研究并发；深挖批大小不再意味着整体只能串行一条。长报告的健康机制分片有进展且仍有预算时会重新排队，不强制等下一轮；每个成功机制先保存下游，再提交父进度。
-
-自动续跑默认 `false`。开启后只处理状态已上传、同一批次的纯预算延期，源故障、执行错误、人工 safety limit、人物/URL 缺口均不自动排队。`MAX_RUNS` 1—20，默认 4（包含首跑）；`TOTAL_BUDGET_SECONDS` 默认 14400，按每次研究软预算保守预留，下一次会越限则不排队；报告/安装时间不计入该研究时间额度。`MAX_TOKENS` 默认 4000000，是已确认累计 tokens 的轮间停止线，不是单请求硬费用上限；一次运行可以越过它。硬中断导致用量未知时自动链停止，需人工核对。详见 [云端自动化](CLOUD_AUTOMATION.md)。
-
-## E. 时间窗口与自动任务
-
-```env
-SOURCING_LOOKBACK_DAYS=7
-PARADIGM_RECALL_OVERLAP_DAYS=30
-SCHEDULE_DAY_OF_WEEK=fri
-SCHEDULE_HOUR=9
-SCHEDULE_MINUTE=15
-SCHEDULE_TIMEZONE=Asia/Shanghai
-```
-
-- [ ] 周报使用 7 天窗口；月度专题才改成 30 天
-- [ ] `PARADIGM_RECALL_OVERLAP_DAYS=30`：只给 Technical Report、重点研究者、官方页面和官方仓库发布事件做一个月回补；普通 arXiv/OpenAlex/OpenReview/HF 与报告新鲜度仍使用 `SOURCING_LOOKBACK_DAYS`
-- [ ] `PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED=true`：让重点研究者近期论文通过独立于术语的 arXiv 车道进入视野；姓名不替代技术与身份核验
-- [ ] `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS=60`：数据库为空或覆盖地图升级时，只扩大高信号回补车道
-- [ ] 常规运行保持 `PARADIGM_SEED_ARXIV_IDS` 为空；只在精确回补/审计漏项时临时填写。它只负责召回，不会提高 Rubric、发布者或编辑复核资格
-- [ ] 本项目默认由 GitHub Actions 定时运行；不要同时启用本机重复调度
-- [ ] 如选择本机 `python main.py --schedule`，先关闭其他同项目调度，避免重复研究与邮件
-
-如果只在本机使用，Codex 自动任务或 `python main.py --schedule` 都要求电脑保持开机。
-需要关机后仍执行时，使用仓库内置的 GitHub Actions 云端任务，并停用本机重复调度。
-具体见 [`CLOUD_AUTOMATION.md`](CLOUD_AUTOMATION.md)。
-
-## F. 配置完成后的运行顺序
-
-在项目根目录执行：
-
-```bash
-source venv/bin/activate
-python main.py --doctor
-python main.py --smoke-test
-```
-
-`--doctor` 只检查“有没有配置”；`--smoke-test` 才真实检查“凭据和接口能不能用”。结果同时写入 `logs/smoke_test_latest.json`，其中不含密钥或响应正文，并带 `contract_version` 与 `failure_kind`。结果分为 `passed`、`degraded`、`failed` 与 `skipped`：公共服务的临时 429、5xx、网络错误和超时标为 `transient_availability/degraded`，不阻断代码部署；401/403、404、配置缺失或响应结构变化仍会失败。明确未配置的可选接口显示 `skipped`。
-
-只有以下项目通过或明确跳过后再首跑：
-
-- [ ] 两个 Qwen 模型均为 `qwen3.7-plus`
-- [ ] OpenAlex 显示就绪
-- [ ] Semantic Scholar 有 Key 时通过；没有 Key 时显示“不会匿名请求”并跳过
-- [ ] OpenReview venue 数量正确
-- [ ] 研究 Feed 数量大于 0
-- [ ] 高优先级官方研究页面数量大于 0
-- [ ] GitHub Token 就绪
-- [ ] SMTP 显示配置完整
-
-如果只想复核网络信源、不重复调用 Qwen 或 SMTP 登录：
-
-```bash
-python main.py --smoke-test --smoke-skip-llm --smoke-skip-smtp --smoke-skip-tavily
-```
-
-上面的复核命令不会重复消耗 Qwen、SMTP 或 Tavily。获得真实接口检查授权后，完整 Smoke 才执行启用接口；Tavily 先核验账户用量，再最多做 1 个 basic request。关键项和逐入口样本通过后，完整研究/邮件仍需授权；如果 `EMAIL_PUSH_ENABLED=true`，手动完整运行也会发送邮件。
-
-检查结果：
-
-- [ ] `database/paradigm_radar.db` 已生成
-- [ ] `reports/output/paradigm_radar_YYYY-MM-DD.md` 已生成
-- [ ] 邮件标题为“AI 技术范式雷达”
-- [ ] 邮件附件可以正常打开
-- [ ] 日志中没有持续的 401、403 或 429
-- [ ] 报告没有把普通 GitHub 项目当成独立范式
-- [ ] 报告开头有约 500 字“本期研究 Memo”
-- [ ] 最终报告不展示评分表或证据堆叠表
-- [ ] 正文没有英文摘要、英文长句或上游字段原样摘录
-- [ ] 多篇同 background 工作被组织成技术路线，而不是一篇一节机械展开
-- [ ] 关键人物至少有机构/背景与身份检索记录；有公开主页或邮箱时已附链接
-- [ ] 没有合格新范式时允许发送空雷达，不以周更频率硬凑内容
-- [ ] 研究和已配置覆盖均闭合才发送报告；存在 backlog、执行异常或覆盖缺口时 Workflow 失败、不发送阶段性 memo，检查点和失败原因仍可恢复
-
-## G. GitHub Actions 配置位置
-
-API Key、OAuth Client Secret、QQ 邮箱与 SMTP 授权码放在 **Repository secrets**；非敏感的 Reddit 批准开关、User-Agent、OpenReview venue、研究 Feed、高优先级官方页面、前沿组织名单以及 LessWrong/KOL 开关可放在 **Repository variables**。这次新增信源使用公开 RSS，保持代码默认值即可，线上无需新增配置。不要使用 Environment secrets，除非工作流同时显式绑定对应 environment。详见 [`CLOUD_AUTOMATION.md`](CLOUD_AUTOMATION.md)。
+云端 V0 使用 schema v10 与独立状态 epoch，第一次不恢复旧失败队列；后续恢复健康 V0 快照。见 [云端指南](CLOUD_AUTOMATION.md)。

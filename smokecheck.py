@@ -65,7 +65,7 @@ async def run_smoke_checks(
     if include_llm:
         results.extend(await _check_models())
     else:
-        results.append(_skipped("Qwen 模型", "命令行要求跳过模型请求"))
+        results.append(_skipped("研究模型", "命令行要求跳过模型请求"))
 
     results.append(
         await _check(

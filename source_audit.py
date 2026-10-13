@@ -185,7 +185,8 @@ class RecordingTransport(httpx.AsyncBaseTransport):
                 self.runner.request_count += 1
                 self.row["requests"] += 1
                 sent = self.runner.clock()
-                event = {"url": safe_url(str(request.url)), "status": None, "bytes": 0, "attempt": attempt + 1}
+                event = {"url": safe_url(str(request.url)), "method": request.method,
+                         "status": None, "bytes": 0, "attempt": attempt + 1}
                 self.row["http"].append(event)
                 if attempt:
                     self.row["rate_limit_recovery_attempted"] = True
@@ -345,6 +346,7 @@ class SourceAudit:
                         reason = "bounded_request_limit" if isinstance(exc, AuditLimit) else type(exc).__name__
                         if isinstance(exc, TavilyIncludedCreditUnavailable):
                             reason = exc.reason_code
+                            row["included_credit_contract_shape"] = exc.contract_shape
                         if isinstance(exc, ValueError) and row.get("coverage"):
                             reason = "production_parser_rejection"
                         if row["http"] and isinstance(row["http"][-1]["status"], int) and row["http"][-1]["status"] >= 400:
@@ -597,6 +599,20 @@ class SourceAudit:
                     raise ValueError("Evidence persistence read-back failed")
 
 
+def v0_source_readiness(result, *, minimum_sources=2):
+    """Input capability sample, not full coverage or production certification."""
+    primary_kinds = {"arxiv", "openalex", "openreview", "hf", "official", "feed", "kol", "forum"}
+    usable = sorted({row.get("kind") for row in result.get("entries", [])
+                     if row.get("kind") in primary_kinds and row.get("status") == "passed"})
+    ready = (type(minimum_sources) is int and minimum_sources > 0 and
+             len(usable) >= minimum_sources and result.get("code_changed_during_run") is False and
+             result.get("returned_entries") == result.get("planned_entries") and
+             not result.get("selected_entries") and not result.get("selected_kinds"))
+    return {"ready": ready, "usable_primary_kinds": usable,
+            "minimum_sources": minimum_sources, "production_v0_accepted": False,
+            "boundary": "有界输入能力样本；故障清单保留，不证明正式研究质量或全部来源覆盖。"}
+
+
 def render_summary(result):
     lines = ["# 逐入口信源验收", "", f"参考时钟：{result['reference_time']}",
              f"入口：{result['returned_entries']}/{result['planned_entries']}；状态：{result['counts']}；请求：{result['request_count']}",
@@ -605,6 +621,9 @@ def render_summary(result):
         diagnosis = row.get("diagnosis") or diagnose_entry(row)
         identity = (row['key'] + ' / ' + safe_url(row.get('url', ''))).replace('|', '\\|')
         lines.append(f"| {identity} | {row['status']} | {row.get('reason', '')} / {diagnosis['category']} | {row['parsed']}/{row['persisted']} |")
+    if result.get("v0_input_readiness"):
+        readiness = result["v0_input_readiness"]
+        lines.extend(["", f"V0 输入能力样本：{readiness['ready']}；可用通道类型：{readiness['usable_primary_kinds']}。", readiness["boundary"]])
     return "\n".join(lines) + "\n"
 
 

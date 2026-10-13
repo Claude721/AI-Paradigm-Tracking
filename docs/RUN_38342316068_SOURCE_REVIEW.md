@@ -1,5 +1,7 @@
 # 新版同清单 Runner 验收
 
+> 历史诊断记录：保留当时版本、授权与观测，不定义当前 V0 验收规则。文中的“全部物理入口/历史积压必须闭合”“不得重置状态”等要求已由 2026-10-13 用户澄清取代；当前按[有界研究设计](PARADIGM_RADAR_DESIGN.md)交付自身已核验的路线，故障仍保留审计。
+
 2026-10-13，[run 38342316068](https://github.com/Claude721/AI-Paradigm-Tracking/actions/runs/38342316068)，job `115115839897`，提交 `1558771068e79731b3cd55fc61cd017078bb8bc4`。
 
 仅信源检查：`source_check_only=true`、`reset_state=false`、`smoke_only=false`、`source_platform_checks=false`。没有生产状态恢复/保存、研究模型、报告、SMTP 或续跑调用。工作流 5m 3s，因未闭合输入正确失败，审计制品成功上传。

@@ -16,6 +16,7 @@ import httpx
 import config
 from scripts import source_interface_check as check
 from source_audit import Entry, SourceAudit, NYU_BIBLIOGRAPHY_URL
+from tavily_protocol import TavilyIncludedCreditUnavailable
 
 NOW = datetime(2026, 10, 13, tzinfo=timezone.utc)
 NYU = Entry('official:nyu-test', 'official', NYU_BIBLIOGRAPHY_URL)
@@ -171,6 +172,8 @@ class InterfaceExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result['production_v0_accepted'])
         self.assertEqual(result['untested_entry_keys'], ['tavily', 'x'])
         self.assertEqual(len(result['full_manifest']), 3)
+        self.assertEqual(result['full_manifest_scope'], 'current_interface_invocation')
+        self.assertFalse(result['production_manifest_verified'])
         self.assertFalse(config.PRIORITY_BIBLIOGRAPHY_RESOLUTION_ENABLED)
 
     async def test_one_authorization_rejection_stops_further_identity_queries(self):
@@ -225,6 +228,22 @@ class InterfaceExecutionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result['selected_protocols_passed'])
                 self.assertTrue(result['entries'][0]['reason'].startswith('tavily_included_'))
                 self.assertEqual(result['entries'][0]['diagnosis']['category'], 'included_credit_guard')
+
+    async def test_payg_shape_is_fixed_and_search_absence_is_explicit_in_ledger(self):
+        for value, shape in ((None, 'null'), ('sensitive-provider-text', 'string'), (0.0, 'number')):
+            with self.subTest(shape=shape):
+                result = await self.execute('tavily', lambda _: httpx.Response(200, json=usage(paygo_limit=value)))
+                row = result['entries'][0]
+                self.assertEqual(row['reason'], 'tavily_included_payg_limit_unknown')
+                self.assertEqual(row['included_credit_contract_shape']['account.paygo_limit'], shape)
+                self.assertEqual([event['method'] for event in row['http']], ['GET'])
+                self.assertEqual([event['url'] for event in row['http']], ['https://api.tavily.com/usage'])
+                self.assertNotIn('sensitive-provider-text', json.dumps(result))
+
+    def test_guard_diagnostics_reject_arbitrary_fields_or_text(self):
+        for shape in ({'api_key': 'string'}, {'account.paygo_limit': 'sensitive-provider-text'}):
+            with self.subTest(shape=shape), self.assertRaises(ValueError):
+                TavilyIncludedCreditUnavailable('payg_limit_unknown', contract_shape=shape)
 
     async def test_disabled_monthly_guard_stops_before_any_request(self):
         with self.config_context(), patch.object(config, 'TAVILY_MONTHLY_CREDIT_LIMIT', 0), \

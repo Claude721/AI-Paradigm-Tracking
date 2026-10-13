@@ -64,13 +64,15 @@ async def execute(scope, bibliography_requests, *, transport=None, reference_tim
     result.update(interface_contract_version=1, scope=scope, selected_entries=[entry.key for entry in selected],
         full_manifest=[entry.public() for entry in manifest],
         full_manifest_hash=hashlib.sha256(json.dumps([entry.public() for entry in manifest], sort_keys=True).encode()).hexdigest(),
+        full_manifest_scope="current_interface_invocation",
+        production_manifest_verified=False,
         untested_entry_keys=[entry.key for entry in manifest if entry not in selected],
         bibliography_request_limit=bibliography_requests if needs_nyu else 0,
         tavily_search_limit=1 if needs_tavily else 0,
         selected_protocols_passed=(not result["code_changed_during_run"] and
             len(result["entries"]) == len(selected) and all(row["status"] == "passed" for row in result["entries"])),
         acceptance_complete=False, campaign_coverage_complete=False, production_v0_accepted=False)
-    result["boundary"] = "只验明确授权的 NYU/Tavily 子集；其余入口未测试、书目尾项仍待办，不证明整批研究或 V0。"
+    result["boundary"] = "只验明确授权的 NYU/Tavily 子集；清单仅对应当前独立验收进程配置，不替代生产清单。其余入口未测试、书目尾项仍待办，不证明整批研究或 V0。"
     return result
 
 

@@ -46,7 +46,7 @@ def collect_checks() -> list[Check]:
         Check(
             "OpenAlex",
             "论文/引用/机构",
-            "ready" if config.OPENALEX_API_KEY else "missing",
+            "ready" if config.OPENALEX_API_KEY else "degraded",
             "已配置 Key" if config.OPENALEX_API_KEY else "缺少 OPENALEX_API_KEY，运行时跳过",
         ),
         Check(
@@ -64,7 +64,7 @@ def collect_checks() -> list[Check]:
         Check(
             "OpenReview",
             "投稿/评审回复",
-            "ready" if config.OPENREVIEW_VENUES else "missing",
+            "ready" if config.OPENREVIEW_VENUES else "degraded",
             f"已配置 {len(config.OPENREVIEW_VENUES)} 个 venue；需要按年份人工核对",
         ),
         Check(
@@ -238,6 +238,13 @@ _BOOLEAN_ENVIRONMENT_KEYS = (
 )
 
 _INTEGER_ENVIRONMENT_RANGES: dict[str, tuple[int, int | None]] = {
+    "PARADIGM_RESEARCH_ORIGIN_LIMIT": (1, 500),
+    "PARADIGM_RESEARCH_DEEP_LIMIT": (1, 50),
+    "PARADIGM_RESEARCH_REFRESH_LIMIT": (0, 50),
+    "PARADIGM_MIN_PRIMARY_SOURCES": (1, 9),
+    "PARADIGM_SOURCE_QUERY_LIMIT": (1, 1000),
+    "PARADIGM_SOURCE_PAGE_LIMIT": (1, 20),
+    "PARADIGM_OFFICIAL_DETAIL_LIMIT": (1, 100),
     "LLM_REQUEST_TIMEOUT_SECONDS": (30, None),
     "SMOKE_CHECK_TIMEOUT_SECONDS": (5, 120),
     "LESSWRONG_KARMA_THRESHOLD": (0, 500),
@@ -446,11 +453,14 @@ def print_checks() -> list[Check]:
 
 
 def _model_check(name, resolved) -> Check:
-    missing = resolved.provider != "ollama" and resolved.api_key == "placeholder"
-    model_ok = resolved.model.startswith("qwen3.7")
-    status = "ready" if not missing and model_ok else "missing"
+    missing = resolved.provider != "ollama" and (not resolved.api_key or resolved.api_key == "placeholder")
+    endpoint = urlparse(getattr(resolved, "base_url", ""))
+    model_ok = bool(resolved.model.strip())
+    endpoint_ok = endpoint.scheme in {"http", "https"} and bool(endpoint.hostname) and not endpoint.username and not endpoint.password
+    status = "ready" if not missing and model_ok and endpoint_ok else "missing"
     note = f"{resolved.provider}/{resolved.model}；" + (
-        "Key 未配置" if missing else "配置完整" if model_ok else "不属于 qwen3.7 系列"
+        "Key 未配置" if missing else "模型名未配置" if not model_ok else
+        "兼容 API Base URL 无效" if not endpoint_ok else "配置完整（连通性及 JSON 质量需 Smoke 验证）"
     )
     return Check(name, "LLM", status, note)
 

@@ -91,7 +91,7 @@ class CreditStoreTests(unittest.TestCase):
             conn.execute("DROP TABLE provider_credit_periods")
         with self.assertRaises(ValueError):
             migrate_state(self.path, 9)
-        self.assertEqual(migrate_state(self.path, 8), 9)
+        self.assertEqual(migrate_state(self.path, 8), config.PARADIGM_STATE_SCHEMA_VERSION)
         self.assertEqual(ParadigmStore(self.path).load_pending_deep_candidates()[0].key, item.key)
 
     def test_corrupt_budget_payload_cannot_restore_as_healthy(self):

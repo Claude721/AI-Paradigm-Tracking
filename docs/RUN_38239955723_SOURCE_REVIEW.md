@@ -1,5 +1,7 @@
 # 新版 Runner 信源复验：Wayve 已修复，九项仍阻断
 
+> 历史诊断记录：保留当时版本、授权与观测，不定义当前 V0 验收规则。文中的“全部物理入口/历史积压必须闭合”“不得重置状态”等要求已由 2026-10-13 用户澄清取代；当前按[有界研究设计](PARADIGM_RADAR_DESIGN.md)交付自身已核验的路线，故障仍保留审计。
+
 2026-10-12，用户授权的 [run 38239955723](https://github.com/Claude721/AI-Paradigm-Tracking/actions/runs/38239955723) 执行 `9a05890c2c10bb72bbe1d7ce6ff951541becfc92`，参数 `source_check_only=true`、`smoke_only=false`、`reset_state=false`、`source_platform_checks=false`，lookback 7，无 seed/指定续跑批次。不调用模型、全部邮件、生产库恢复/上传或续跑。
 
 Runner Python 3.12.15 的 693 项离线门通过（97.675 秒）。源码指纹 `2c66a3a061fffa19ae6869ea93507f50d91dffdbe1764feee86948ee3d894078`，执行中未变。输入清单哈希 `8cc40433dc2327fa65d7090d3d189021255d0b09f2b3f5f986b225458d1bb3fc` 与 [首轮 38232622479](RUN_38232622479_SOURCE_REVIEW.md) 相同，未删除失败入口或缩小分母。

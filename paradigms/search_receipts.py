@@ -45,6 +45,19 @@ def incomplete_searches(candidate):
     return pending
 
 
+def blocking_searches(candidate, *, allow_partial=False):
+    pending = incomplete_searches(candidate)
+    if not allow_partial:
+        return pending
+    pending = [key for key in pending if candidate.community_search_receipts.get(key, {}).get("status") != "not_configured"]
+    # A failed supplementary provider is a blind spot, not a veto. A complete
+    # outage still cannot become a successful negative uptake judgment.
+    if any(receipt.get("status") == "completed"
+           for receipt in candidate.community_search_receipts.values()):
+        return []
+    return pending
+
+
 def search_signature(candidate, provider):
     from paradigms.models import ORIGIN_EVIDENCE_TYPES
     # No credentials, response bodies, names of community users or query URLs.

@@ -33,11 +33,13 @@ class OpenAlexSource:
         per_query: int = 100,
         searches: list[str] | None = None,
         concurrency: int = 2,
+        max_pages: int | None = None,
     ):
         self.lookback_days = max(lookback_days, 1)
         self.per_query = min(max(per_query, 1), 100)
         self.searches = searches or DEFAULT_SEARCHES
         self.concurrency = max(concurrency, 1)
+        self.max_pages = max_pages
         self.request_count = 0
         self.rate_limited_requests = 0
         self.transient_retries = 0
@@ -79,6 +81,7 @@ class OpenAlexSource:
                 cursor = "*"
                 works: list[dict] = []
                 consecutive_irrelevant_pages = 0
+                pages = 0
                 while cursor:
                     response = await self._get_with_backoff(
                         client,
@@ -93,6 +96,7 @@ class OpenAlexSource:
                         },
                     )
                     payload = response.json()
+                    pages += 1
                     if (not isinstance(payload, dict) or not isinstance(payload.get("results"), list)
                             or not isinstance(payload.get("meta"), dict)
                             or any(not isinstance(work, dict) or not isinstance(work.get("display_name"), str) for work in payload["results"])):
@@ -122,6 +126,7 @@ class OpenAlexSource:
                         or not next_cursor
                         or next_cursor == cursor
                         or consecutive_irrelevant_pages >= 2
+                        or self.max_pages is not None and pages >= self.max_pages
                     ):
                         break
                     cursor = next_cursor
@@ -192,7 +197,7 @@ class OpenAlexSource:
         last_response.raise_for_status()
         return last_response
 
-    def coverage(self) -> dict[str, int | str]:
+    def coverage(self) -> dict[str, object]:
         return {
             "status": (
                 "not_executed"
@@ -212,6 +217,8 @@ class OpenAlexSource:
             "rate_limited_requests": self.rate_limited_requests,
             "transient_retries": self.transient_retries,
             "results": self.result_count,
+            "max_pages_per_query": self.max_pages,
+            "exhaustive": self.max_pages is None,
         }
 
     def _parse(self, works: list[dict]) -> list[TechnicalEvidence]:

@@ -333,6 +333,16 @@ STAR_THRESHOLD: int = _env_int("STAR_THRESHOLD", 50)
 # 默认启用技术范式雷达；legacy 可回退到原有项目型 Deal Flow。
 PIPELINE_MODE: str = os.getenv("PIPELINE_MODE", "paradigm").strip().lower()
 
+# V0 is a bounded editorial research plan, not an exhaustive weekly census.
+# These limits select work to attempt; they never mean a technical rejection.
+PARADIGM_RESEARCH_ORIGIN_LIMIT: int = max(1, _env_int("PARADIGM_RESEARCH_ORIGIN_LIMIT", 48))
+PARADIGM_RESEARCH_DEEP_LIMIT: int = max(1, _env_int("PARADIGM_RESEARCH_DEEP_LIMIT", 8))
+PARADIGM_RESEARCH_REFRESH_LIMIT: int = max(0, _env_int("PARADIGM_RESEARCH_REFRESH_LIMIT", 4))
+PARADIGM_MIN_PRIMARY_SOURCES: int = max(1, _env_int("PARADIGM_MIN_PRIMARY_SOURCES", 2))
+PARADIGM_SOURCE_QUERY_LIMIT: int = max(1, _env_int("PARADIGM_SOURCE_QUERY_LIMIT", 100))
+PARADIGM_SOURCE_PAGE_LIMIT: int = max(1, _env_int("PARADIGM_SOURCE_PAGE_LIMIT", 2))
+PARADIGM_OFFICIAL_DETAIL_LIMIT: int = max(1, _env_int("PARADIGM_OFFICIAL_DETAIL_LIMIT", 6))
+
 # 技术筛选唯一依据是版本化 Rubric。模型回答离散问题并给出证据，程序按
 # rubrics/paradigm_rubric.json 确定性计分；不再读取模型自报的 0-10 主观分。
 #
@@ -375,13 +385,13 @@ SOURCING_LOOKBACK_DAYS: int = max(_env_int("SOURCING_LOOKBACK_DAYS", 7), 1)
 # SOURCING_LOOKBACK_DAYS，避免冷启动把宽关键词扩大成数万条候选。
 PARADIGM_RECALL_OVERLAP_DAYS: int = max(
     SOURCING_LOOKBACK_DAYS,
-    _env_int("PARADIGM_RECALL_OVERLAP_DAYS", 30),
+    _env_int("PARADIGM_RECALL_OVERLAP_DAYS", 14),
 )
 # 数据库为空、用户 reset 或覆盖地图升级时，高信号车道使用的冷启动
 # 窗口。它不扩大普通论文聚合索引的召回窗口。
 PARADIGM_BOOTSTRAP_LOOKBACK_DAYS: int = max(
     PARADIGM_RECALL_OVERLAP_DAYS,
-    _env_int("PARADIGM_BOOTSTRAP_LOOKBACK_DAYS", 60),
+    _env_int("PARADIGM_BOOTSTRAP_LOOKBACK_DAYS", 14),
 )
 # 可选的精确论文补录通道，用逗号分隔 arXiv ID。它主要用于审计、回补与
 # 黄金样例复查，不是用论文白名单替代领域召回。
@@ -394,7 +404,7 @@ PARADIGM_RESEARCHER_PROFILE_LIMIT: int = max(
 PARADIGM_KEY_RESEARCHER_LIMIT: int = max(
     1, min(_env_int("PARADIGM_KEY_RESEARCHER_LIMIT", 3), 6)
 )
-PARADIGM_STATE_SCHEMA_VERSION: int = 9
+PARADIGM_STATE_SCHEMA_VERSION: int = 10
 
 # 云端任务必须在 GitHub 的硬超时之前主动收尾。该预算只决定本轮执行到
 # backlog 的哪个位置，不参与 Rubric、排序分数或研究去留；未处理项会持久化

@@ -435,9 +435,9 @@ class BibliographyClosureTests(unittest.IsolatedAsyncioTestCase):
     async def test_ambiguous_first_record_cannot_starve_later_first_lookups(self):
         queries = []
         def handler(request):
-            query = request.url.params["search"].strip('"')
+            query = request.url.params["search.title"].strip('"')
             queries.append(query)
-            return httpx.Response(200, json=payload(work(query), work(query, identity="W2")) if query == "Ambiguous Work" else payload(work(query)))
+            return httpx.Response(200, json=payload(work(query), work(query, identity="W2")) if query == "ambiguous work" else payload(work(query)))
         with tempfile.TemporaryDirectory() as directory, research_window(NOW), patch.object(config, "OPENALEX_API_KEY", "offline-key"):
             path = Path(directory) / "state.db"
             async with ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as client:
@@ -446,7 +446,7 @@ class BibliographyClosureTests(unittest.IsolatedAsyncioTestCase):
                 await first.resolve(client, NYU, records, lookback_days=7)
                 second = BibliographyResolver(stage_cache=ParadigmStore(path).campaigns, enabled=True, max_requests=1)
                 rows = await second.resolve(client, NYU, [], lookback_days=7)
-        self.assertEqual(queries, ["Ambiguous Work", "Adaptive Memory"])
+        self.assertEqual(queries, ["ambiguous work", "adaptive memory"])
         self.assertEqual({row["key"] for row in rows}, {"first", "second"})
 
     async def test_identity_search_does_not_supply_publication_date(self):

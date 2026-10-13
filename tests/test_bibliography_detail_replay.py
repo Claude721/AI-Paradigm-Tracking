@@ -36,7 +36,7 @@ class BibliographyDetailReplayTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, text="".join(
                 f'<p>Chen, A. (2026). “Adaptive {name} architecture”. Journal.</p>' for name in self.names))
         if request.url.host == "api.openalex.org":
-            name = "a" if " a " in request.url.params["search"] else "b"
+            name = "a" if " a " in request.url.params["search.title"] else "b"
             number = 1 if name == "a" else 2
             return httpx.Response(200, json={"meta": {"count": 1}, "results": [{
                 "id": f"https://openalex.org/W{number}", "display_name": f"Adaptive {name} architecture",

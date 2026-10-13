@@ -72,6 +72,7 @@ class ParadigmDiscovery:
         broad_lookback_days: int | None = None,
         high_signal_lookback_days: int | None = None,
         stage_cache=None,
+        bounded: bool = False,
     ):
         # lookback_days 保留为旧调用方式；新编排器显式传入两层窗口。
         legacy = lookback_days or config.SOURCING_LOOKBACK_DAYS
@@ -82,6 +83,7 @@ class ParadigmDiscovery:
         )
         # 保持兼容：旧属性表示本轮最长发现窗口。
         self.lookback_days = self.high_signal_lookback_days
+        self.bounded = bounded
         self.source_timeout_seconds = (
             config.PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS
         )
@@ -90,6 +92,7 @@ class ParadigmDiscovery:
             lookback_days=self.broad_lookback_days,
             high_signal_lookback_days=self.high_signal_lookback_days,
             seed_arxiv_ids=config.PARADIGM_SEED_ARXIV_IDS,
+            query_result_limit=config.PARADIGM_SOURCE_QUERY_LIMIT if bounded else None,
         )
         self.hf = HuggingFacePapersSource(
             lookback_days=self.broad_lookback_days
@@ -97,12 +100,16 @@ class ParadigmDiscovery:
         self.follow_builders = FollowBuildersSource()
         self.priority_pages = PriorityResearchPageSource(
             lookback_days=self.high_signal_lookback_days, stage_cache=stage_cache,
+            per_page=(min(config.PRIORITY_RESEARCH_LINK_SAFETY_LIMIT or config.PARADIGM_OFFICIAL_DETAIL_LIMIT,
+                          config.PARADIGM_OFFICIAL_DETAIL_LIMIT) if bounded else None),
+            catalog_page_limit=config.PARADIGM_SOURCE_PAGE_LIMIT if bounded else None,
         )
         self.official_repositories = OfficialRepositoryReleaseSource(
             lookback_days=self.high_signal_lookback_days
         )
         self.openalex = OpenAlexSource(
-            lookback_days=self.broad_lookback_days
+            lookback_days=self.broad_lookback_days,
+            max_pages=config.PARADIGM_SOURCE_PAGE_LIMIT if bounded else None,
         )
         self.openreview = OpenReviewSource(
             lookback_days=self.broad_lookback_days, stage_cache=stage_cache,
@@ -279,6 +286,12 @@ class ParadigmDiscovery:
         )
         coverage["recall_lanes"] = self.arxiv.recall_coverage()
         coverage["source_health"] = source_health
+        if self.bounded:
+            coverage["acquisition_scope"] = {"kind": "bounded_recall",
+                "arxiv_results_per_query": config.PARADIGM_SOURCE_QUERY_LIMIT,
+                "openalex_pages_per_query": config.PARADIGM_SOURCE_PAGE_LIMIT,
+                "official_details_per_entry": self.priority_pages.per_page,
+                "exhaustive": False}
         coverage["source_plan_signatures"] = self._plan_signatures()
         coverage["source_scope_signatures"] = self._plan_signatures(include_adapters=False)
         coverage["official_pages"] = self.priority_pages.coverage()

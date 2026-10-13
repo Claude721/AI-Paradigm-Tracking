@@ -38,8 +38,9 @@ def initialize(conn):
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_campaign
-            ON research_campaigns((1)) WHERE status != 'delivered';
+        DROP INDEX IF EXISTS idx_one_active_campaign;
+        CREATE UNIQUE INDEX idx_one_active_campaign
+            ON research_campaigns((1)) WHERE status NOT IN ('delivered', 'superseded');
         CREATE TABLE IF NOT EXISTS campaign_work (
             campaign_id TEXT NOT NULL,
             kind TEXT NOT NULL,
@@ -125,7 +126,7 @@ def _batch_from_payload(value):
 
 def _campaign(row):
     reference = datetime.fromisoformat(row[1])
-    if reference.tzinfo is None or row[6] not in {"discovering", "researching", "ready", "waiting_delivery", "delivered"}:
+    if reference.tzinfo is None or row[6] not in {"discovering", "researching", "ready", "waiting_delivery", "delivered", "superseded"}:
         raise ValueError("研究批次时钟或状态无效")
     seeds, stats = json.loads(row[5]), json.loads(row[8])
     if not isinstance(seeds, list) or any(not isinstance(item, str) for item in seeds) or not isinstance(stats, dict):
@@ -159,7 +160,7 @@ class CampaignStore:
     def active(self, *, load_discovery=True):
         columns = _COLUMNS if load_discovery else _COLUMNS.replace("discovery_json", "''")
         with self.store._connect() as conn:
-            row = conn.execute(f"SELECT {columns} FROM research_campaigns WHERE status != 'delivered'").fetchone()
+            row = conn.execute(f"SELECT {columns} FROM research_campaigns WHERE status NOT IN ('delivered', 'superseded')").fetchone()
         return _campaign(row) if row else None
 
     def get(self, key, *, load_discovery=True):
@@ -168,7 +169,7 @@ class CampaignStore:
             row = conn.execute(f"SELECT {columns} FROM research_campaigns WHERE campaign_id=?", (key,)).fetchone()
         return _campaign(row) if row else None
 
-    def begin(self, *, reference_time, ordinary_days, high_signal_days, bootstrap, seeds):
+    def begin(self, *, reference_time, ordinary_days, high_signal_days, bootstrap, seeds, delivery_contract_version=None):
         if reference_time.tzinfo is None:
             raise ValueError("研究批次需要带时区的参考时钟")
         with self.store.transaction():
@@ -183,7 +184,25 @@ class CampaignStore:
                     VALUES (?, ?, ?, ?, ?, ?, 'discovering', ?, ?)""",
                     (key, reference_time.astimezone(timezone.utc).isoformat(), ordinary_days,
                      high_signal_days, int(bootstrap), _encode(seeds), now, now))
+                if delivery_contract_version is not None:
+                    conn.execute("UPDATE research_campaigns SET stats_json=? WHERE campaign_id=?",
+                                 (_encode({"delivery_contract_version": delivery_contract_version}), key))
             return self.get(key)
+
+    def supersede(self, key):
+        """Archive an unfinished plan without completing/discarding its tasks."""
+        with self.store._connect() as conn:
+            conn.execute("UPDATE research_campaigns SET status='superseded', updated_at=? WHERE campaign_id=? AND status IN ('discovering','researching','ready')", (_now(), key))
+
+    def set_origin_scope(self, key, origins, *, input_diagnostics=None):
+        campaign = self.get(key, load_discovery=False)
+        if campaign.stats.get("delivery_contract_version") != 2:
+            return
+        if "origin_scope" in campaign.stats:
+            return
+        with self.store._connect() as conn:
+            conn.execute("UPDATE research_campaigns SET stats_json=? WHERE campaign_id=?",
+                         (_encode({**campaign.stats, **(input_diagnostics or {}), "origin_scope": [item.fingerprint for item in origins]}), key))
 
     def begin_run(self, key):
         import config
@@ -285,11 +304,15 @@ class CampaignStore:
         """Derive receipts from committed state, never from in-memory returns."""
         from database.paradigm_store import _deep_checkpoint_input_signature, _persistable_candidate
         with self.store.transaction():
+            campaign = self.get(key, load_discovery=False)
+            bounded = campaign.stats.get("delivery_contract_version") == 2
+            scope = set(campaign.stats.get("origin_scope", []))
             with self.store._connect() as conn:
                 origins = conn.execute("""SELECT e.fingerprint, o.source_signature, e.last_analyzed_at
                     FROM evidence_state e JOIN origin_research_state o ON e.fingerprint=o.fingerprint
                     WHERE e.evidence_type IN ('primary_paper','technical_blog','concept_essay','original_implementation')""").fetchall()
-                pending = [(fp, rev) for fp, rev, done in origins if done is None]
+                pending = [(fp, rev) for fp, rev, done in origins
+                           if (fp in scope if bounded else done is None)]
                 self.include(key, "origin", pending)
                 origin_state = {fp: (rev, done) for fp, rev, done in origins}
                 for fp, rev in conn.execute("SELECT object_key, input_revision FROM campaign_work WHERE campaign_id=? AND kind='origin'", (key,)).fetchall():
@@ -311,7 +334,20 @@ class CampaignStore:
                     if item is not None and item.status != "pending_deep" and revision != _deep_checkpoint_input_signature(item):
                         item.status = "pending_deep"
                         self.store.save_candidates([item])
-                self.include(key, "deep", [(item.key, _deep_checkpoint_input_signature(item), _persistable_candidate(item).to_dict()) for item in candidates.values() if item.status == "pending_deep"])
+                member_keys = self.candidate_keys(key)
+                if bounded:
+                    import config
+                    deep_members = {row[0] for row in conn.execute("SELECT object_key FROM campaign_work WHERE campaign_id=? AND kind='deep'", (key,))}
+                    # Recover downstream snapshots after a crash, but admit a
+                    # bounded deep plan, not every hypothesis from the recall.
+                    pool = [item for item in candidates.values() if item.status == "pending_deep" and
+                            item.key not in member_keys and any(e.fingerprint in scope for e in item.evidence)]
+                    pool.sort(key=lambda item: (-item.total_score, item.execution_failure_count, item.key))
+                    capacity = max(0, config.PARADIGM_RESEARCH_DEEP_LIMIT - len(deep_members))
+                    member_keys.update(item.key for item in pool[:capacity])
+                self.include(key, "deep", [(item.key, _deep_checkpoint_input_signature(item), _persistable_candidate(item).to_dict())
+                    for item in candidates.values() if item.status == "pending_deep" and
+                    (not bounded or item.key in member_keys)])
                 for object_key, rev in conn.execute("SELECT object_key, input_revision FROM campaign_work WHERE campaign_id=? AND kind='deep'", (key,)).fetchall():
                     item = candidates.get(object_key)
                     closed = item is not None and item.status != "pending_deep" and self.store.candidate_inputs_current(item) and rev == _deep_checkpoint_input_signature(item)
@@ -343,7 +379,7 @@ class CampaignStore:
             accounting["cumulative_research_seconds"] += stats.get("elapsed_seconds", 0)
             accounting["cumulative_llm_total_tokens"] += stats.get("llm_total_tokens", 0)
             accounting["cumulative_unreported_usage_calls"] += stats.get("llm_unreported_usage_count", 0)
-        stats = {"refresh_scope_sealed": previous.stats.get("refresh_scope_sealed", False), **stats,
+        stats = {**previous.stats, **stats,
                  **accounting, "last_accounted_attempt": previous.attempt_count}
         with self.store._connect() as conn:
             conn.execute("UPDATE research_campaigns SET stats_json=?, status=?, updated_at=? WHERE campaign_id=? AND status != 'delivered'", (_encode(stats), "ready" if ready else "researching", _now(), key))
@@ -351,7 +387,7 @@ class CampaignStore:
     def bind_delivery(self, key, delivery_key, *, delivered=False):
         self.require_ready(key)
         snapshot = self.reconcile(key)
-        if snapshot["pending_total_count"]:
+        if snapshot["pending_total_count"] and self.get(key, load_discovery=False).stats.get("delivery_contract_version") != 2:
             raise ResearchNotCompleteError(["持久化研究批次仍有未闭合任务"])
         with self.store._connect() as conn:
             conn.execute("UPDATE research_campaigns SET delivery_key=?, status=?, updated_at=? WHERE campaign_id=?", (delivery_key, "delivered" if delivered else "waiting_delivery", _now(), key))
@@ -361,7 +397,25 @@ class CampaignStore:
         if campaign is None or campaign.status not in {"ready", "waiting_delivery"} or campaign.discovery is None or not campaign.stats.get("refresh_scope_sealed"):
             raise ResearchNotCompleteError(["持久化研究批次没有有效的完整研究凭据"])
         require_completed_research(campaign.stats)
-        require_completed_research({"research_incomplete": False, "coverage_incomplete": False, "frontier_coverage": campaign.discovery.coverage})
+        if campaign.stats.get("delivery_contract_version") == 2:
+            from paradigms.delivery_policy import delivery_proof
+            expected = campaign.stats["delivery_scope"]["routes"]
+            saved = self.store.load_candidate_snapshots([row["key"] for row in expected])
+            if len(saved) != len(expected) or any(not self.store.candidate_inputs_current(item) for item in saved):
+                raise ResearchNotCompleteError(["交付路线检查点丢失或一手输入已换版"])
+            actual = delivery_proof({"frontier_coverage": campaign.discovery.coverage,
+                                    "research_scope_origin_count": len(campaign.stats.get("origin_scope", [])),
+                                    "discovery_rejected_origins": campaign.stats.get("discovery_rejected_origins", 0)}, saved,
+                                    self.reconcile(key), minimum_sources=campaign.stats["delivery_scope"]["minimum_primary_sources"])
+            if actual != campaign.stats["delivery_scope"]:
+                raise ResearchNotCompleteError(["本期交付凭据与持久化研究结果不一致"])
+            with self.store._connect() as conn:
+                completed = {row[0] for row in conn.execute("SELECT object_key FROM campaign_work WHERE campaign_id=? AND kind IN ('deep','refresh') AND status='completed'", (key,))}
+            if any(item.key not in completed for item in saved):
+                raise ResearchNotCompleteError(["入选路线没有自身完成的深挖/刷新回执"])
+            require_completed_research(campaign.stats, candidates=saved)
+        else:
+            require_completed_research({"research_incomplete": False, "coverage_incomplete": False, "frontier_coverage": campaign.discovery.coverage})
         if any(item.key not in self.candidate_keys(key) for item in candidates):
             raise ResearchNotCompleteError(["报告候选不属于已闭合研究批次"])
 

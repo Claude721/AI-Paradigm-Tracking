@@ -115,6 +115,7 @@ def migrate_state(
     Version 7 separates origin source snapshots from execution checkpoints.
     Version 8 adds fixed research campaigns, work/attempt receipts and stage caches.
     Version 9 adds cross-run provider credit reservations and account observations.
+    Version 10 archives superseded weekly plans and adds scoped V0 delivery proof.
     All additions are backwards-compatible, so opening
     the database with :class:`ParadigmStore` performs the migration.  Future
     versions must extend this function before raising the schema version.

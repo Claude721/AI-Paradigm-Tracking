@@ -142,7 +142,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             for _, items in setup_env.SECTIONS
             for key, _, _, default, _ in items
         }
-        self.assertEqual(defaults["PARADIGM_RECALL_OVERLAP_DAYS"], "30")
+        self.assertEqual(defaults["PARADIGM_RECALL_OVERLAP_DAYS"], "14")
         self.assertEqual(defaults["SCHEDULE_MINUTE"], "15")
         self.assertEqual(
             defaults["PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS"], "600"
@@ -2154,10 +2154,10 @@ class ExecutionReliabilityTests(unittest.TestCase):
         self.assertIn("vars.PRIORITY_RESEARCH_CONCURRENCY || '6'", workflow)
         self.assertNotIn("overwrite: true", workflow)
         self.assertIn(
-            "name: paradigm-radar-state-${{ github.run_id }}",
+            "name: paradigm-radar-v0-state-${{ github.run_id }}",
             workflow,
         )
-        self.assertIn('startswith("paradigm-radar-state-")', workflow)
+        self.assertIn('startswith("paradigm-radar-v0-state-")', workflow)
         self.assertIn("gh api --paginate", workflow)
         self.assertIn("submodules: false", workflow)
         self.assertIn("尝试上一份快照", workflow)

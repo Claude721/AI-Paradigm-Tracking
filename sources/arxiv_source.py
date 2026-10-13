@@ -61,8 +61,10 @@ class ArxivSource(BaseSource):
         *,
         high_signal_lookback_days: int | None = None,
         reference_time: datetime | None = None,
+        query_result_limit: int | None = None,
     ):
         self.max_results = max_results
+        self.query_result_limit = query_result_limit
         self.lookback_days = max(lookback_days, 1)
         self.high_signal_lookback_days = max(
             high_signal_lookback_days or self.lookback_days,
@@ -281,8 +283,9 @@ class ArxivSource(BaseSource):
 
     def _remaining_limit(self, results: list[RawProject]) -> int | None:
         if not self.max_results:
-            return None
-        return max(self.max_results - len(results), 0)
+            return self.query_result_limit
+        remaining = max(self.max_results - len(results), 0)
+        return min(remaining, self.query_result_limit) if self.query_result_limit else remaining
 
     def _mark_not_executed(self, lanes, reason: str) -> None:
         for lane in lanes:
@@ -317,6 +320,8 @@ class ArxivSource(BaseSource):
             "ordinary_lookback_days": self.lookback_days,
             "high_signal_lookback_days": self.high_signal_lookback_days,
             "technical_query_false_positives": self.technical_query_false_positives,
+            "query_result_limit": self.query_result_limit,
+            "exhaustive": self.query_result_limit is None and self.max_results is None,
         }
 
     def recall_coverage(self) -> dict[str, dict[str, object]]:

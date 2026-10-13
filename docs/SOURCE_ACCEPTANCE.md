@@ -1,6 +1,8 @@
 # 逐入口信源验收
 
-更新：2026-10-13。用于验证输入与接口，不是完整研究、报告或生产 V0 认证，不减少范围、清空 backlog 或把缺口写成“没有更新”。最新云端 [run 38347140838](RUN_38347140838_SOURCE_REVIEW.md)：131 passed、10 failed、15 not_executed、1 not_tested、3 disabled；771 项云端门通过，NYU 元数据补丁生效。摘要中的模拟接口失败已发现 CI 写入隔离缺陷并补修，不按 Key 失效处理。适配与完整版本证据见 [本轮修复](SOURCE_REPAIR_20261013.md)，操作见 [Key 指南](SOURCE_API_KEY_VERIFICATION.md)。所有入口仍为交付必需项。
+更新：2026-10-13。输入诊断不是完整研究/生产 V0 认证。当前正式交付不再要求每个物理入口成功；故障清单保留，健康材料继续。历史 [Runner 证据](RUN_38347140838_SOURCE_REVIEW.md) 和 [输入修复](SOURCE_REPAIR_20261013.md) 只说明当时状态，不再定义全入口交付门。
+
+云端 source_check_only 使用 --v0-readiness：至少 2 类一手能力的协议/解析样本通过时，输入能力可就绪；仍保留 acceptance_complete=false、所有 failed/not_executed/not_tested，不冒称生产认证。50 个同一提供方查询只算一类能力。代码指纹变化、缺清单回执或 --entry/--kind 子集不能声明就绪。不带该参数的本地 CLI 仍按严格全清单结果退出。
 
 ## 云端先做什么
 
@@ -14,7 +16,7 @@
 
 生产研究源与辅助源按当前配置逐项列入清单，包括每个官方页面、KOL/RSS、论坛、Follow Builders 文件、学术查询和 GitHub 组织。官方页面最多一条详情、学术查询首个小页；GitHub/Search/作者查询等只验证协议，不声称全部 README、作者身份合并、独立承接或全分页已经完成。
 
-正式官方详情使用固定窗口的单调任务清单和逐条持久化结果；`detail_pending` 与逐页面尾项会阻断生产闭合。这里的 `caller_sample` 故意只验证一个详情协议，即使该样本 passed，也不能用它清除正式队列的未尝试/失败任务。audit 使用临时库，不恢复生产缓存；恢复效率应另测同窗多进程，而不是对健康入口重复请求 50/100 次。
+官方详情保留固定窗口逐条结果和未尝试/失败账本，V0 只做有界取材，尾项不否决其他已核验路线。caller_sample 只测一个详情，不能清除正式队列。audit 使用临时库，恢复效率另测同窗多进程，不向第三方重复请求 50/100 次。
 
 ## 本地命令与限制
 
@@ -22,7 +24,7 @@
 
 ## 独立 NYU/Tavily 接口验收
 
-只验证已获授权的子集时使用 `source-interface-acceptance.yml`，不要为此勾选会检查所有已启用平台的 `source_platform_checks`。选 `scope=nyu/tavily/both`，NYU 查询上限 1–8；必须另勾选 `live_authorized=true`，默认不执行。2026-10-13 所有者已明确授权这两项有界接口验收，需新增付费则停止；不授权其他平台、模型/邮件或生产研究。授权不等于执行/通过，后续结果单独记录。
+只验证已获授权的子集时使用 `source-interface-acceptance.yml`，不要为此勾选会检查所有已启用平台的 `source_platform_checks`。选 `scope=nyu/tavily/both`，NYU 查询上限 1–8；必须另勾选 `live_authorized=true`，默认不执行。2026-10-13 授权已执行一次：[run 38370843944](RUN_38370843944_INTERFACE_REVIEW.md)，774 项云端门通过，11 HTTP；NYU 8 次身份查询全部 200，3 个链接待原文核验、5 个未闭合、130 未查询；Tavily 只读 usage 200，但 PAYG 限额未知，没有搜索。两项仍 failed，不自动重试或追加付费调用。
 
 无网络列清单：
 
@@ -39,7 +41,9 @@ python scripts/source_interface_check.py --scope tavily --live-authorized
 
 NYU URL 绑定登记目录，不依赖 `official:N` 的位置；丢失、重复或关闭选中入口、缺 Key 或非法配置时，整个计划在首个 HTTP 前拒绝。显式授权最多 8 次身份查询，不改变生产开关/数据库；第 9 个引用和身份/详情故障继续 pending。Tavily 先 `/usage`，明确核验既有账户/Key 额度及 `paygo_limit=0`，再最多一次 basic 搜索；未知限额、PAYG 开启、月度保护关闭或额度不足均不搜索。不会修改账户、变量或其他平台开关。
 
-总上限 14 HTTP / 300 秒、单入口 120 秒，无模型/邮件/正式研究/生产状态；JSON 保留完整声明清单及未测试身份。`selected_protocols_passed` 不等于 V0：完整验收/生产覆盖/生产 V0 字段始终 false，NYU 未闭合引用仍让样本失败。原全清单验收不改变。失败前配置原因只输出固定变量名/代码；运行异常不把未知请求/费用写成 0。
+总上限 14 HTTP / 300 秒、单入口 120 秒，无模型/邮件/正式研究/生产状态；JSON 保留当前验收进程声明清单及未测试身份，`full_manifest_scope=current_interface_invocation` / `production_manifest_verified=false`。独立工作流没有复制全部生产 Variables，其清单不能替代普通生产配置分母。`selected_protocols_passed` 不等于 V0：完整验收/生产覆盖/生产 V0 字段始终 false，NYU 未闭合引用仍让样本失败。原全清单验收不改变。失败前配置原因只输出固定变量名/代码；运行异常不把未知请求/费用写成 0。
+
+书目身份查询使用 `search.title` 的规范化完整标题短语，不搜索正文引用；原始题名和唯一题名/作者/年份/一手链接门保留。Tavily 额度保护失败只附六个固定字段的类型标签（missing/null/integer 等），不记录字段值或账户文本；HTTP 回执包含 method，以便核对 GET 与 POST 边界。未知限额不当作 0，也不为通过测试临时关闭费用门。
 
 ## 普通逐入口命令与限制
 
@@ -56,7 +60,7 @@ python scripts/source_audit.py --entry official:5 --budget-seconds 100 --max-req
 
 唯一新增请求例外：已注册的 Gary Marcus / Zvi 公开归档，每项最多 12 次，仍共用原 300 次/900 秒总预算和 45 秒入口预算。RSS 失败先保留回执，再读取同一作者公开 `/archive` 与 `sort=new` 分页；必须闭合样本 60 天索引，最多一篇公开正文样本，未读尾项在 `pending_public_posts` 保留。`passed` 只证明这个索引/正文样本协议，不证明全部正文、付费全文或独立承接。公开数据声明阻止 AI 抓取、身份/日期冲突和未知格式都拒绝；不登录、不解锁订阅、不执行 JS。
 
-Meta 同源出版目录的生产覆盖必须有限分页穷尽，不能看见旧卡片或已知论文子集就停止。临时 audit 与学术查询一样只验证首个已解析目录页、最多一篇详情，不为每次协议测试下载 165 页历史目录；JSON 明确记录 `catalog_sample_complete` 与尚未闭合的 `pagination_pending` / 详情尾项，`catalog_diagnostics.complete=false` 不能用于生产交付。真实页/身份/详情失败仍拒绝样本。生产默认完整分页并固定窗口保存；本轮已另做 165 页有限目录/同窗恢复实测，不是依赖这个首屏协议声明全量通过。
+Meta 临时 audit 只验证首个已解析目录页、最多一篇详情；V0 正式目录也有分页与详情预算，不要求为周报下载完整历史。catalog_sample_complete、pagination_pending 与目录诊断继续记录，不能把有界样本写成穷尽覆盖。真实页/身份/详情失败仍拒绝该样本；健康其他来源不受其否决。
 
 `--include-authenticated` 仅开放有界 OpenAlex/GitHub。`--include-platforms` 是额外明确授权：Tavily 最多一次 basic 搜索，月度保护开启时先一次只读 `/usage`；X 最多 10 条的一次搜索、Semantic Scholar 一次、Reddit OAuth 加一次最小搜索。不启用关闭的平台，不自动补格式或重试付费请求。Tavily 用量未知/额度耗尽不搜索，成功样本必须确认本次 credits，关闭 auto_parameters；独立验收不恢复生产额度账本，不是账户级费用硬保证。未配置与 disabled 不算通过；启用入口缺少凭据也阻止 `acceptance_complete`。`--entry` / `--kind` 是局部诊断，始终不算完整验收；即使所选样本 passed，退出码仍为 1。
 
@@ -78,7 +82,7 @@ python scripts/review_source_audits.py /首轮/source_audit_latest.json /复验/
 | not_tested | 平台需单独授权、响应超样本大小等 | 否 |
 | not_configured / disabled | 配置声明，未测 | 否，不算 passed |
 
-所有清单项保持在分母；失败、未测试、未执行让验收非零退出。`acceptance_complete` 只表示声明样本清单已处理且无失败/未测试/未执行，`campaign_coverage_complete` 永远为 false。空合法 RSS、过滤出窗口外旧论文与“解析不到任何文章”的故障不可混为一谈。
+所有清单项保持在诊断分母；严格模式下失败、未测试、未执行让验收非零退出。--v0-readiness 则依据足够可用输入能力退出，不改动这些行或 acceptance_complete。`acceptance_complete` 只表示声明样本清单已处理且无失败/未测试/未执行，`campaign_coverage_complete` 永远为 false。空合法 RSS、过滤出窗口外旧论文与“解析不到任何文章”的故障不可混为一谈。
 
 ## 2026-10-09 实测
 
@@ -101,4 +105,4 @@ NVIDIA GEAR 已修复公开脚本列表读取：46 卡片、45 条允许的项�
 
 `logs_102682886856.zip` 的 `9031490` 已通过云端旧 457 项测试、v8 恢复和状态上传，失败在研究/覆盖未闭合；原点仅 58/14,606、深挖返回 9/407，不是邮件发送失败。本轮增加 OpenReview 页级恢复、forum/count 契约、人物一次格式修复及输入协议检查，但没有证据证明整体吞吐已足够。
 
-这两个同 run 制品现已补充，临时副本恢复守恒验证通过。真实问题还包括 10,770 条历史未审原点、过期来源仍被付费刷新、混合队列预筛碎片化，以及取消调用漏记。已做前置版本闸门、预筛缓存前填和取消审计修复；详见 [容量复核](RUN_37899070924_CAPACITY_REVIEW.md)。仍需 Runner 信源验收和授权的小样本真实模型实验。不能通过删 backlog、取消闭合门、重复扩预算或恢复阶段性邮件制造 V0。
+历史容量问题见 [容量复核](RUN_37899070924_CAPACITY_REVIEW.md)。当前用户已澄清允许丢弃失败历史、要求有界本期研究，云端采用独立 V0 状态 epoch；仍不放宽技术/人物/URL/中文门槛，不以离线或输入就绪样本代替真实模型与交付验收。

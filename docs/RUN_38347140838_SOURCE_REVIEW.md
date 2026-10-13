@@ -1,5 +1,7 @@
 # 最新代码 Runner 复验与测试输出污染
 
+> 历史诊断记录：保留当时版本、授权与观测，不定义当前 V0 验收规则。文中的“全部物理入口/历史积压必须闭合”“不得重置状态”等要求已由 2026-10-13 用户澄清取代；当前按[有界研究设计](PARADIGM_RADAR_DESIGN.md)交付自身已核验的路线，故障仍保留审计。
+
 2026-10-13，[run 38347140838](https://github.com/Claude721/AI-Paradigm-Tracking/actions/runs/38347140838)，job `115131066962`，执行提交 `60058a5ac372e0f4e9bde03e225d34cfd53e302f`。`source_check_only=true`、`reset_state=false`、`smoke_only=false`、`source_platform_checks=false`；只读核对书目开关未配置，默认 false，未修改 Variables/Secrets。
 
 工作流 4m 29s，job 4m 25s；因输入缺口正确失败，制品上传成功。研究、邮件、生产状态、预算续跑均未进入。

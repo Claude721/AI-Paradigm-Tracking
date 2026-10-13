@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 class ParadigmOrchestrator:
     def __init__(self):
         self.store = ParadigmStore()
+        from paradigms.delivery_policy import VERSION
+        self.delivery_contract_version = VERSION
         self.bootstrap_mode = self.store.is_bootstrap_required()
         self.ordinary_discovery_lookback_days = config.SOURCING_LOOKBACK_DAYS
         self.high_signal_discovery_lookback_days = (
@@ -65,6 +67,7 @@ class ParadigmOrchestrator:
             broad_lookback_days=self.ordinary_discovery_lookback_days,
             high_signal_lookback_days=self.high_signal_discovery_lookback_days,
             stage_cache=self.store.campaigns,
+            bounded=True,
         )
         self.analyzer = ParadigmAnalyzer(
             enable_batch_prefilter=config.PARADIGM_ORIGIN_PREFILTER_ENABLED,
@@ -74,6 +77,7 @@ class ParadigmOrchestrator:
             stage_cache=self.store.campaigns,
         )
         self.enricher = EvidenceEnricher(budget_store=self.store.provider_budgets)
+        self.enricher.allow_partial_sources = True
         self.synthesizer = ParadigmSynthesizer()
         self.trajectory = ResearcherTrajectoryAnalyzer(stage_cache=self.store.campaigns)
         self.deep_concurrency = config.PARADIGM_DEEP_CONCURRENCY
@@ -82,8 +86,19 @@ class ParadigmOrchestrator:
 
     async def run(self, *, reference_time: datetime | None = None, resume_only: bool = False) -> dict:
         active = self.store.campaigns.active()
+        bounded = getattr(self, "delivery_contract_version", None) == 2
+        now = reference_time or datetime.now(timezone.utc)
+        if bounded and active and not resume_only and active.status != "waiting_delivery" and (
+            active.stats.get("delivery_contract_version") != 2 or
+            now - active.reference_time >= timedelta(days=active.ordinary_days)
+        ):
+            self.store.campaigns.supersede(active.campaign_id)
+            run_audit.event("research_window", "superseded", "旧研究计划归档；未完成对象不标记成功，本期使用新的时间窗口")
+            active = None
         if resume_only and active is None:
             raise RuntimeError("没有待续跑的研究批次；--resume-research 不启动新发现")
+        if bounded and resume_only and active.stats.get("delivery_contract_version") != 2:
+            raise RuntimeError("旧版研究计划不能按 V0 交付契约续跑；请执行普通运行建立新计划，旧对象保留为历史")
         with research_window(active.reference_time if active else reference_time,
                              observation_time=reference_time or datetime.now(timezone.utc),
                              lookback_days=active.ordinary_days if active else self.ordinary_discovery_lookback_days):
@@ -92,6 +107,7 @@ class ParadigmOrchestrator:
                     reference_time=research_now(), ordinary_days=self.ordinary_discovery_lookback_days,
                     high_signal_days=self.high_signal_discovery_lookback_days,
                     bootstrap=self.bootstrap_mode, seeds=list(config.PARADIGM_SEED_ARXIV_IDS),
+                    delivery_contract_version=getattr(self, "delivery_contract_version", None),
                 )
             self.campaign = self.store.campaigns.begin_run(active.campaign_id)
             self.ordinary_discovery_lookback_days = active.ordinary_days
@@ -105,6 +121,7 @@ class ParadigmOrchestrator:
                     broad_lookback_days=active.ordinary_days,
                     high_signal_lookback_days=active.high_signal_days,
                     stage_cache=self.store.campaigns,
+                    bounded=bounded,
                 )
                 self.discovery.arxiv.seed_arxiv_ids = active.seeds
             return await self._run_research()
@@ -120,13 +137,20 @@ class ParadigmOrchestrator:
             "run_budget_seconds": config.PARADIGM_RUN_BUDGET_SECONDS,
         }
         reopener = getattr(self.store, "reopen_failed_community_judgments", None)
-        stats["community_failed_judgments_reopened"] = reopener() if callable(reopener) else 0
+        stats["community_failed_judgments_reopened"] = (
+            reopener(allow_partial_sources=True) if callable(reopener) and getattr(self, "delivery_contract_version", None) == 2
+            else reopener() if callable(reopener) else 0
+        )
         queue_before = self.store.work_queue_snapshot(reference_time=research_now())
         stats["work_queue_before"] = queue_before
 
         if self.campaign.discovery is None:
             batch = await self.discovery.run()
             stats["discovery_resumed"] = False
+        elif getattr(self, "delivery_contract_version", None) == 2:
+            batch = self.campaign.discovery
+            stats["discovery_resumed"] = True
+            stats["discovery_retry_sources"] = []
         else:
             from paradigms.completion import discovery_retry_sources
             retry_planner = getattr(self.discovery, "retry_sources", None)
@@ -135,6 +159,13 @@ class ParadigmOrchestrator:
             stats["discovery_resumed"] = True
             stats["discovery_retry_sources"] = sorted(retry_sources)
             batch = await self.discovery.retry(self.campaign.discovery) if retry_sources else self.campaign.discovery
+        if getattr(self, "delivery_contract_version", None) == 2:
+            from paradigms.delivery_policy import validated_discovery
+            batch, rejected = validated_discovery(batch)
+            for key, count in rejected.items():
+                stats[key] = max(count, self.campaign.stats.get(key, 0))
+            if any(rejected.values()):
+                run_audit.event("discovery_record_contract", "isolated", f"坏输入逐条隔离：{rejected}；健康材料继续，不能据此形成成功空报告")
         # 发现源的耗时不可预知，尤其冷启动会翻阅更长窗口。研究阶段的份额
         # 必须在发现完成后按剩余时间重新划分，否则慢发现会把机制抽取窗口
         # 直接吃完，形成“抓到近两万条、只分析六条”的假运行。
@@ -329,12 +360,24 @@ class ParadigmOrchestrator:
                 recall_lanes=recall_lanes,
             )
         )
+        bounded = getattr(self, "delivery_contract_version", None) == 2
+        if bounded:
+            from paradigms.delivery_policy import bounded_origins
+            selected = bounded_origins(batch.origins, limit=config.PARADIGM_RESEARCH_ORIGIN_LIMIT,
+                reference_time=research_now(), days=self.high_signal_discovery_lookback_days)
         with self.store.transaction():
             # Persist the downstream campaign snapshot before the upstream
             # discovery records are acknowledged. A crash commits both or none.
             self.store.campaigns.save_discovery(self.campaign.campaign_id, batch)
+            if bounded:
+                self.store.campaigns.set_origin_scope(self.campaign.campaign_id, selected,
+                    input_diagnostics={key: stats.get(key, 0) for key in ("discovery_rejected_origins", "discovery_rejected_supporting")})
             origins, incremental, origin_checkpoint = self.store.observe_origins(batch.origins)
             self.store.campaigns.reconcile(self.campaign.campaign_id)
+        if bounded:
+            scope = set(self.store.campaigns.get(self.campaign.campaign_id, load_discovery=False).stats["origin_scope"])
+            stats["research_scope_origin_count"] = len(scope)
+            stats["unselected_origin_count"] = len(batch.origins) - len(scope)
         stats.update({f"origin_{key}": value for key, value in incremental.items()})
         # 发现和分析必须是两个独立检查点。先把本轮所有新原点写成 pending，
         # 即使后续只处理其中一部分，也不会把运行预算误写成研究淘汰。
@@ -357,6 +400,11 @@ class ParadigmOrchestrator:
         pending_origins = self.store.load_pending_origins(
             exclude_fingerprints={item.fingerprint for item in origins}
         )
+        if bounded:
+            # Historical evidence remains available for deduplication, but is
+            # not silently added to the current report's completion denominator.
+            pending_origins = [item for item in pending_origins if item.fingerprint in scope]
+            origins = [item for item in origins if item.fingerprint in scope]
         for origin in [*pending_origins, *origins]:
             _revalidate_legacy_technical_report(origin)
         origins = _origin_execution_order(
@@ -1016,6 +1064,15 @@ class ParadigmOrchestrator:
         stats["run_incomplete"] = stats["research_incomplete"]
         stats["pending_work_count"] = max(stats["pending_work_count"], ledger["pending_total_count"], queue_after["pending_total_count"])
         stats["result_kind"] = "research_blocked" if stats["research_incomplete"] or stats["coverage_incomplete"] else "complete_memo" if reportable else "complete_no_signal"
+        if bounded:
+            from paradigms.delivery_policy import delivery_proof
+            stats["delivery_contract_version"] = 2
+            stats["delivery_scope"] = delivery_proof(stats, reportable, ledger,
+                minimum_sources=config.PARADIGM_MIN_PRIMARY_SOURCES)
+            # Diagnostics above remain honest. A scoped, evidence-qualified
+            # result is independent of unrelated acquisition/backlog failures.
+            stats["result_kind"] = "complete_memo" if reportable else (
+                "complete_no_signal" if ledger["pending_total_count"] == 0 else "research_blocked")
         from paradigms.completion import research_completion_violations
         ready = not research_completion_violations(stats)
         self.store.campaigns.save_stats(self.campaign.campaign_id, stats, ready=ready)
@@ -1063,6 +1120,10 @@ class ParadigmOrchestrator:
             ) else "backfill"
             origin_queues[lane].append(item)
         initial_deep = self.store.load_pending_deep_candidates()
+        bounded = getattr(self, "delivery_contract_version", None) == 2
+        if bounded:
+            member_keys = self.store.campaigns.candidate_keys(self.campaign.campaign_id)
+            initial_deep = [item for item in initial_deep if item.key in member_keys]
         deep_tasks = {item.key: item for item in initial_deep}
         deep_plan = dict(deep_tasks)
         deep_queues = {name: deque() for name in ("current", "backfill")}
@@ -1076,6 +1137,8 @@ class ParadigmOrchestrator:
         historical = self.store.load_refresh_candidates(
             exclude_keys=set(deep_tasks), limit=0
         )
+        if bounded:
+            historical = historical[:config.PARADIGM_RESEARCH_REFRESH_LIMIT]
         campaign = getattr(self, "campaign", None)
         campaign_key = campaign.campaign_id if campaign else None
         if campaign_key:
@@ -1142,8 +1205,12 @@ class ParadigmOrchestrator:
             return active
 
         def queue_committed(keys):
+            members = None
+            if bounded:
+                self.store.campaigns.reconcile(campaign_key)
+                members = self.store.campaigns.candidate_keys(campaign_key)
             for item in self.store.load_candidate_snapshots(keys):
-                if item.status != "pending_deep":
+                if item.status != "pending_deep" or members is not None and item.key not in members:
                     continue
                 key = item.key
                 # A new committed input supersedes any earlier outcome from
@@ -1282,6 +1349,8 @@ class ParadigmOrchestrator:
                         deep_plan[key] = rebased
                         history_index.upsert(rebased)
                     limit = config.PARADIGM_DEEP_SAFETY_LIMIT
+                    if bounded:
+                        limit = min(limit or config.PARADIGM_RESEARCH_DEEP_LIMIT, config.PARADIGM_RESEARCH_DEEP_LIMIT)
                     if limit > 0 and key not in visited_deep_keys and len(visited_deep_keys) >= limit:
                         # Remove only from this process's runnable queue. The
                         # durable snapshot and final safety ledger retain it.
@@ -1371,7 +1440,10 @@ class ParadigmOrchestrator:
         safety_deep = []
         for key, item in deep_tasks.items():
             snapshot = _deferred_deep_snapshot(self.store, item, supporting)
-            if config.PARADIGM_DEEP_SAFETY_LIMIT > 0 and key not in visited_deep_keys and len(visited_deep_keys) >= config.PARADIGM_DEEP_SAFETY_LIMIT:
+            deep_limit = config.PARADIGM_DEEP_SAFETY_LIMIT
+            if bounded:
+                deep_limit = min(deep_limit or config.PARADIGM_RESEARCH_DEEP_LIMIT, config.PARADIGM_RESEARCH_DEEP_LIMIT)
+            if deep_limit > 0 and key not in visited_deep_keys and len(visited_deep_keys) >= deep_limit:
                 safety_deep.append(snapshot)
             else:
                 deep_budget[key] = snapshot
@@ -1784,9 +1856,11 @@ class ParadigmOrchestrator:
                     _validate_candidate_stage_output(
                         fresh, values, "external_enrichment"
                     )
-                    search_failed = [item for item in values if incomplete_searches(item)]
-                    values = [item for item in values if not incomplete_searches(item)]
-                    fresh = [item for item in fresh if not incomplete_searches(item)]
+                    from paradigms.search_receipts import blocking_searches
+                    blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) == 2)
+                    search_failed = [item for item in values if blocked(item)]
+                    values = [item for item in values if not blocked(item)]
+                    fresh = [item for item in fresh if not blocked(item)]
                     cached.update({item.key: item for item in search_failed})
                     values = await self.synthesizer.run(values) if values else []
                     _validate_candidate_stage_output(
@@ -1965,8 +2039,10 @@ class ParadigmOrchestrator:
                     "community_refresh",
                     allow_subset=True,
                 )
-                search_failed = [item for item in candidate_batch if incomplete_searches(item)]
-                values = [item for item in values if not incomplete_searches(item)]
+                from paradigms.search_receipts import blocking_searches
+                blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) == 2)
+                search_failed = [item for item in candidate_batch if blocked(item)]
+                values = [item for item in values if not blocked(item)]
                 if values:
                     changed_inputs = [
                         candidate

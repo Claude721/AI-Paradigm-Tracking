@@ -1,5 +1,7 @@
 # 有界单路线真实研究验收
 
+> 本页的 Qwen 专用费用保护只适用于当时授权的独立单路线测试，不限制正式流水线的模型/API 选择。正式模型可按[配置清单](CONFIGURATION_CHECKLIST.md)替换；新付费验收不能沿用其他提供方或过期价格，也不能据此自动执行。
+
 2026-10-12 授权：最多一条路线，单次人民币 API 总费用不超过 20 元，不发邮件、不自动续跑。独立工作流 `one-route-acceptance.yml` 仅有手动触发，默认不授权；不使用正式工作流的 seed 伪装缩小研究范围，不修改历史任务清单。输入为单个普通论文 arXiv ID、费用上限、官方价格核验日期与 `live_authorized=true`；不接受多条材料或多机制 Technical Report。
 
 保留当前正式模型：**北京百炼 qwen3.7-plus**。2026-10-12 核验 [官方价格](https://help.aliyun.com/zh/model-studio/model-pricing)、[模型容量](https://help.aliyun.com/zh/model-studio/qwen3-7-plus) 和 [兼容 API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)：最高阶梯每百万输入 6 元、输出 24 元；不计免费额度、缓存或限时折扣。只有核验当日可运行；其他模型/地域、未来日期必须重新核验，不能套用代理报价或静默更换为 DeepSeek。

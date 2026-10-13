@@ -281,7 +281,7 @@ class SourceAuditWiringTests(unittest.TestCase):
         self.assertIn('python scripts/source_audit.py "${audit_args[@]}"', workflow)
         self.assertIn('if [ "$SOURCE_PLATFORM_CHECKS" = "true" ]; then audit_args+=(--include-platforms)', workflow)
         self.assertIn('logs/source_audit_latest.json', workflow)
-        for name in ('恢复上一次去重状态','抓取、分析并在研究全部闭合后发送邮件','记录状态对应的代码版本','保存本期报告','任一生产步骤失败邮件提醒'):
+        for name in ('恢复上一次去重状态','本期有界取材、核验并交付合格研究结论','记录状态对应的代码版本','保存本期报告','任一生产步骤失败邮件提醒'):
             block = workflow.split('- name: '+name, 1)[1].split('- name:',1)[0]
             self.assertIn('!inputs.source_check_only', block)
         source_step = workflow.split('id: source_audit',1)[1].split('- name:',1)[0]
