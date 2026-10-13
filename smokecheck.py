@@ -8,7 +8,7 @@ import smtplib
 import ssl
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -22,7 +22,7 @@ from research_watchlist import KOL_SOURCES
 
 ARXIV_API = "https://export.arxiv.org/api/query"
 HF_PAPERS_API = "https://huggingface.co/api/daily_papers"
-SMOKE_CONTRACT_VERSION = "2026-08-15.3"
+SMOKE_CONTRACT_VERSION = "2026-10-13.1"
 SMOKE_FALLBACK_LIMIT = 5
 
 
@@ -50,6 +50,7 @@ class SmokeResult:
     detail: str = ""
     blocking: bool = True
     failure_kind: str = ""
+    usage: dict = field(default_factory=dict)
 
 
 async def run_smoke_checks(
@@ -75,6 +76,7 @@ async def run_smoke_checks(
             require_results=True,
             required_config=True,
             degrade_on_transient=True,
+            blocking_on_failure=False,
         )
     )
     results.append(
@@ -103,8 +105,9 @@ async def run_smoke_checks(
             _openalex_works,
             require_results=True,
             skipped_detail="未配置 OPENALEX_API_KEY",
-            required_config=True,
+            required_config=False,
             degrade_on_transient=True,
+            blocking_on_failure=False,
         )
     )
     results.append(
@@ -114,8 +117,9 @@ async def run_smoke_checks(
             _openalex_authors,
             require_results=True,
             skipped_detail="未配置 OPENALEX_API_KEY",
-            required_config=True,
+            required_config=False,
             degrade_on_transient=True,
+            blocking_on_failure=False,
         )
     )
     results.append(
@@ -135,8 +139,9 @@ async def run_smoke_checks(
             _priority_pages,
             require_results=True,
             skipped_detail="没有高优先级官方研究页",
-            required_config=True,
+            required_config=False,
             degrade_on_transient=True,
+            blocking_on_failure=False,
         )
     )
     results.append(
@@ -179,8 +184,9 @@ async def run_smoke_checks(
             _github,
             require_results=True,
             skipped_detail="未配置 GITHUB_TOKEN；不会匿名调用 Search API",
-            required_config=True,
+            required_config=False,
             degrade_on_transient=True,
+            blocking_on_failure=False,
         )
     )
     results.append(
@@ -255,9 +261,27 @@ async def run_smoke_checks(
     else:
         results.append(_skipped("SMTP 登录（不发信）", "命令行要求跳过 SMTP"))
 
+    results.append(_primary_capability_summary(results))
     if write_json:
         _write_results(results)
     return results
+
+
+def _primary_capability_summary(results: list[SmokeResult]) -> SmokeResult:
+    primary = {
+        "arXiv", "Hugging Face Daily Papers", "OpenAlex Works", "OpenReview",
+        "官方研究页解析", "研究 RSS/Atom", "LessWrong / Alignment Forum RSS", "手工 KOL RSS",
+    }
+    usable = {
+        item.name for item in results if item.name in primary and item.status == "passed"
+    }
+    minimum = config.PARADIGM_MIN_PRIMARY_SOURCES
+    enough = len(usable) >= minimum
+    return SmokeResult(
+        "V0 输入能力基础", "passed" if enough else "failed", len(usable),
+        detail=f"{len(usable)}/{minimum} 类原点召回能力样本可用；单入口缺口保留，不证明生产研究质量",
+        failure_kind="" if enough else "insufficient_input_capabilities",
+    )
 
 
 def print_smoke_results(results: list[SmokeResult]) -> None:
@@ -285,7 +309,7 @@ def print_smoke_results(results: list[SmokeResult]) -> None:
     print(
         f"\n结论：阻断失败 {len(failed)} 项；"
         f"非阻断降级 {len(degraded)} 项；"
-        f"部署判定={'失败' if failed else '通过'}。"
+        f"冒烟判定={'失败' if failed else '通过'}（不等于正式研究验收）。"
     )
     print("明细已写入 logs/smoke_test_latest.json（不含任何密钥或响应正文）。\n")
 
@@ -361,50 +385,82 @@ async def _check_models() -> list[SmokeResult]:
     for role, resolved in zip(("sub", "main"), resolve_all()):
         identity = (resolved.provider, resolved.model, resolved.base_url.rstrip("/"), resolved.api_key)
         if identity in seen:
-            results.append(_skipped(f"Qwen {role}", f"与另一角色共用 {resolved.label}，不重复计费"))
+            results.append(_skipped(f"研究模型 {role}", f"与另一角色共用 {resolved.label}，不重复计费"))
             continue
         seen.add(identity)
         started = time.monotonic()
+        receipt = {"reported": False}
         try:
             client, model = build_client(role)
             response = await asyncio.wait_for(
                 client.chat.completions.create(
                     model=model,
-                    messages=[{"role": "user", "content": "只回复 OK"}],
+                    messages=[{"role": "user", "content": '只返回 JSON 对象 {"ok":true}，不输出解释。'}],
                     temperature=0,
-                    max_tokens=16,
+                    max_tokens=64,
+                    response_format={"type": "json_object"},
                 ),
                 timeout=config.SMOKE_CHECK_TIMEOUT_SECONDS,
             )
+            # Record confirmed usage even if the response was truncated or malformed.
+            receipt = _model_usage(response)
             content = completed_content(response).strip()
-            contract_ok = content.casefold().rstrip(".!。！") == "ok"
-            usage = getattr(response, "usage", None)
-            total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+            try:
+                payload = json.loads(content)
+                contract_ok = isinstance(payload, dict) and set(payload) == {"ok"} and payload["ok"] is True
+            except (ValueError, TypeError):
+                contract_ok = False
             results.append(
                 SmokeResult(
-                    f"Qwen {role}",
+                    f"研究模型 {role}",
                     "passed" if contract_ok else "failed",
                     1 if contract_ok else 0,
                     int((time.monotonic() - started) * 1000),
                     (
-                        f"{resolved.label}；usage.total_tokens={total_tokens}"
+                        f"{resolved.label}；JSON 契约正常；usage.total_tokens={receipt.get('total_tokens', 'unknown')}"
                         if contract_ok
-                        else f"{resolved.label}；未按契约返回 OK"
+                        else f"{resolved.label}；未按契约返回完整 JSON"
                     ),
                     failure_kind="" if contract_ok else "response_contract",
+                    usage=receipt,
                 )
             )
         except Exception as exc:
             results.append(
                 SmokeResult(
-                    f"Qwen {role}",
+                    f"研究模型 {role}",
                     "failed",
                     latency_ms=int((time.monotonic() - started) * 1000),
-                    detail=_safe_error(exc),
+                    detail=_safe_model_error(exc),
                     failure_kind=_failure_kind(exc),
+                    usage=receipt,
                 )
             )
     return results
+
+
+def _model_usage(response) -> dict:
+    usage = getattr(response, "usage", None)
+    counts = {
+        name: getattr(usage, name, None)
+        for name in ("prompt_tokens", "completion_tokens", "total_tokens")
+    }
+    reported = (
+        all(type(value) is int and value >= 0 for value in counts.values())
+        and counts["total_tokens"] > 0
+        and counts["total_tokens"] == counts["prompt_tokens"] + counts["completion_tokens"]
+    )
+    return {"reported": True, **counts} if reported else {"reported": False}
+
+
+def _safe_model_error(exc: Exception) -> str:
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        return _safe_error(exc)
+    status = getattr(exc, "status_code", None)
+    if type(status) is int:
+        return f"HTTP {status}（研究模型 API）；已停止，不重复调用"
+    # SDK exception messages can embed response bodies, endpoints or credentials.
+    return f"{type(exc).__name__}：模型探针未通过，不记录响应正文"
 
 
 async def _arxiv() -> tuple[int, str]:
@@ -972,6 +1028,13 @@ def _failure_kind(exc: Exception) -> str:
         return exc.failure_kind
     if _is_transient_failure(exc):
         return "transient_availability"
+    status = getattr(exc, "status_code", None)
+    if type(status) is int:
+        if status in {401, 403}:
+            return "authentication_or_permission"
+        if status in {408, 425, 429} or status >= 500:
+            return "transient_availability"
+        return "http_contract"
     if isinstance(exc, httpx.HTTPStatusError):
         if exc.response.status_code in {401, 403}:
             return "authentication_or_permission"
@@ -1032,12 +1095,15 @@ def _write_results(results: list[SmokeResult]) -> None:
     payload = {
         "contract_version": SMOKE_CONTRACT_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "production_v0_accepted": False,
+        "boundary": "最小 JSON 与输入能力探针，不执行正式研究、恢复生产状态或发送报告。",
         "summary": {
             "passed": sum(item.status == "passed" for item in results),
             "degraded": sum(item.status == "degraded" for item in results),
             "failed": sum(item.status == "failed" for item in results),
             "skipped": sum(item.status == "skipped" for item in results),
             "deployment_ready": not smoke_failed(results),
+            "smoke_passed": not smoke_failed(results),
         },
         "results": [asdict(item) for item in results],
     }

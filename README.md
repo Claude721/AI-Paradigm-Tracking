@@ -60,7 +60,7 @@ python main.py --resume-research # 只恢复原活动计划
 python main.py --report          # 续投合规 outbox 或重建最近合规报告
 ```
 
-逐入口诊断 scripts/source_audit.py 忽略 .env，无研究模型/邮件/生产库。全清单诊断红色表示有未通过项，不要求正式研究等待每个官网修好。Smoke 不证明研究质量或生产稳定性。
+逐入口诊断 scripts/source_audit.py 忽略 .env，无研究模型/邮件/生产库。全清单诊断红色表示有未通过项，不要求正式研究等待每个官网修好。云端 Smoke 只检查最小 JSON 与输入能力，不调用付费补充平台/SMTP，也不恢复状态；本地 CLI 需要 --smoke-skip-smtp / --smoke-skip-tavily 才跳过这两项。Smoke 不证明研究质量或生产稳定性。
 
 ## GitHub 定时运行
 

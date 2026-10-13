@@ -9,6 +9,7 @@ on:
         default: "7"
         type: choice
         options:
+          - "3"
           - "7"
           - "30"
           - "60"
@@ -273,7 +274,19 @@ jobs:
       - name: 小成本真实接口冒烟
         id: smoke
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_only && !inputs.source_check_only }}
-        run: python main.py --smoke-test
+        env:
+          EMAIL_PUSH_ENABLED: "false"
+          EMAIL_PUSH_REQUIRED: "false"
+          SMTP_PASSWORD: ""
+          TAVILY_API_KEY: ""
+          TAVILY_SOCIAL_SEARCH_ENABLED: "false"
+          KOL_X_SOURCE_ENABLED: "false"
+          TWITTER_BEARER_TOKEN: ""
+          SEMANTIC_SCHOLAR_ENABLED: "false"
+          SEMANTIC_SCHOLAR_API_KEY: ""
+          REDDIT_API_ACCESS_APPROVED: "false"
+          REDDIT_CLIENT_SECRET: ""
+        run: python main.py --smoke-test --smoke-skip-smtp --smoke-skip-tavily
 
       - name: 逐入口信源解析与临时状态验收（无模型、无邮件）
         id: source_audit

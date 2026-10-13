@@ -10,15 +10,17 @@ weekly-radar.yml 每周五 09:15（Asia/Shanghai）运行，Ubuntu / Python 3.12
 
 | Input | 作用 |
 |---|---|
-| smoke_only=true | 默认手动 Smoke：模型最小响应、接口能力、SMTP 只登录，不发送邮件 |
+| smoke_only=true | 模型最小 JSON、公开/OpenAlex/GitHub 输入能力；不调用 Tavily/X/Reddit/Semantic Scholar、SMTP，不发信或恢复生产状态 |
 | source_check_only=true | 优先于 Smoke；逐入口 HTTP/生产解析/临时 SQLite 检查，无模型/SMTP/生产状态 |
 | source_platform_checks=false | 默认不测付费/需批准平台；显式开启才做已启用平台的最小有界请求 |
 | reset_state=false | 使用 V0 状态；首次 V0 无快照则自动建立干净 epoch |
-| lookback_days | 正式普通窗口；7 天起步，不建议把 V0 改成 60/90 天普查 |
+| lookback_days | 正式普通窗口支持 3/7/30/60/90 天；3 天仍是会调用研究模型及邮件的正式运行，不是低费用保证 |
 | seed_arxiv_ids | 临时材料可见性，不提高技术准入 |
 | resume_campaign_id | 严格恢复指定原计划，必须关闭 Smoke 且不重置 |
 
 正式运行需 smoke_only=false、source_check_only=false。不必等待所有官网检查全绿。
+
+云端 smoke_only=true：每个独立模型配置最多一次请求、输出上限 64 tokens、验证完整 JSON；相同模型/地址/Key 去重，SDK 不自动重试。原点召回能力门槛沿用 PARADIGM_MIN_PRIMARY_SOURCES（默认 2 类），其他入口失败留诊断，不要求全绿；模型鉴权、JSON 契约或有效输入不足仍失败。JSON 制品保留实际输入/输出/总 tokens，缺用量标 unknown，不能算费用为零。Smoke 不是正式判断或写作质量验收；不会自动串联 3 天研究。
 
 ## 模型、信源与邮件配置
 

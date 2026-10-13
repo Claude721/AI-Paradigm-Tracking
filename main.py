@@ -754,7 +754,7 @@ def main() -> None:
     parser.add_argument(
         "--smoke-skip-llm",
         action="store_true",
-        help="smoke test 中跳过 Qwen 请求",
+        help="smoke test 中跳过研究模型请求",
     )
     parser.add_argument(
         "--smoke-skip-smtp",
