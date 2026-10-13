@@ -1,6 +1,12 @@
 # V0 工程状态
 
-更新：2026-10-13。默认流程已按有界研究重构；尚不能称为通过真实生产验收的稳定 V0。需要部署这一版本后验证实际模型、报告及重复调度。本轮没有追加真实 API、模型或邮件调用。
+更新：2026-10-13。默认流程已按有界研究重构并发布；真实小范围 Smoke 已成功，但尚不能称为通过完整生产验收的稳定 V0。实际模型最小 JSON 与输入基础能力已验证；真实研究/报告质量及重复调度仍待验证。未发送邮件，未恢复/保存生产状态。
+
+## 最新真实 Smoke
+
+[Run 38418943043](RUN_38418943043_SMOKE_REVIEW.md) 在代码 867d2d2 上成功完成：Qwen 一次请求返回完整 JSON（34 tokens），7 类原点召回能力样本可用。arXiv 429 保留为降级，OpenAI 官网 403 后 Anthropic 索引页成功，失败账本保留；Tavily、X、Reddit、Semantic Scholar、SMTP 全部跳过。不是 3 天完整研究，也不是所有官网生产解析验收。
+
+新增 11 项冒烟专项回归；本地 Python 3.11.15 共 813 项通过（58.383 秒），该 Runner Python 3.12.15 共 813 项通过（117.634 秒）。真实模型使用量、测试范围、代码指纹与未验收边界详见上述复核。
 
 ## 已确认根因
 
@@ -38,13 +44,13 @@ Runner 有 OpenAlex、GitHub 通过与 Tavily /usage 200 的证据；公开官�
 - 篡改统计、候选签名或来源版本：持久化闸门拒绝。
 - 下一周正常推进，旧计划归档但任务未虚报完成。
 
-最终完整门：Python 3.11.15 / 3.12.13 各 **802 项全部通过**，分别 61.270 / 61.441 秒；其中 tests/test_v0_delivery.py 有 22 项默认构造器/交付范围专项回归。标准库故障通知、无请求导入、compileall、3 份 Workflow YAML 解析与 git diff --check 均通过。
+首次重构完整门：Python 3.11.15 / 3.12.13 各 **802 项全部通过**，分别 61.270 / 61.441 秒；其中 tests/test_v0_delivery.py 有 22 项默认构造器/交付范围专项回归。标准库故障通知、无请求导入、compileall、3 份 Workflow YAML 解析与 git diff --check 均通过。当前包含冒烟专项的 813 项证据见上节。
 
 发布门清除生产配置并拒绝网络。原始日志为 logs/v0_offline_311_final.log、logs/v0_offline_312_final.log，不提交；测试环境依赖安装不属于研究接口调用。模拟不是实际模型质量、吞吐或提供方稳定性认证。
 
 ## 下一次生产验收
 
-部署后确认模型名称/地址/Key 对应，检查已有 Variables 是否覆盖新的 14 天默认。正式运行关闭 source_check_only、smoke_only；第一次 V0 自动从空状态启动。额外平台和自动续跑保持关闭，遵守已有模型费用授权边界。
+最小 JSON 已确认当前模型名称/地址/Key 对应；云端 PARADIGM_RECALL_OVERLAP_DAYS=30 仍覆盖新的 14 天默认，未擅自修改。完整正式运行关闭 source_check_only、smoke_only；第一次 V0 自动从空状态启动。下一层小样本须独立状态、不发信、显式费用边界，不直接把普通生产 workflow 当成低费用测试。额外平台和自动续跑保持关闭。
 
 验收有界计划耗时、路线事实/链接、中文质量、人物归因、实际 tokens、邮件确认、V0 状态保存，以及同窗/跨周去重。不再等待每个官网诊断全绿。若模型持续截断/结构失败，优先更换模型或兼容接口配置，不继续堆叠覆盖工程。
 
@@ -62,4 +68,4 @@ neat-freak 文档同步核对后就地精简当前入口，历史记录加版本
 | 历史记录 | RUN_37899070924_CAPACITY_REVIEW.md、RUN_38027283680_SOURCE_REVIEW.md、RUN_38232622479_SOURCE_REVIEW.md、RUN_38235929382_MODEL_REVIEW.md、RUN_38238493094_MODEL_REVIEW.md、RUN_38239955723_SOURCE_REVIEW.md、RUN_38342316068_SOURCE_REVIEW.md、RUN_38347140838_SOURCE_REVIEW.md、RUN_38370843944_INTERFACE_REVIEW.md、SOURCE_ACCEPTANCE_20261010.md、INPUT_CLOSURE_REPAIR_20261012.md、SOURCE_REPAIR_20261013.md、STATE_V9_REPLAY_20261012.md：旧全入口要求标记为已被取代 |
 | 研究提示 | paradigm_extraction、paradigm_synthesis、researcher_trajectory、weekly_research_memo、weekly_memo_frame 的 SKILL.md：自身路线核验与其他来源故障解耦，禁止阶段性输出 |
 
-MENTAL_MODEL_WRITING_METHOD.md 和 X_SEARCH_OPTIONS.md 已核对，无需改变技术解释方法或当时授权边界。尚未处理的是线上真实模型/报告/交付验收，不是要求继续修完所有官网。
+MENTAL_MODEL_WRITING_METHOD.md 和 X_SEARCH_OPTIONS.md 已核对，无需改变技术解释方法或当时授权边界。真实最小模型 JSON / 输入冒烟已闭合；尚未处理的是线上真实研究/报告/交付验收，不是要求继续修完所有官网。
