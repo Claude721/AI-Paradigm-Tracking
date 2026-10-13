@@ -36,6 +36,8 @@ Meta 探针从已有固定窗口缓存读取健康页，补试第 35 / 62 / 90 �
 
 主提交 `1558771` 已执行 [新版 Runner](RUN_38342316068_SOURCE_REVIEW.md)：148 passed、8 failed、1 not_tested、3 disabled，209 请求 / 188.758 秒；Meta 样本通过，Gary / Zvi 的 Feed 与 archive 均云端 403。仍未恢复生产研究或发信，原清单 hash 不变。
 
+Z.ai 后续公开检查（6 次有界 HTTP GET，不含搜索服务）：一篇官方文章为 200 / 598 bytes 的静态模块入口；[robots.txt](https://z.ai/robots.txt) 明确声明 [sitemap.xml](https://z.ai/sitemap.xml)，两者均 200。完整 XML 的 27 个 URL 只有产品/账户/付款等页面，没有任何 `/blog/` 文章；文章明确引用的自身模块与公共模块均可读，但没有据此核验出完整文章目录。XML 的 `lastmod` 不用作文章发布日期，不访问账户/付款页面，不执行 JavaScript，不把空博客子集当作成功空研究索引。原入口的 Runner 404 与目录缺口继续保留，搜索命中和单篇模块不是等价覆盖。
+
 制品又复现 arXiv 浏览器 `<title>` 编号覆盖正式 `citation_title` 的错误，及明确 citation_author 姓/名顺序问题。后续补丁只以真实学术元数据纠正身份，冲突仍失败；新增 3 项回归包含真实 SQLite 闭合。真实 NYU 局部复验 2 GET / 3.107 秒：首篇详情正确核验为旧论文，0 详情故障，133 直接详情和 138 独立未知身份任务仍 pending；145 是原未知引用段落，包含 7 个重复 SHA，不删除历史对象。该补丁不在本次 Runner 中。
 
 补丁最终 Python 3.11.15 / 3.12.13 各 **753 项完整发布门通过**（59.091 / 58.282 秒），标准库故障通知、无网络导入与 compileall 均通过。最终源码指纹 `1c685f1633c054a181ce3996f6b874aeabb8d8c280e976cc1fa48e0dc3ed214f`；原始日志为忽略目录内 `offline311-metadata-final.log` / `offline312-metadata-final.log`，不提交日志或临时数据库。
@@ -43,3 +45,5 @@ Meta 探针从已有固定窗口缓存读取健康页，补试第 35 / 62 / 90 �
 尚未闭合：OpenAI / PI / TRI / xAI 与 Gary / Zvi 的 Runner 公开访问拒绝或挑战、Z.ai 根目录 404 与完整官方目录、NYU 138 个独立未知身份任务和剩余 133 项直接详情、Tavily 独立协议授权/检查，以及人物和非空写作的真实质量、完整同窗批次/交付。Meta 新协议已通过 Runner 有界样本，Substack fallback 已执行但仍被拒绝；Meta 冷目录与全来源单次容量未认证。没有 Key 失效证据，不应通过轮换 Secret 或不断增大预算处理公开目录问题。正常 Meta audit 只验首目录页与最多一篇详情，仍保留分页/详情 pending；这与学术首小页同属有界协议样本，不等于履行完整交付必需覆盖。生产默认仍走完整分页。
 
 因此仍不是 V0；不重置状态、不缩范围、不把阶段性 memo 发给收件人。
+
+下一步接口验收已向所有者请求明确授权：NYU 最多 8 次 OpenAlex 只读身份查询，Tavily 最多 1 次 basic 查询（可能 1 credit）。请求本身不代表授权或已执行；不修改仓库 Variables、不调用模型/SMTP、不运行生产批次，需新增付费时停止。六个 Runner 访问拒绝入口仍需要供应方允许访问的完整官方输入或允许的运行环境，不能通过降低完成门槛解决。
