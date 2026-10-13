@@ -38,6 +38,7 @@ from sources.request_policy import OPENREVIEW_REQUEST_SPACING_SECONDS, MAX_RETRY
 from sources.priority_research_source import PriorityResearchPageSource, _AnchorParser, _discover_index_links
 from sources.bibliography_resolver import BibliographyResolver
 from sources.document_limits import response_byte_limit
+from tavily_protocol import TavilyIncludedCreditUnavailable
 from sources.research_feed_source import ResearchFeedSource
 
 CONTRACT_VERSION = 3
@@ -342,6 +343,8 @@ class SourceAudit:
                         # Never log exception text: HTTP errors can contain API
                         # keys, signed query strings or external response bodies.
                         reason = "bounded_request_limit" if isinstance(exc, AuditLimit) else type(exc).__name__
+                        if isinstance(exc, TavilyIncludedCreditUnavailable):
+                            reason = exc.reason_code
                         if isinstance(exc, ValueError) and row.get("coverage"):
                             reason = "production_parser_rejection"
                         if row["http"] and isinstance(row["http"][-1]["status"], int) and row["http"][-1]["status"] >= 400:
@@ -638,6 +641,12 @@ def diagnose_entry(row):
         category, action = "separate_acceptance_needed", "此样本未验收；核对授权或响应大小边界后单独检查。"
     elif status == "passed":
         category, action = "bounded_sample_passed", "协议/解析样本通过；不证明全分页、长期可用性或本期没有更新。"
+    elif row.get("key") == "tavily" and reason in {
+            "tavily_included_account_usage_unknown", "tavily_included_plan_limit_unknown",
+            "tavily_included_plan_credits_exhausted", "tavily_included_payg_limit_unknown",
+            "tavily_included_payg_enabled", "tavily_included_key_limit_unknown",
+            "tavily_included_key_credits_exhausted"}:
+        category, action = "included_credit_guard", "未发送搜索：现有额度、Key 限额或 PAYG 关闭未满足；按固定原因核对账户，不自动加钱或把额度保护当作 Key 失效。"
     elif reason == "response_size_limit" or row.get("transport_limit") == "response_size_limit":
         category, action = "decompressed_document_size_limit", "响应超过有界下载上限；核对 PDF 文件签名和大小，不归因于鉴权或解析格式。"
     elif row.get("input_url_checked") is False or row.get("blocked_destination"):

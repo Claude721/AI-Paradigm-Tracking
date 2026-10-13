@@ -51,3 +51,9 @@ Z.ai 后续公开检查（6 次有界 HTTP GET，不含搜索服务）：一篇�
 后续工程准备：新增默认不执行的独立 NYU/Tavily 验收工作流与 CLI。明确子集授权不会顺带检查其他平台；NYU 最多 8 次身份查询，Tavily 先核验包含额度/Key 限额/PAYG 关闭再最多一次 basic 搜索；公共目录/详情合计最多 14 HTTP / 300 秒。临时状态、完整声明清单与未完成尾项保留，不清空生产队列，不改变全清单预算或正式开关。真实请求仍未授权、未执行；离线最终门另列，不冒称新增云端通过项。
 
 独立接口入口最终离线验收：18 项专项用例覆盖精确选择、默认不执行、请求前全计划准入、第 9 项保留、401 熔断、只做 1 次 basic 搜索、PAYG/账户/Key 未知或耗尽停止、去敏及未知请求/费用不记零。Python 3.11.15 / 3.12.13 各 **771 项完整门通过**（57.778 / 57.369 秒），stdlib 故障通知、无网络导入、compileall、YAML 解析与 `git diff --check` 通过。执行源码指纹 `72d35017bc98a0feb5e39e22826bb22208e66b87cd20915c133ed1d59cc6d433`；最终日志在忽略目录 `offline311-interface-final.log` / `offline312-interface-final.log`。`--scope both --list` 零网络只列 NYU/Tavily；没有真实 API 验收、模型调用或发信。此前 769 项是增加失败制品/未知用量回归前的历史门。
+
+此后最新 [run 38347140838](RUN_38347140838_SOURCE_REVIEW.md) / `60058a5`：771 项云端门通过，131 passed / 10 failed / 15 not_executed / 1 not_tested / 3 disabled，192 请求 / 147.161 秒。NYU 题名补丁云端生效，Meta 再次通过；新增 Wayve 索引 202 和 arXiv 429 波动，没有使用新身份/平台 API。发现离线模拟 CLI 继承真实 `GITHUB_STEP_SUMMARY` 的污染，已隔离五个 CI 写入通道，并以真实子进程验证父文件守恒；接口凭据改为只在授权 API step 注入，Tavily 额度停止有固定原因码。
+
+上述最终 Python 3.11.15 / 3.12.13 各 **774 项完整门通过**（58.328 / 58.442 秒）；无网络导入、stdlib 通知、compileall、YAML 解析与 diff 检查通过。源码 `c5bd95a163e4153c142fd3c58ecb613cd4f3fb9a26b5970cceb65ef2be02c5e9`；原始日志 `offline311-ci-isolation-final.log` / `offline312-ci-isolation-final.log` 不提交。774 是后续隔离补丁的本地证明，不冒称该 Runner 已运行它。
+
+所有者现已明确授权 NYU 至多 8 查询 / Tavily 至多 1 basic，需新增付费则停止；先发布隔离补丁再启动独立 `scope=both` 验收。不修改 Variables/生产状态，不调用研究模型或邮件；之前“待授权/未调用”的文字只描述各自历史阶段，后续真实执行结果另记录。

@@ -1,6 +1,6 @@
 # 逐入口信源验收
 
-更新：2026-10-13。用于验证输入与接口，不是完整研究、报告或生产 V0 认证。它不会减少生产研究范围、清空 backlog 或把缺口改写为“没有更新”。最新云端验收见 [run 38342316068](RUN_38342316068_SOURCE_REVIEW.md)：148 passed、8 failed、1 not_tested、3 disabled；750 项云端离线门通过，后续学术元数据补丁另经 753 项本地发布门。适配与公开样本见 [本轮入口修复](SOURCE_REPAIR_20261013.md)，云端操作见 [Key 复验指南](SOURCE_API_KEY_VERIFICATION.md)。所有者要求保留全部入口为交付必需项。
+更新：2026-10-13。用于验证输入与接口，不是完整研究、报告或生产 V0 认证，不减少范围、清空 backlog 或把缺口写成“没有更新”。最新云端 [run 38347140838](RUN_38347140838_SOURCE_REVIEW.md)：131 passed、10 failed、15 not_executed、1 not_tested、3 disabled；771 项云端门通过，NYU 元数据补丁生效。摘要中的模拟接口失败已发现 CI 写入隔离缺陷并补修，不按 Key 失效处理。适配与完整版本证据见 [本轮修复](SOURCE_REPAIR_20261013.md)，操作见 [Key 指南](SOURCE_API_KEY_VERIFICATION.md)。所有入口仍为交付必需项。
 
 ## 云端先做什么
 
@@ -22,7 +22,7 @@
 
 ## 独立 NYU/Tavily 接口验收
 
-只验证已获授权的子集时使用 `source-interface-acceptance.yml`，不要为此勾选会检查所有已启用平台的 `source_platform_checks`。选 `scope=nyu/tavily/both`，NYU 查询上限 1–8；必须另勾选 `live_authorized=true`，默认不执行。现阶段仅准备代码，仍等待所有者授权真实接口请求，不代表已经执行。
+只验证已获授权的子集时使用 `source-interface-acceptance.yml`，不要为此勾选会检查所有已启用平台的 `source_platform_checks`。选 `scope=nyu/tavily/both`，NYU 查询上限 1–8；必须另勾选 `live_authorized=true`，默认不执行。2026-10-13 所有者已明确授权这两项有界接口验收，需新增付费则停止；不授权其他平台、模型/邮件或生产研究。授权不等于执行/通过，后续结果单独记录。
 
 无网络列清单：
 

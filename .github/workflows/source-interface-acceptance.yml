@@ -34,8 +34,6 @@ jobs:
     timeout-minutes: 15
     env:
       AI_RADAR_SKIP_DOTENV: "true"
-      OPENALEX_API_KEY: ${{ inputs.scope != 'tavily' && secrets.OPENALEX_API_KEY || '' }}
-      TAVILY_API_KEY: ${{ inputs.scope != 'nyu' && secrets.TAVILY_API_KEY || '' }}
       TAVILY_SOCIAL_SEARCH_ENABLED: ${{ vars.TAVILY_SOCIAL_SEARCH_ENABLED || 'true' }}
       TAVILY_MONTHLY_CREDIT_LIMIT: ${{ vars.TAVILY_MONTHLY_CREDIT_LIMIT || '1000' }}
       PRIORITY_RESEARCH_PAGES: ${{ vars.PRIORITY_RESEARCH_PAGES }}
@@ -56,6 +54,9 @@ jobs:
       - name: 离线发布门（禁止网络、模型和邮件）
         run: python scripts/offline_checks.py
       - name: 本次授权的接口子集（不调用主流程）
+        env:
+          OPENALEX_API_KEY: ${{ inputs.scope != 'tavily' && secrets.OPENALEX_API_KEY || '' }}
+          TAVILY_API_KEY: ${{ inputs.scope != 'nyu' && secrets.TAVILY_API_KEY || '' }}
         run: >-
           python scripts/source_interface_check.py --live-authorized
           --scope "$SAMPLE_SCOPE" --bibliography-requests "$SAMPLE_BIBLIOGRAPHY_REQUESTS"

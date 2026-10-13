@@ -27,6 +27,13 @@ SUMMARY_PATH = LOG_DIR / "offline_checks.json"
 
 def _safe_environment() -> dict[str, str]:
     env = os.environ.copy()
+    # Test fixtures must not write into the invoking Runner's live command
+    # files. These channels survive subprocess boundaries otherwise, so even
+    # a mocked CLI can publish fake key failures or poison later step state.
+    # Keep read-only code provenance (e.g. GITHUB_SHA); fixtures can explicitly
+    # inject their own temporary command files when testing that contract.
+    for channel in ("GITHUB_STEP_SUMMARY", "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_STATE", "GITHUB_PATH"):
+        env.pop(channel, None)
     # Production Variables/Secrets must never alter release-test semantics.
     configuration_prefixes = (
         "LLM_",

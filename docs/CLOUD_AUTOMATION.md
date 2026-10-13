@@ -2,7 +2,9 @@
 
 独立单路线模型验收使用 `one-route-acceptance.yml`，不使用正式工作流的 seed 伪装缩小研究范围。默认不授权、无定时触发、无 SMTP/生产状态/续跑能力；显式授权最多一条路线、20 元内，按核验当日的北京 Qwen 官方价格做请求前预留与用量结算，未知扣费停止。其他付费平台关闭，不能冒称整周完成。详见 [单路线验收](ONE_ROUTE_ACCEPTANCE.md)。
 
-独立 NYU/Tavily 接口验收使用 `source-interface-acceptance.yml`，仅手动触发，`live_authorized=false` 默认不执行。`scope=nyu/tavily/both` 必须与所有者本次授权一致；只注入所选 OpenAlex/Tavily 凭据，没有模型、SMTP、生产状态、自动续跑或其他平台凭据。不修改正式 Variables：NYU 本次最多 1–8 次身份 GET，Tavily 最多 1 次 basic POST，最多 14 个总请求 / 300 秒，公共目录/最多一篇详情另计在总上限内。普通全清单 `source_check_only` 的原预算和默认行为不变。
+独立 NYU/Tavily 接口验收使用 `source-interface-acceptance.yml`，仅手动触发，`live_authorized=false` 默认不执行。`scope=nyu/tavily/both` 必须与所有者本次授权一致；所选 OpenAlex/Tavily 凭据只在授权 API step 注入，不交给依赖安装/离线测试，没有模型、SMTP、生产状态、自动续跑或其他平台凭据。不修改正式 Variables：NYU 本次最多 1–8 次身份 GET，Tavily 最多 1 次 basic POST，最多 14 个总请求 / 300 秒，公共目录/最多一篇详情另计在总上限内。普通全清单 `source_check_only` 的原预算和默认行为不变。
+
+离线门子进程隔离 `GITHUB_STEP_SUMMARY/OUTPUT/ENV/STATE/PATH` 写入通道，fixture 只能显式使用临时文件；保留只读代码身份。新版 [run 38347140838](RUN_38347140838_SOURCE_REVIEW.md) 曾有模拟接口失败污染真实 Step Summary，不能把测试提示当真实 Key/费用故障；后续已补隔离回归，实际状态以同 run 去敏 JSON/HTTP 账本为准。
 
 Tavily 新入口只允许已有包含额度：先一次 `/usage`，必须核验账户 `plan_limit-plan_usage>=1`、Key 剩余额度至少 1、`paygo_limit=0`，再受既有月度停止线约束；字段未知、Key 无明确限额、PAYG 开启或额度不足均不搜索，不替用户修改套餐。依据 [官方 Usage 契约](https://docs.tavily.com/documentation/api-reference/endpoint/usage)。这依赖供应商遵守返回的额度/PAYG 契约，不是本库跨客户端的账户锁；账户设置应由所有者核验。
 

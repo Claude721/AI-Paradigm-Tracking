@@ -6,7 +6,7 @@
 
 ## 1. 在 GitHub 验证已有凭据
 
-只授权 NYU 书目身份或 Tavily 时，改用独立 `source-interface-acceptance.yml` 的 `scope=nyu/tavily/both`，不要勾选全平台检查后误测其他已启用接口。它默认不执行，只注入选中凭据，无模型/邮件/生产状态；Tavily 先核验已有包含额度与 PAYG 关闭，条件未知时不搜索、不改套餐。当前代码已准备，真实请求仍待明确授权。详见 [独立接口验收](SOURCE_ACCEPTANCE.md#独立-nyutavily-接口验收)。
+只授权 NYU 书目身份或 Tavily 时，改用独立 `source-interface-acceptance.yml` 的 `scope=nyu/tavily/both`，不要勾选全平台检查后误测其他已启用接口。它默认不执行，只在授权 API step 注入选中凭据，无模型/邮件/生产状态；Tavily 先核验已有包含额度与 PAYG 关闭，条件未知时不搜索、不改套餐。2026-10-13 所有者已授权最多 8 次 NYU 身份查询和 1 次 Tavily basic，需新增付费则停止；结果另列。最新 [run 38347140838](RUN_38347140838_SOURCE_REVIEW.md) 中 OpenAlex 11 项通过，摘要两条 Key/用量异常来自离线 fixture 污染，不能据此轮换 Secret。详见 [独立接口验收](SOURCE_ACCEPTANCE.md#独立-nyutavily-接口验收)。
 
 1. 先部署本轮代码到要验收的分支。确认 Actions 的执行提交和 `source_audit_latest.json` 中代码指纹；旧工作流没有新检查选项。
 2. 仓库 Settings → Secrets and variables → Actions，核对下表中的 Repository Secrets 名称。只核对名称/提供方账户，不截图或导出值。Environment/Organization Secrets 还需确认该 job/仓库确有访问权限；不能仅凭“设置页面存在”认定注入成功。[GitHub 官方 Secrets 说明](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)

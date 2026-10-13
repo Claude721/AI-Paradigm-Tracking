@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
@@ -63,30 +64,36 @@ class InterfacePlanTests(unittest.TestCase):
 
     def test_preflight_failure_saves_zero_request_reason_and_version_without_keys(self):
         with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(Path(directory) / 'mock-step-summary.md')}), \
                 patch.object(check, 'execute', new_callable=AsyncMock,
                     side_effect=check.InterfacePreflightError('OPENALEX_API_KEY_not_configured')), \
                 redirect_stdout(io.StringIO()):
             code = check.main(['--scope', 'nyu', '--live-authorized', '--output-dir', directory])
             result = json.loads((Path(directory) / 'source_interface_latest.json').read_text())
+            summary = (Path(directory) / 'mock-step-summary.md').read_text()
         self.assertEqual(code, 1)
         self.assertEqual(result['request_count'], 0)
         self.assertEqual(result['reason'], 'OPENALEX_API_KEY_not_configured')
         self.assertTrue(result['runtime_provenance']['source_fingerprint'])
         self.assertFalse(result['production_v0_accepted'])
+        self.assertIn('OPENALEX_API_KEY_not_configured', summary)
 
     def test_unexpected_execution_exception_never_exposes_text_or_claims_zero_usage(self):
         with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(Path(directory) / 'mock-step-summary.md')}), \
                 patch.object(check, 'execute', new_callable=AsyncMock,
                     side_effect=RuntimeError('secret-value external provider response')), \
                 redirect_stdout(io.StringIO()):
             code = check.main(['--scope', 'tavily', '--live-authorized', '--output-dir', directory])
             serialized = (Path(directory) / 'source_interface_latest.json').read_text()
             result = json.loads(serialized)
+            summary = (Path(directory) / 'mock-step-summary.md').read_text()
         self.assertEqual(code, 1)
         self.assertIsNone(result['request_count'])
         self.assertEqual(result['reason'], 'execution_error_usage_unknown')
         self.assertNotIn('secret-value', serialized)
         self.assertNotIn('external provider response', serialized)
+        self.assertNotIn('secret-value', summary)
 
     def test_invalid_limits_are_not_silently_clamped(self):
         for limit in (0, 9, True, -1, '8'):
@@ -113,6 +120,11 @@ class InterfacePlanTests(unittest.TestCase):
             self.assertNotIn(forbidden, text)
         self.assertIn('python scripts/offline_checks.py', text)
         self.assertIn('if: always()', text)
+        job_env = text.split('    env:', 1)[1].split('    steps:', 1)[0]
+        self.assertNotIn('secrets.', job_env)
+        live_step = text.split('      - name: 本次授权的接口子集（不调用主流程）', 1)[1]
+        self.assertIn('          OPENALEX_API_KEY:', live_step)
+        self.assertIn('          TAVILY_API_KEY:', live_step)
 
 
 class InterfaceExecutionTests(unittest.IsolatedAsyncioTestCase):
@@ -211,6 +223,8 @@ class InterfaceExecutionTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.execute('tavily', handler)
                 self.assertEqual(calls, ['GET'])
                 self.assertFalse(result['selected_protocols_passed'])
+                self.assertTrue(result['entries'][0]['reason'].startswith('tavily_included_'))
+                self.assertEqual(result['entries'][0]['diagnosis']['category'], 'included_credit_guard')
 
     async def test_disabled_monthly_guard_stops_before_any_request(self):
         with self.config_context(), patch.object(config, 'TAVILY_MONTHLY_CREDIT_LIMIT', 0), \
