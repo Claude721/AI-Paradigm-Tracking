@@ -34,7 +34,6 @@ from runtime_provenance import runtime_provenance
 
 def _redacted_log_text(value: str) -> str:
     secret_names = (
-        "LLM_API_KEY",
         "SUB_AGENT_LLM_API_KEY",
         "MAIN_AGENT_LLM_API_KEY",
         "OPENALEX_API_KEY",

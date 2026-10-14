@@ -46,6 +46,8 @@
 - 结构化字段变化需要同步 `paradigms/models.py`、分析器、报告器和测试。
 - 信源变化需要同步 `信源说明.md`；配置变化需要同步 `.env.example` 与 `docs/CONFIGURATION_CHECKLIST.md`。
 - GitHub Actions 或邮件语义变化需要同步 `docs/CLOUD_AUTOMATION.md`。
+- MAIN/SUB 的提供方、模型、地址与 Key 必须独立配置，不恢复全局或跨角色 fallback；Key 名称为 `SUB_AGENT_LLM_API_KEY` / `MAIN_AGENT_LLM_API_KEY`。
+- 云端配置只有 Workflow 显式映射才生效；删除/迁移旧参数时保留有效费用限制，不把本地调度参数写成 GitHub cron 配置。
 
 ## 本地验证
 

@@ -16,7 +16,7 @@
 
 2026-10-12 授权：最多一条路线，单次人民币 API 总费用不超过 20 元，不发邮件、不自动续跑。独立工作流 `one-route-acceptance.yml` 仅有手动触发，默认不授权；不使用正式工作流的 seed 伪装缩小研究范围，不修改历史任务清单。输入为单个普通论文 arXiv ID、费用上限、官方价格核验日期与 `live_authorized=true`；不接受多条材料或多机制 Technical Report。
 
-保留当前正式模型：**北京百炼 qwen3.7-plus**。2026-10-12 核验 [官方价格](https://help.aliyun.com/zh/model-studio/model-pricing)、[模型容量](https://help.aliyun.com/zh/model-studio/qwen3-7-plus) 和 [兼容 API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)：最高阶梯每百万输入 6 元、输出 24 元；不计免费额度、缓存或限时折扣。只有核验当日可运行；其他模型/地域、未来日期必须重新核验，不能套用代理报价或静默更换为 DeepSeek。
+2026-10-12 验收使用的模型是 **北京百炼 qwen3.7-plus**，不是当前 Repository Variables 的固定要求。2026-10-12 核验 [官方价格](https://help.aliyun.com/zh/model-studio/model-pricing)、[模型容量](https://help.aliyun.com/zh/model-studio/qwen3-7-plus) 和 [兼容 API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)：最高阶梯每百万输入 6 元、输出 24 元；不计免费额度、缓存或限时折扣。只有核验当日可运行；其他模型/地域、未来日期必须重新核验，不能套用代理报价或静默更换为 DeepSeek。
 
 请求前按整个 100 万 token 输入容量和全部输出上界预留、先落盘，不用字符/tokenizer 估计作保证。`max_completion_tokens` 限制思考与回答之和，预留包含最多 10 token 的官方误差；每次最多 8000 输出 tokens，整个样本最多 24 次模型请求，结构修复也重新过费用门。SDK 隐式重试关闭。响应模型和完整用量契约正确才按最高阶梯结算；超时、取消、未知/矛盾用量、超界或落盘失败不退款，阻断后续请求。已有费用账本拒绝重建，不自动重跑或提高限额。
 

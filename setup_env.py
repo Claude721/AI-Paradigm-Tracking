@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 ENV_PATH = Path(__file__).parent / ".env"
@@ -18,11 +19,11 @@ SECTIONS: list[tuple[str, list[tuple[str, str, str, str, bool]]]] = [
             ("SUB_AGENT_PROVIDER", "初筛 API 提供方", "独立配置，不继承全局", "dashscope", True),
             ("SUB_AGENT_MODEL", "初筛/机制提取模型", "提供方实际模型 ID", "qwen3.7-plus", True),
             ("SUB_AGENT_BASE_URL", "初筛 API 地址", "兼容接口根地址，不含 /chat/completions", "https://dashscope.aliyuncs.com/compatible-mode/v1", True),
-            ("SUB_AGENT_LLM_API_KEY", "初筛 API Key", "只用于 SUB；本地 Ollama 可留空", "", False),
+            ("SUB_AGENT_LLM_API_KEY", "初筛 API Key", "只用于 SUB；本地 Ollama 可留空", "", True),
             ("MAIN_AGENT_PROVIDER", "深挖 API 提供方", "独立配置，不借用 SUB", "dashscope", True),
             ("MAIN_AGENT_MODEL", "深挖/人物/写作模型", "提供方实际模型 ID", "qwen3.7-plus", True),
             ("MAIN_AGENT_BASE_URL", "深挖 API 地址", "兼容接口根地址，不含 /chat/completions", "https://dashscope.aliyuncs.com/compatible-mode/v1", True),
-            ("MAIN_AGENT_LLM_API_KEY", "深挖 API Key", "只用于 MAIN；本地 Ollama 可留空", "", False),
+            ("MAIN_AGENT_LLM_API_KEY", "深挖 API Key", "只用于 MAIN；本地 Ollama 可留空", "", True),
         ],
     ),
     (
@@ -124,26 +125,34 @@ def _load_current() -> dict[str, str]:
 
 def _mask(key: str, value: str) -> str:
     if any(token in key.upper() for token in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
-        if len(value) > 8:
-            return value[:4] + "****" + value[-4:]
         return "****"
     return value
 
 
 def _print_status() -> None:
     current = _load_current()
+    # Match dotenv's precedence: explicit process configuration wins over .env.
+    for _, items in SECTIONS:
+        for key, *_ in items:
+            if key in os.environ:
+                current[key] = os.environ[key]
     print("\n" + "=" * 60)
     print("  AI 技术范式雷达 — 环境配置状态")
     print("=" * 60)
     if not ENV_PATH.exists():
-        print(f"\n  ⚠ .env 不存在：{ENV_PATH}\n")
-        return
+        print("\n  .env 不存在；仍检查显式进程环境与运行时模型。\n")
     for section_name, items in SECTIONS:
         print(f"\n  ┌─ {section_name}")
         for key, label, _, default, required in items:
             value = current.get(key, "")
             if value:
                 status = f"✓ {_mask(key, value)}"
+            elif key.startswith(("SUB_AGENT_", "MAIN_AGENT_")):
+                prefix = key.rsplit("_LLM_API_KEY", 1)[0]
+                if key.endswith("_LLM_API_KEY") and current.get(prefix + "_PROVIDER") == "ollama":
+                    status = "· 本地 Ollama 免密"
+                else:
+                    status = "✗ 未配置（必填，不继承其他配置）"
             elif default:
                 status = f"· 默认: {default}"
             elif required:
@@ -202,7 +211,7 @@ def _write_env(values: dict[str, str]) -> None:
     known = {key for _, items in SECTIONS for key, *_ in items}
     extras = {key: value for key, value in values.items() if key not in known and value}
     if extras:
-        lines.append("# ── 兼容旧版/自定义变量")
+        lines.append("# ── 额外/legacy 配置（保留原值，不保证当前流水线消费）")
         lines.extend(f"{key}={value}" for key, value in extras.items())
         lines.append("")
     ENV_PATH.write_text("\n".join(lines), encoding="utf-8")

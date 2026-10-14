@@ -1,79 +1,52 @@
-# V0 工程状态
+# 项目工程状态与验收边界
 
-更新：2026-10-14。有界流程已发布，Smoke 成功；真实 3 天单材料研究与同材料复测已执行，但人工否决自动草稿的质量，尚不能称为稳定生产 V0。模型连接/JSON 与输入基础能力可用，主要新缺口在人物例外及实验事实边界，不是需要整体重配 API Key。未发送邮件，未恢复/保存生产状态。
+更新：2026-10-14。配置、工作流与当前文档已对齐；本轮静态/离线检查通过，但新模型真实质量与整周交付尚未验收，不能称为稳定生产 V0。
 
-## 最新 3 天研究验收
+## 当前配置核对
 
-[两轮真实证据与质量复核](RUN_38500208389_RESEARCH_SAMPLE_REVIEW.md)：首轮完成抽取/综合并判 observe；作者漏读修复后，复测生成了中文路线草稿且自动闸门通过。然而草稿合并了不同模型/环境的实验并夸大端到端能力，未核验人物又被普通官方博客的组织例外隐藏，因此人工验收不通过，不交付该草稿。
+以下是 2026-10-14 对 GitHub 的只读核对及明确配置清理结果，不是模型连通性测试：
 
-两轮共 5 次模型调用、54,177 tokens，确认用量的保守估算累计 0.532764 元，低于 20 元授权。署名已正确读取为两人，背景及联系检索未知如实保留。新增人物闸门、正文尾部限制与提示约束修复；没有为这些改动追加第三轮收费研究，因此不能声明新版本的语义质量已真实复验。
-
-最新完整离线发布门：Python 3.11.15 共 833 项通过，59.229 秒，含人物组织例外、末尾限制保留与实验条件提示专项；标准库通知、导入和 compileall 阶段通过。本轮 workflow YAML 解析与 git diff --check 通过。之前两次真实 Runner 的 824 / 828 项不能冒充已测试这轮质量修复，边界分开保留。
-
-## 最新真实 Smoke
-
-[Run 38418943043](RUN_38418943043_SMOKE_REVIEW.md) 在代码 867d2d2 上成功完成：Qwen 一次请求返回完整 JSON（34 tokens），7 类原点召回能力样本可用。arXiv 429 保留为降级，OpenAI 官网 403 后 Anthropic 索引页成功，失败账本保留；Tavily、X、Reddit、Semantic Scholar、SMTP 全部跳过。不是 3 天完整研究，也不是所有官网生产解析验收。
-
-新增 11 项冒烟专项回归；本地 Python 3.11.15 共 813 项通过（58.383 秒），该 Runner Python 3.12.15 共 813 项通过（117.634 秒）。真实模型使用量、测试范围、代码指纹与未验收边界详见上述复核。
-
-## 已确认根因
-
-主要是工程目标错配，不是所有 API Key 都不正常：
-
-- 旧门要求所有物理入口成功、全库 pending 清零，一个官网反爬或无标识书目拖住健康研究。
-- 活动批次吸收历史积压并跨周锁定旧窗口，周任务变成无限清偿队列。
-- 60 天高信号 bootstrap、年级别书目和无界分页与一小时研究预算不匹配。
-- 静态体检只接受 qwen3.7，Actions 硬编码模型/地址，阻碍直接更换 API。
-- 补充社区/学术接口未全部成功就拒绝综合，即使已有有效证据。
-
-Runner 有 OpenAlex、GitHub 通过与 Tavily /usage 200 的证据；公开官网 403/429/404、独立费用保护拒绝不证明 Key 失效。见 [来源复核](RUN_38347140838_SOURCE_REVIEW.md)、[授权接口复核](RUN_38370843944_INTERFACE_REVIEW.md)。
-
-## 本轮改变
-
-- 默认交付契约 v2，路线交付与全局队列/所有物理入口解耦，诊断故障真实保留。
-- 7 天普通 / 14 天高信号，48 原点、8 深挖、4 历史更新，分页/详情有界且保留各发现车道。
-- 本期只包含选定材料和关联路线；下一周归档旧研究计划，旧 pending 不标记成功、不锁住新发现。
-- 单个补充平台失败不否决健康证据；全部增强失败、核心判断未完成不能变成成功空报告。
-- 坏输入在批次保存前逐条隔离；来源版本、任务回执和路线签名从实际 SQLite 复核。
-- 模型/API 可配置，体检不限定 Qwen；OpenAlex/OpenReview 缺配置只降低广度。
-- 云端 paradigm-radar-v0-state-* 清洁状态 epoch 不恢复旧失败库，也不删除旧制品。
-- 证据、承接、人物、时效、每个 URL、中文编辑和必需 SMTP 门槛保留，不恢复阶段性 memo。
-
-## 离线证据
-
-新增真实默认构造器与 SQLite 的端到端回归：
-
-- 官网失败 + 历史 pending：完成本期判断可以生成范围明确的空报告。
-- 单个模型漏回 + 健康路线 + Tavily 故障：健康路线进入 outbox，坏对象仍 pending。
-- 非空中文报告 → 确定性人物/原文索引 → 模拟 SMTP 确认 → 去重签名登记。
-- 没有新论文的一周，旧路线本期新增独立采用仍可作为进展更新；部分平台失败不在下次运行破坏已核验路线。
-- 原点与选定范围原子提交/回滚，深挖计划保持有界；未选假说保留，不写成研究淘汰。
-- 来源不足、模型漏回全部、坏输入导致空结果：拒绝成功空报告。
-- 篡改统计、候选签名或来源版本：持久化闸门拒绝。
-- 下一周正常推进，旧计划归档但任务未虚报完成。
-
-首次重构完整门：Python 3.11.15 / 3.12.13 各 **802 项全部通过**，分别 61.270 / 61.441 秒；其中 tests/test_v0_delivery.py 有 22 项默认构造器/交付范围专项回归。标准库故障通知、无请求导入、compileall、3 份 Workflow YAML 解析与 git diff --check 均通过。当前包含冒烟专项的 813 项证据见上节。
-
-发布门清除生产配置并拒绝网络。原始日志为 logs/v0_offline_311_final.log、logs/v0_offline_312_final.log，不提交；测试环境依赖安装不属于研究接口调用。模拟不是实际模型质量、吞吐或提供方稳定性认证。
-
-## 下一次生产验收
-
-最小 JSON 已确认当前模型名称/地址/Key 对应；云端 PARADIGM_RECALL_OVERLAP_DAYS=30 仍覆盖新的 14 天默认，未擅自修改。完整正式运行关闭 source_check_only、smoke_only；第一次 V0 自动从空状态启动。下一层小样本须独立状态、不发信、显式费用边界，不直接把普通生产 workflow 当成低费用测试。额外平台和自动续跑保持关闭。
-
-验收有界计划耗时、路线事实/链接、中文质量、人物归因、实际 tokens、邮件确认、V0 状态保存，以及同窗/跨周去重。不再等待每个官网诊断全绿。若模型持续截断/结构失败，优先更换模型或兼容接口配置，不继续堆叠覆盖工程。
-
-历史容量、解析和状态迁移证据保留在 RUN_*、SOURCE_REPAIR_*、STATE_V9_* 文档；当时的全入口交付要求已被本次用户澄清取代。
-
-## 文档与规则同步清单
-
-neat-freak 文档同步核对后就地精简当前入口，历史记录加版本边界，不改写原观测/费用/授权。项目没有独立记忆库，AGENTS.md 链接到 CLAUDE.md；未修改全局规则。
-
-| 位置 | 实际变更 |
+| 项目 | 核对结果 |
 |---|---|
-| 根文档/配置 | README.md、CLAUDE.md、信源说明.md、.env.example、setup_env.py：默认有界流程、模型继承与新参数 |
-| 当前设计/运维 | PARADIGM_RADAR_DESIGN.md、CONFIGURATION_CHECKLIST.md、CLOUD_AUTOMATION.md、PROJECT_HEALTH_REPORT.md、V0_REBUILD_PLAN.md：按代码重写，真实验收与离线证明分开 |
-| 诊断/名单/独立测试 | SOURCE_ACCEPTANCE.md、SOURCE_API_KEY_VERIFICATION.md、FRONTIER_RESEARCH_WATCHLIST.md、ONE_ROUTE_ACCEPTANCE.md：来源缺口非全局门、接口证据/费用授权与通用模型区分 |
-| 历史记录 | RUN_37899070924_CAPACITY_REVIEW.md、RUN_38027283680_SOURCE_REVIEW.md、RUN_38232622479_SOURCE_REVIEW.md、RUN_38235929382_MODEL_REVIEW.md、RUN_38238493094_MODEL_REVIEW.md、RUN_38239955723_SOURCE_REVIEW.md、RUN_38342316068_SOURCE_REVIEW.md、RUN_38347140838_SOURCE_REVIEW.md、RUN_38370843944_INTERFACE_REVIEW.md、SOURCE_ACCEPTANCE_20261010.md、INPUT_CLOSURE_REPAIR_20261012.md、SOURCE_REPAIR_20261013.md、STATE_V9_REPLAY_20261012.md：旧全入口要求标记为已被取代 |
-| 研究提示 | paradigm_extraction、paradigm_synthesis、researcher_trajectory、weekly_research_memo、weekly_memo_frame 的 SKILL.md：自身路线核验与其他来源故障解耦，禁止阶段性输出 |
+| SUB | dashscope / qwen3.8-flash，使用用户配置的阿里云 workspace 兼容地址 |
+| MAIN | dashscope / qwen3.8-max，同一兼容服务地址，可独立替换 |
+| 模型 Secrets | SUB_AGENT_LLM_API_KEY / MAIN_AGENT_LLM_API_KEY 名称存在；旧模型 Secret 不存在，不读回值 |
+| 回补窗口 | PARADIGM_RECALL_OVERLAP_DAYS=30 是仍生效的覆盖，保留，不静默缩为默认 14 |
+| Tavily 次数保护 | 旧 TAVILY_MAX_REQUESTS_PER_RUN=12 迁为 TAVILY_REQUEST_SAFETY_LIMIT=12，再删除旧名称 |
+| 废弃目录参数 | 删除 PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE=4；不映射到不同语义的新参数，实际每入口默认 6 条详情不变 |
+| 邮件与其他 Secrets | 保持现有配置，全部名称被正式工作流消费；本轮未发送邮件 |
 
-MENTAL_MODEL_WRITING_METHOD.md 和 X_SEARCH_OPTIONS.md 已核对，无需改变技术解释方法或当时授权边界。真实最小模型 JSON / 输入冒烟已闭合；尚未处理的是线上真实研究/报告/交付验收，不是要求继续修完所有官网。
+配置名称存在不证明 Key 有效；历史旧模型 Smoke 不能代替当前 flash/max 与 workspace 地址的验收。独立单路线费用保护仍绑定已核验的 Qwen 3.7 Plus 北京当日契约，不能直接套用给新模型。
+
+## 本轮检查与修正
+
+- AST 对照 config.py 的 178 个配置/常量与生产消费者，计入直接导入及动态角色读取后，无未声明引用或无静态消费者字段。legacy 的字段仍有消费者，不是 V0 必填项，不删除兼容功能。
+- .env.example 与配置向导没有重复/未声明字段，移除 V0 模板中的 legacy 信源占位，旧全局模型名称不再作为有效字段出现。
+- 补齐文档已声明、但云端未注入的 FOLLOW_BUILDERS_ENABLED/FEED_URL、TAVILY_SOCIAL_MAX_RESULTS、PARADIGM_ALLOW_UPDATES、LOG_LEVEL；现有默认行为不变，未新增对应 Repository Variables。
+- 配置状态页优先显示进程环境；即使没有 .env 也能检查。缺失角色明确显示未配置，不把向导示例当运行时 fallback；密钥完全遮蔽，不输出首尾片段。
+- 清理不可达旧全局 Key 的脱敏列表项，保留两套新角色 Key 在日志、审计、邮件及持久化错误中的脱敏覆盖。
+- 明确 Variables 映射、Workflow inputs、本地 SCHEDULE_*、固定云端邮件策略与高级参数的不同作用面。不把不同预算/窗口/搜索域名当作重复项合并。
+
+本轮 Python 3.11.15 完整离线门 **848 项通过，61.802 秒**，含 5 项配置表面/状态/密钥遮蔽/文档链接回归；标准库通知、无请求导入与 compileall 阶段通过。30 项离线静态配置检查无阻断，3 份 Workflow YAML 解析与 git diff --check 通过。所有测试清除生产配置、忽略真实 .env、拒绝网络，邮件使用模拟。
+
+## 历史真实证据，不冒充新模型认证
+
+- [Run 38418943043 的 Smoke](RUN_38418943043_SMOKE_REVIEW.md)：当时 Qwen 3.7 Plus 最小 JSON 成功、7 类原点能力样本可用；arXiv 429 与官网 403 保留，Tavily/额外平台/SMTP 跳过。它不证明当前两套模型配置。
+- [两次 3 天单材料研究](RUN_38500208389_RESEARCH_SAMPLE_REVIEW.md)：共 5 次、54,177 tokens，保守费用 0.532764 元；执行成功，但自动草稿合并不同实验条件、人物例外不合格，人工否决交付。后续修复未追加真实质量复验，不将离线通过写成语义正确。
+- [来源 Runner](RUN_38347140838_SOURCE_REVIEW.md)、[NYU/Tavily 子集](RUN_38370843944_INTERFACE_REVIEW.md)、[历史状态迁移](STATE_V9_REPLAY_20261012.md)：分别只证明当时各自协议、授权范围与迁移守恒。Tavily usage 200 不证明搜索已执行；公开官网失败不证明 API Key 失效。
+
+原始 RUN_*、SOURCE_REPAIR_*、STATE_V9_* 记录保留版本、费用和授权边界，不改写为当前使用指南。无需让全部物理入口全绿或历史队列清零，才能研究健康材料。
+
+## 尚未完成的验收
+
+1. 新 MAIN/SUB 的真实连接与 JSON 契约，当前 Key/地址/模型名配对；需明确授权真实调用。
+2. 新模型的单路线事实条件、机制解释、独立承接、人物身份/联系检索和非空中文 memo 人工核验；有金额上限的样本先核验对应价格契约。
+3. 正式有界计划的耗时与真实用量、总编质量、SMTP 确认、V0 状态保存、同窗恢复/去重与跨周推进。
+
+完整正式运行的时间预算不是人民币硬限额，额外平台与自动预算续跑不能因配置清理自动开启。本轮未运行研究/来源网络验收、未调供应商 API、未发信、未修改生产状态，也未轮换 Secrets。
+
+## 文档同步
+
+按 neat-freak 对根文档、全部 docs 与实际实现进行核对：README 已改为流程、双层模型、最小配置、常用参数、工作流模式及失败恢复指南；配置清单/云端/设计/实施计划/单路线说明同步当前契约。AGENTS.md 链接到 CLAUDE.md，只补独立模型与云端映射两条稳定规则，未新增历史叙事或全局记忆。历史记录无需改动、未删除。
+
+入口：[README](../README.md)、[设计](PARADIGM_RADAR_DESIGN.md)、[配置](CONFIGURATION_CHECKLIST.md)、[云端运维](CLOUD_AUTOMATION.md)、[信源说明](../信源说明.md)。

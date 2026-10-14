@@ -2,6 +2,20 @@
 
 生产密钥仅放本地 .env 或 GitHub Actions Secrets，不写进聊天、Variables、日志或 Git。模板为 [.env.example](../.env.example)。
 
+本清单描述默认 paradigm/V0 路径，不要求把全部默认参数复制到 GitHub Variables。模型六项字段及云端投递所需 Secrets 配好即可；其余只有需要覆盖默认行为时才显式设置。`config.py` 中 legacy 的 Product Hunt、WeChat、QuantFilter、自建 Feed 参数仍有代码消费者，但不属于 V0 配置，不能把“当前路径不用”误写为全项目死代码。
+
+## 配置放在哪里、怎样才生效
+
+| 配置面 | 生效规则 |
+|---|---|
+| GitHub Variables / Secrets | 必须由 `.github/workflows/weekly-radar.yml` 显式注入；仅在设置页建名称不会自动成为进程环境变量 |
+| 本地 `.env` | `config.py` 读取；显式进程环境优先于 `.env`；来源诊断脚本故意忽略 `.env` |
+| Workflow inputs | `lookback_days`、`seed_arxiv_ids`、`reset_state` 等只对当前手动运行生效，不是 Repository Variables |
+| 本地调度/自定义路径 | `SCHEDULE_*`、`PARADIGM_RUBRIC_PATH`、`FRONTIER_LANDSCAPE_PATH` 不在云端 Variables 映射中；GitHub cron 与默认仓库路径由工作流/代码管理 |
+| 云端邮件策略 | 当前固定 QQ 465/SSL，正式运行 `EMAIL_PUSH_ENABLED/REQUIRED=true`；同名 Repository Variables 不会改变这个固定策略 |
+
+共享的 `LLM_REQUEST_TIMEOUT_SECONDS` 与 `LLM_ENABLE_THINKING` 是请求策略，不是全局模型/Key。后者只对已核验官方 Qwen 3.7 Plus 北京组合生效，不保证任意模型关闭思考。`FOLLOW_BUILDERS_ENABLED/FEED_URL`、`TAVILY_SOCIAL_MAX_RESULTS`、`PARADIGM_ALLOW_UPDATES` 与 `LOG_LEVEL` 已映射到云端，默认不需要建这些 Variables。
+
 ## 最小配置
 
 - PIPELINE_MODE=paradigm。
@@ -65,7 +79,7 @@ Doctor 只核对配置完整、URL 格式和范围，不再限制 qwen3.7。Smok
 | PARADIGM_SOURCE_PAGE_LIMIT | 2 | OpenAlex 与已支持官方目录每查询分页上限，1–20 |
 | PARADIGM_OFFICIAL_DETAIL_LIMIT | 6 | 每官方入口本进程新增详情上限，1–100 |
 
-这些是研究排期和正常取材边界，不是技术淘汰，不声称全量完成。已有 GitHub Variables 会覆盖新默认，部署前把旧 30/60 天回补改为 14 或删除它们以使用默认。
+这些是研究排期和正常取材边界，不是技术淘汰，不声称全量完成。已有 GitHub Variables 会覆盖默认；显式 30/60 天不是废弃配置，会继续增加高信号回补范围。有效回补窗口不小于普通窗口，冷启动不小于回补窗口。若希望使用 14 天起点，再明确改值或删除相应覆盖，不在清理时静默改研究范围。
 
 以下额外熔断默认仍为 0：PARADIGM_DISCOVERY_SAFETY_LIMIT、PARADIGM_ANALYSIS_SAFETY_LIMIT、PARADIGM_DEEP_SAFETY_LIMIT、PARADIGM_REPORT_SAFETY_LIMIT、PARADIGM_REFRESH_SAFETY_LIMIT。0 仅取消额外熔断，不取消 V0 有界研究计划。熔断/超时/未选不写成 Rubric 淘汰。
 
@@ -162,8 +176,21 @@ SMTP_USE_STARTTLS=false
 
 应用密码/SMTP 授权码不是登录密码；SSL 与 STARTTLS 不得同时开启。Actions 默认 QQ SSL，SMTP_USERNAME/PASSWORD/TO 为 Secrets。发送失败不提前登记签名，已完成研究和合规报告保留。
 
-本地时区参数 SCHEDULE_DAY_OF_WEEK=fri、SCHEDULE_HOUR=9、SCHEDULE_MINUTE=15、SCHEDULE_TIMEZONE=Asia/Shanghai。只选一种调度，避免本机/云端重复。
+本地时区参数 SCHEDULE_DAY_OF_WEEK=fri、SCHEDULE_HOUR=9、SCHEDULE_MINUTE=15、SCHEDULE_TIMEZONE=Asia/Shanghai。它们不改变 GitHub cron；云端要改调度须修改 Workflow 的 schedule。只选一种调度，避免本机/云端重复。
 
 先零网络 Doctor 与离线门，再在获得授权后做 Smoke/正式运行。source_check_only 仅诊断输入，不测模型/SMTP。逐入口缺口不要求全部修完才能正式研究；--v0-readiness 只表示有足够有界输入能力样本，不证明生产 V0。正式验收检查实际研究、报告、邮件、状态和去重，不能只看 Actions 绿色。
 
 云端 V0 使用 schema v10 与独立状态 epoch，第一次不恢复旧失败队列；后续恢复健康 V0 快照。见 [云端指南](CLOUD_AUTOMATION.md)。
+
+## 冗余与废弃配置清理
+
+| 名称/类型 | 状态与处理 |
+|---|---|
+| LLM_PROVIDER / LLM_MODEL / LLM_BASE_URL / LLM_API_KEY / DASHSCOPE_API_KEY / 旧角色 API_KEY | 已退出运行契约，使用两套角色配置后删除，不启用别名回退 |
+| TAVILY_MAX_REQUESTS_PER_RUN | 已废弃且不被工作流消费；按本库单进程调用语义迁到 TAVILY_REQUEST_SAFETY_LIMIT，再删除旧名称 |
+| PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE | 已废弃，不是 PARADIGM_OFFICIAL_DETAIL_LIMIT 的同义项；删除它不改变当前默认每入口 6 条详情，不自动套用旧值 |
+| 手动建的 GITHUB_TOKEN Secret | 工作流自动注入 github.token；本地独立 Token 可以需要，但云端同名 Repository Secret 不需要 |
+| 额外 SAFETY_LIMIT、并发/批次、冷启动/回补、不同搜索域名 | 仍有实际消费者，语义不同，不当作重复配置删除；通常使用默认即可 |
+| legacy / 本地专用参数 | 默认云端不消费，不需要为 V0 建 Variables；保留后端兼容能力，不删除历史证据或用户本地配置 |
+
+2026-10-14 配置审计：两项旧源参数清理时，Tavily 的旧 12 次限制迁到现行名称；旧目录值 4 不映射到不同语义的新详情参数；仍生效的 30 天回补保留。模型和 SMTP Secrets 不轮换、不读回。静态/离线清理不证明提供方实际连通性或研究质量。

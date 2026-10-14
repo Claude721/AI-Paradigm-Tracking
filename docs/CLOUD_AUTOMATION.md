@@ -33,7 +33,9 @@ Settings → Secrets and variables → Actions：
 - 推荐 OPENALEX_API_KEY；GITHUB_TOKEN 自动取 github.token，不另建同名 Secret。
 - SMTP_USERNAME、SMTP_PASSWORD、SMTP_TO Secrets；现有 QQ SSL 发送路径不变。
 - X、未批准 Reddit、未批准 Semantic Scholar 保持关闭，不为 V0 新增付费平台。
-- 参数与范围详见 [配置清单](CONFIGURATION_CHECKLIST.md)。已有 30/60 天回补 Variables 改为 14 或删除使用默认；自动预算续跑保持 false。
+- 参数与范围详见 [配置清单](CONFIGURATION_CHECKLIST.md)。已有 30/60 天回补仍是有效覆盖，不在清理时静默缩到 14 天；只有所有者明确选择使用默认时才改值/删除。自动预算续跑保持 false。
+- Variables 只在工作流显式映射时生效；不必把全部默认值建成 Repository Variables。FOLLOW_BUILDERS_ENABLED/FEED_URL、TAVILY_SOCIAL_MAX_RESULTS、PARADIGM_ALLOW_UPDATES、LOG_LEVEL 支持按需覆盖。旧 TAVILY_MAX_REQUESTS_PER_RUN 使用现行 TAVILY_REQUEST_SAFETY_LIMIT；旧 PRIORITY_RESEARCH_MAX_LINKS_PER_PAGE 不再消费，不能当新详情参数的别名。
+- SOURCING_LOOKBACK_DAYS 与 PARADIGM_SEED_ARXIV_IDS 来自手动 inputs；SCHEDULE_* 仅本地调度/日期，不修改云端 cron。当前 QQ 邮件策略、PIPELINE_MODE=paradigm 固定，不读取同名 Repository Variables。
 
 ## V0 状态 epoch
 

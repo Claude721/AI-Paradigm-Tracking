@@ -482,7 +482,6 @@ def _integer(value: Any) -> int:
 def _clean(value: Any, limit: int) -> str:
     text = str(value or "").replace("\x00", "")
     for name in (
-        "LLM_API_KEY",
         "SUB_AGENT_LLM_API_KEY",
         "MAIN_AGENT_LLM_API_KEY",
         "OPENALEX_API_KEY",

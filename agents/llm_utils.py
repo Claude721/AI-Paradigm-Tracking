@@ -31,7 +31,7 @@ class ResolvedModel:
 
     role: str
     provider: str
-    provider_from: str  # "agent" | "global" | "default"
+    provider_from: str  # Agent 专属配置或未配置，不再有全局/default 来源。
     model: str
     model_from: str
     api_key: str
