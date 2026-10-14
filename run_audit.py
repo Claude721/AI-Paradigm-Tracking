@@ -88,12 +88,8 @@ class RunAudit:
                     getattr(usage, "completion_tokens", 0)
                 ),
                 "total_tokens": _integer(getattr(usage, "total_tokens", 0)),
-                "reasoning_tokens": _integer(
-                    getattr(completion_details, "reasoning_tokens", 0)
-                ),
-                "cached_tokens": _integer(
-                    getattr(prompt_details, "cached_tokens", 0)
-                ),
+                "reasoning_tokens": _optional_usage_count(getattr(completion_details, "reasoning_tokens", None)),
+                "cached_tokens": _optional_usage_count(getattr(prompt_details, "cached_tokens", None)),
                 "finish_reason": _clean(
                     str(getattr(first_choice, "finish_reason", "") or ""), 40
                 ),
@@ -190,6 +186,7 @@ class RunAudit:
             "llm_reasoning_tokens": sum(
                 _integer(item.get("reasoning_tokens")) for item in self.llm_calls
             ),
+            "llm_reasoning_usage_missing_count": sum(item.get("reasoning_tokens") is None for item in self.llm_calls),
             "llm_total_tokens": sum(
                 _integer(item.get("total_tokens")) for item in self.llm_calls
             ),
@@ -197,6 +194,10 @@ class RunAudit:
             "llm_request_seconds_by_stage": {key: round(value, 3) for key, value in sorted(request_seconds.items())},
             "llm_timing_unreported_count": sum(item.get("elapsed_seconds") is None for item in self.llm_calls),
         }
+
+
+def _optional_usage_count(value):
+    return value if type(value) is int and value >= 0 else None
 
 
 def _render_markdown(payload: dict[str, Any]) -> str:
@@ -348,7 +349,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
             f"- 用量未确认：{llm.get('llm_unreported_usage_count', 0)} 次；不能将缺失用量视为测得零",
             f"- 输入 tokens：{llm['llm_prompt_tokens']}",
             f"- 输出 tokens：{llm['llm_completion_tokens']}",
-            f"- 其中 reasoning tokens：{llm['llm_reasoning_tokens']}",
+            f"- 已确认 reasoning tokens 下限：{llm['llm_reasoning_tokens']}；细分未报告 {llm.get('llm_reasoning_usage_missing_count', 0)} 次，不能当作零思考",
             f"- 合计 tokens：{llm['llm_total_tokens']}",
         ]
     )

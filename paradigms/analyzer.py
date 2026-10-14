@@ -1460,6 +1460,8 @@ def _bounded_synthesis_evidence(
     ledger.  Nothing is silently reclassified as rejected or absent.
     """
 
+    from sources.arxiv_document_source import _distributed_text_excerpt
+
     primary_types = {
         "primary_paper",
         "technical_blog",
@@ -1518,7 +1520,7 @@ def _bounded_synthesis_evidence(
             "url": item.url[:1000],
             "summary": item.summary[: (2400 if primary else 700)],
             "document_excerpt": (
-                str(item.raw.get("document_excerpt", ""))[:7000]
+                _distributed_text_excerpt(str(item.raw.get("document_excerpt", "")), limit=16_000)
                 if primary
                 else ""
             ),

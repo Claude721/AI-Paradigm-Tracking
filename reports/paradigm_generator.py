@@ -536,7 +536,7 @@ def _compact_route_dossier(item: ParadigmCandidate) -> dict:
 
     primary, primary_overflow = _bounded_route_evidence(
         _primary_sources(item),
-        char_budget=14_000,
+        char_budget=22_000,
     )
     momentum_items = _momentum_evidence(item)
     momentum, momentum_overflow = _bounded_route_evidence(
@@ -814,6 +814,7 @@ def _route_draft_violations(
 
 
 def _evidence_dossier(item: TechnicalEvidence) -> dict:
+    from sources.arxiv_document_source import _distributed_text_excerpt
     durable_url = (
         primary_material_url(item)
         if item.evidence_type in ORIGIN_EVIDENCE_TYPES
@@ -825,6 +826,10 @@ def _evidence_dossier(item: TechnicalEvidence) -> dict:
         "title": item.title,
         "url": durable_url,
         "summary": item.summary[:1000],
+        "document_excerpt": (
+            _distributed_text_excerpt(str(item.raw.get("document_excerpt", "")), limit=16_000)
+            if item.evidence_type in ORIGIN_EVIDENCE_TYPES else ""
+        ),
         "published_at": item.published_at,
         "authors": item.authors,
         "organization": item.organization,

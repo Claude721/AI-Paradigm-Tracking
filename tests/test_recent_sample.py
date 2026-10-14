@@ -227,6 +227,39 @@ class SampleDeliveryGateTests(unittest.TestCase):
                 self.assertIn("端到端", text)
                 self.assertIn("预测", text)
 
+    def test_synthesis_and_writer_receive_primary_tail_not_only_previous_model_prose(self):
+        from paradigms.analyzer import _bounded_synthesis_evidence
+        from reports.paradigm_generator import _compact_route_dossier
+        from paradigms.models import ParadigmCandidate, TechnicalEvidence, EvidenceType
+        excerpt = "Source introduction. " * 430 + " Controlled experiment. " * 260 + " FINAL_CONDITION: agent runs on a separate server; full replication is not demonstrated."
+        primary = TechnicalEvidence(evidence_type=EvidenceType.TECHNICAL_BLOG, source="official-page",
+                title="Source", url=ARTICLE, summary="Brief", published_at="2026-10-12", raw={"document_excerpt":excerpt})
+        record = _bounded_synthesis_evidence([primary])["records"][0]
+        self.assertIn("FINAL_CONDITION", record["document_excerpt"])
+        candidate = ParadigmCandidate(key="offline", name="route", thesis="", problem_shift="", mechanism="", evidence=[primary])
+        writer_record = _compact_route_dossier(candidate)["primary_sources"][0]
+        self.assertIn("FINAL_CONDITION", writer_record["document_excerpt"])
+        self.assertLess(len(record["document_excerpt"]), 16_001)
+
+    def test_upstream_analysis_is_not_fact_and_agent_payload_conditions_are_explicit(self):
+        from skills.loader import SkillLoader
+        loader = SkillLoader()
+        for name in ("paradigm_extraction", "paradigm_synthesis", "weekly_route_draft", "weekly_research_memo"):
+            text = loader.load(name)
+            self.assertIn("执行代理", text)
+            self.assertIn("服务模型", text)
+        self.assertIn("不是事实来源", loader.load("paradigm_synthesis"))
+
+    def test_missing_reasoning_detail_remains_unknown_even_when_total_usage_known(self):
+        from run_audit import RunAudit
+        audit = RunAudit()
+        response = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=29, completion_tokens=5, total_tokens=34))
+        audit.record_llm(stage="offline", role="main", model="offline", subject="offline", response=response)
+        self.assertTrue(audit.llm_calls[0]["usage_reported"])
+        self.assertIsNone(audit.llm_calls[0]["reasoning_tokens"])
+        self.assertIsNone(audit.llm_calls[0]["cached_tokens"])
+        self.assertEqual(audit.token_totals()["llm_reasoning_usage_missing_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

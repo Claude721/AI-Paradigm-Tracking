@@ -6,7 +6,7 @@
 
 2026-10-14 重核当前 [Qwen 3.8 Flash](https://help.aliyun.com/zh/model-studio/qwen3-8-flash)、[Qwen 3.8 Max](https://help.aliyun.com/zh/model-studio/qwen3-8-max) 及[兼容 API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)。北京原价分别为每百万输入/输出 0.8/2.7 元与 12/36 元；完整输入上限 991808，使用总输出限制与 10 token 误差。运行配置仍从 MAIN/SUB Variables/Secrets 读取，不写入价格代码。
 
-工作流输入 `price_contracts` 为 `{ "sub": {...}, "main": {...} }`。每个对象须且只含以下字段，模型、地址与核验日期必须匹配当前实际配置；其他厂商/模型使用其真实契约值，不套用示例价格。`pricing_verified_on` 为当日 YYYY-MM-DD，不存在代码日历白名单：
+工作流输入 `price_contracts` 为 `{ "sub": {...}, "main": {...} }`。每个对象须且只含以下字段，模型、地址与核验日期必须匹配当前实际配置；其他厂商/模型使用其真实契约值，不套用示例价格。`pricing_verified_on` 为运行当日的 UTC 日期 YYYY-MM-DD，不存在代码日历白名单：
 
 ```json
 {
