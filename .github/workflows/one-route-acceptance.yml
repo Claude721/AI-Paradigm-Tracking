@@ -27,8 +27,22 @@ on:
         default: "20"
         type: string
       pricing_verified_on:
-        description: 已人工核验的官方价格日期；本版仅接受2026-10-14且只可当日执行
+        description: 已核验的官方价格日期（YYYY-MM-DD），只可核验当日执行
         required: true
+        type: string
+      price_contracts:
+        description: sub/main 两角色价格契约 JSON；须匹配当前 Variables 的模型和地址
+        required: true
+        type: string
+      models_only:
+        description: 只验 MAIN/SUB 模型协议（各最多1请求）；不填原点、不调用其他信源
+        required: true
+        default: false
+        type: boolean
+      identity_requests:
+        description: 单路线 OpenAlex 身份查询上限（0至8）；模型冒烟不调用
+        required: true
+        default: "8"
         type: string
       live_authorized:
         description: 明确授权本次最多一条路线的真实模型测试；不发邮件、不恢复生产状态、不自动续跑
@@ -54,12 +68,15 @@ jobs:
       SUB_AGENT_MODEL: ${{ vars.SUB_AGENT_MODEL }}
       SUB_AGENT_BASE_URL: ${{ vars.SUB_AGENT_BASE_URL }}
       SUB_AGENT_LLM_API_KEY: ${{ secrets.SUB_AGENT_LLM_API_KEY }}
+      SUB_AGENT_REQUEST_OPTIONS: ${{ vars.SUB_AGENT_REQUEST_OPTIONS }}
       MAIN_AGENT_PROVIDER: ${{ vars.MAIN_AGENT_PROVIDER }}
       MAIN_AGENT_MODEL: ${{ vars.MAIN_AGENT_MODEL }}
       MAIN_AGENT_BASE_URL: ${{ vars.MAIN_AGENT_BASE_URL }}
       MAIN_AGENT_LLM_API_KEY: ${{ secrets.MAIN_AGENT_LLM_API_KEY }}
+      MAIN_AGENT_REQUEST_OPTIONS: ${{ vars.MAIN_AGENT_REQUEST_OPTIONS }}
       LLM_ENABLE_THINKING: "false"
       GITHUB_TOKEN: ${{ github.token }}
+      OPENALEX_API_KEY: ${{ !inputs.models_only && secrets.OPENALEX_API_KEY || '' }}
       EMAIL_PUSH_ENABLED: "false"
       EMAIL_PUSH_REQUIRED: "false"
       PARADIGM_AUTO_RESUME_ENABLED: "false"
@@ -68,6 +85,9 @@ jobs:
       SAMPLE_LOOKBACK_DAYS: ${{ inputs.lookback_days }}
       SAMPLE_BUDGET_CNY: ${{ inputs.budget_cny }}
       SAMPLE_PRICING_DATE: ${{ inputs.pricing_verified_on }}
+      SAMPLE_PRICE_CONTRACTS: ${{ inputs.price_contracts }}
+      SAMPLE_MODELS_ONLY: ${{ inputs.models_only }}
+      SAMPLE_IDENTITY_REQUESTS: ${{ inputs.identity_requests }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -93,7 +113,12 @@ jobs:
       - name: 本次授权的一条路线（不调用主流程）
         run: |
           selection=()
-          if [ -n "$SAMPLE_ARXIV_ID" ] && [ -z "$SAMPLE_PRIMARY_URL" ]; then
+          if [ "$SAMPLE_MODELS_ONLY" = "true" ] && [ -z "$SAMPLE_ARXIV_ID" ] && [ -z "$SAMPLE_PRIMARY_URL" ]; then
+            selection=(--models-only)
+          elif [ "$SAMPLE_MODELS_ONLY" = "true" ]; then
+            echo "模型冒烟不能指定研究原点"
+            exit 1
+          elif [ -n "$SAMPLE_ARXIV_ID" ] && [ -z "$SAMPLE_PRIMARY_URL" ]; then
             selection=(--arxiv-id "$SAMPLE_ARXIV_ID")
           elif [ -n "$SAMPLE_PRIMARY_URL" ] && [ -z "$SAMPLE_ARXIV_ID" ]; then
             selection=(--primary-url "$SAMPLE_PRIMARY_URL")
@@ -103,7 +128,7 @@ jobs:
           fi
           python scripts/one_route_check.py --live-authorized "${selection[@]}" \
             --lookback-days "$SAMPLE_LOOKBACK_DAYS" --budget-cny "$SAMPLE_BUDGET_CNY" \
-            --pricing-verified-on "$SAMPLE_PRICING_DATE"
+            --pricing-verified-on "$SAMPLE_PRICING_DATE" --identity-requests "$SAMPLE_IDENTITY_REQUESTS"
       - name: 保存验收与费用证据（不上传临时数据库）
         if: always()
         uses: actions/upload-artifact@v7

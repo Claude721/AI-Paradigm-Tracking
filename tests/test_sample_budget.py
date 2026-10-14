@@ -9,7 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from agents.sample_budget import SampleBudgetClient, SampleBudgetError, MODEL, BASE_URL, PRICE_DATE
+from agents.sample_budget import SampleBudgetClient, SampleBudgetError
+from tests.model_contract_fixture import MODEL, BASE_URL, PRICE_DATE, price_contract
 
 
 def response(prompt=1000, output=100, *, total=None, model=MODEL, reasoning=0):
@@ -29,7 +30,9 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
 
     def client(self, **kwargs):
         return SampleBudgetClient(self.raw, path=self.path, budget_cny=kwargs.pop("budget_cny", 20),
-                                  verified_on=kwargs.pop("verified_on", PRICE_DATE), now=kwargs.pop("now", PRICE_DATE), **kwargs)
+                                  verified_on=kwargs.pop("verified_on", PRICE_DATE), now=kwargs.pop("now", PRICE_DATE),
+                                  model=kwargs.pop("model", MODEL), base_url=kwargs.pop("base_url", BASE_URL),
+                                  price_contract=kwargs.pop("price_contract", price_contract()), **kwargs)
 
     async def request(self, client, **extra):
         return await client.create(model=MODEL, messages=[{"role": "user", "content": "test"}],
@@ -70,7 +73,7 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
         other = SimpleNamespace(max_retries=0, base_url=BASE_URL,
                                 chat=SimpleNamespace(completions=SimpleNamespace(create=other_create)))
         shared = self.client()
-        main = shared.bind_client(other, model=MODEL, base_url=BASE_URL, role="main")
+        main = shared.bind_client(other, model=MODEL, base_url=BASE_URL, role="main", price_contract=price_contract())
         await self.request(shared)
         await self.request(main.chat.completions)
         await self.request(shared)
@@ -85,7 +88,7 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
         other = SimpleNamespace(max_retries=0, base_url=BASE_URL,
                                 chat=SimpleNamespace(completions=SimpleNamespace(create=other_create)))
         shared = self.client()
-        main = shared.bind_client(other, model=MODEL, base_url=BASE_URL, role="main")
+        main = shared.bind_client(other, model=MODEL, base_url=BASE_URL, role="main", price_contract=price_contract())
         with self.assertRaises(SampleBudgetError):
             await self.request(main.chat.completions)
         with self.assertRaises(SampleBudgetError):
@@ -97,7 +100,7 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
     async def test_unverified_main_model_is_rejected_before_either_role_spends(self):
         shared = self.client()
         with self.assertRaises(SampleBudgetError):
-            shared.bind_client(self.raw, model="another-model", base_url=BASE_URL, role="main")
+            shared.bind_client(self.raw, model="another-model", base_url=BASE_URL, role="main", price_contract=price_contract())
         self.create.assert_not_awaited()
 
     async def test_timeout_reserves_and_never_implicitly_retries(self):
@@ -119,7 +122,8 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
                 path = Path(self.temporary.name) / f"cost-{len(list(Path(self.temporary.name).iterdir()))}.json"
                 self.create.return_value = value
                 client = SampleBudgetClient(self.raw, path=path, budget_cny=20,
-                                            verified_on=PRICE_DATE, now=PRICE_DATE)
+                                            verified_on=PRICE_DATE, now=PRICE_DATE, model=MODEL,
+                                            base_url=BASE_URL, price_contract=price_contract())
                 with self.assertRaises(SampleBudgetError):
                     await self.request(client)
                 self.assertTrue(client.unknown)
@@ -203,6 +207,37 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
             self.client()
         self.assertEqual(self.path.read_text(), before)
 
+    async def test_different_roles_models_prices_and_hosts_use_one_shared_ledger(self):
+        other_model, endpoint = "any-compatible-model", "https://other.invalid/v1"
+        other_create = AsyncMock(return_value=response(model=other_model))
+        other = SimpleNamespace(max_retries=0, base_url=endpoint,
+                                chat=SimpleNamespace(completions=SimpleNamespace(create=other_create)))
+        shared = self.client()
+        contract = price_contract(model=other_model, base_url=endpoint, response_models=[other_model],
+                                  input_price_cny="12", output_price_cny="36", output_limit="max_tokens")
+        main = shared.bind_client(other, model=other_model, base_url=endpoint, role="main", price_contract=contract)
+        await self.request(shared)
+        await main.chat.completions.create(model=other_model, messages=[{"role":"user", "content":"offline"}], max_tokens=128)
+        self.assertEqual(shared.spent, Decimal("0.024"))
+        self.assertEqual(other_create.call_args.kwargs["max_tokens"], 128)
+        self.assertNotIn("max_completion_tokens", other_create.call_args.kwargs)
+        self.assertEqual(shared.summary()["price_contracts"]["main"]["model"], other_model)
+
+    async def test_price_date_is_supplied_configuration_not_code_calendar_pin(self):
+        next_day = date(2027, 1, 1)
+        client = self.client(verified_on=next_day, now=next_day,
+                             price_contract=price_contract(verified_on=next_day.isoformat()))
+        await self.request(client)
+        self.assertEqual(self.create.await_count, 1)
+
+    def test_bad_price_contract_rejected_without_provider_io(self):
+        for change in ({"input_price_cny":"NaN"}, {"output_price_cny":"-1"}, {"input_limit":True},
+                       {"completion_includes_reasoning":False}, {"response_models":[]},
+                       {"pricing_url":"https://user:private@example.org/"}, {"extra_field":1}):
+            with self.subTest(change=change), self.assertRaises(SampleBudgetError):
+                self.client(price_contract=price_contract(**change))
+        self.create.assert_not_awaited()
+
 
 class SampleIsolationTests(unittest.IsolatedAsyncioTestCase):
     def test_verification_summary_preserves_disabled_scope_not_zero_discussion(self):
@@ -244,6 +279,27 @@ class SampleIsolationTests(unittest.IsolatedAsyncioTestCase):
                 for field in ("PROVIDER", "MODEL", "BASE_URL", "LLM_API_KEY"):
                     self.assertNotIn(role + "_" + field, os.environ)
 
+    def test_explicit_identity_scope_keeps_only_identity_key_not_other_paid_services(self):
+        from scripts.one_route_check import isolate_environment
+        import os
+        with patch.dict(os.environ, {"OPENALEX_API_KEY":"identity-key", "TAVILY_API_KEY":"private",
+                                    "SMTP_PASSWORD":"private"}, clear=True):
+            isolate_environment(identity_checks=True)
+            self.assertEqual(os.environ["OPENALEX_API_KEY"], "identity-key")
+            self.assertNotIn("TAVILY_API_KEY", os.environ)
+            self.assertNotIn("SMTP_PASSWORD", os.environ)
+
+    async def test_identity_api_limit_is_shared_before_parallel_awaits(self):
+        from sources.researcher_profile_source import ResearcherProfileClient
+        profile_client = ResearcherProfileClient(openalex_request_limit=2)
+        get = AsyncMock(return_value=SimpleNamespace(status_code=200))
+        raw = SimpleNamespace(get=get)
+        values = await asyncio.gather(*(profile_client._openalex_get(raw, "https://api.openalex.org/authors",
+                        params={}) for _ in range(5)), return_exceptions=True)
+        self.assertEqual(get.await_count, 2)
+        self.assertEqual(profile_client.openalex_request_count, 2)
+        self.assertEqual(sum(isinstance(value, RuntimeError) for value in values), 3)
+
     async def test_real_sqlite_origin_identity_uses_actual_stage_contract(self):
         from scripts.one_route_check import run_sample
         from sources.base import RawProject
@@ -269,8 +325,9 @@ class SampleIsolationTests(unittest.IsolatedAsyncioTestCase):
 
     def test_workflow_never_injects_mail_extra_paid_keys_or_production_state(self):
         text = (Path(__file__).resolve().parents[1] / ".github/workflows/one-route-acceptance.yml").read_text()
-        for forbidden in ("main.py", "SMTP_PASSWORD", "OPENALEX_API_KEY", "TAVILY_API_KEY", "actions: write", "schedule:", "restore_state", "sample.db"):
+        for forbidden in ("main.py", "SMTP_PASSWORD", "TAVILY_API_KEY", "actions: write", "schedule:", "restore_state", "sample.db"):
             self.assertNotIn(forbidden, text)
         self.assertIn("if: inputs.live_authorized", text)
         self.assertIn("--live-authorized", text)
         self.assertIn('EMAIL_PUSH_ENABLED: "false"', text)
+        self.assertIn("!inputs.models_only && secrets.OPENALEX_API_KEY", text)

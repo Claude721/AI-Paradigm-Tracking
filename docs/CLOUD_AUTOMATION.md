@@ -30,6 +30,7 @@ Settings → Secrets and variables → Actions：
 - 两项独立 Secret：SUB_AGENT_LLM_API_KEY、MAIN_AGENT_LLM_API_KEY；可以先填同一个现有 Key，但不能放 Variables。任一角色缺项在调用模型前明确失败。
 - 旧全局模型 Variables 及 DASHSCOPE_API_KEY / LLM_API_KEY / SUB_AGENT_API_KEY / MAIN_AGENT_API_KEY 不再读取；先配置新 Secret 再删旧项。GitHub 不提供旧值读回，不在聊天或日志中迁移明文。
 - 换某层提供方只修改该层三项 Variables 与对应 Secret，无需改代码，不限 Qwen。地址填兼容 API 根地址，不是 /chat/completions 完整路径。
+- 可选 SUB_AGENT_REQUEST_OPTIONS / MAIN_AGENT_REQUEST_OPTIONS 已映射到正式、Smoke 与独立样本。协议默认按 PROVIDER 选择，不绑定模型 ID/固定地址；特殊兼容接口以 JSON 配置输出参数、extra_body 和省略参数，见配置清单。修改后模型缓存失效，不恢复旧参数结果。
 - 推荐 OPENALEX_API_KEY；GITHUB_TOKEN 自动取 github.token，不另建同名 Secret。
 - SMTP_USERNAME、SMTP_PASSWORD、SMTP_TO Secrets；现有 QQ SSL 发送路径不变。
 - X、未批准 Reddit、未批准 Semantic Scholar 保持关闭，不为 V0 新增付费平台。
@@ -67,7 +68,9 @@ source_platform_checks 只有单次明确授权后才开启；Tavily/X 可能消
 
 独立 source-interface-acceptance.yml 仅验授权 NYU/Tavily，默认 live_authorized=false，无模型/邮件/生产状态。NYU 最多 8 次身份 GET，Tavily 在包含额度/PAYG 条件明确后最多 1 次 basic；未知限额不搜索。2026-10-13 单次授权已经执行，后续用户要求暂不调用，不自动追加复验。
 
-one-route-acceptance.yml 是窗口内单路线模型测试，默认 3 天，两层合计最多 20 元、无邮件/生产状态。arxiv_id 与 primary_url 必须且只能选一项；后者必须在已登记官方研究索引中原样出现，并由生产解析器确认正文与原始日期。旧论文、仅修改日期、无原始日期不支付模型；拒绝多机制 Technical Report，不为样本截断或放宽准入。费用保护本版绑定已于 2026-10-14 核验的北京 Qwen 当日价格；初筛读取 SUB，深挖/人物/写作读取 MAIN，各自模型与实际地址须在首次请求前核验，两个客户端共享一个费用账本/停止线。不匹配时停止而非静默套价，正式生产不受该测试价格契约限制。研究采用 V0 部分来源容错，但本条路线自身仍须完成真实判断。
+one-route-acceptance.yml 默认 3 天，两层合计最多 20 元、无邮件/生产状态。正常研究的 arxiv_id 与 primary_url 必须且只能选一项；后者须在已登记官方索引原样出现，生产解析器核验正文与原始日期。旧材料、仅修改日期、无日期不支付研究模型；拒绝多机制 Technical Report，不截断或放宽准入。`models_only=true` 则两项原点都留空，只各发一次最小模型请求，不调用其他信源。
+
+价格保护通过 `price_contracts` 输入 sub/main 两角色 JSON 与 `pricing_verified_on`，不含代码日期或模型白名单。实际模型、地址、最高原价、完整输入容量、总输出参数/误差与响应模型别名须匹配；核验日期必须是运行当天。客户端共享一个账本与停止线，未知用量/取消不退款，不自动重跑。价格数据配置不限制生产模型选择。`identity_requests=0–8` 显式允许单路线 OpenAlex 人物身份查询；模型冒烟不注入该 Key，其他收费平台/SMTP 均不注入。研究采用 V0 部分来源容错，但当前路线人物/事实质量门仍保留。完整输入格式见[样本指南](ONE_ROUTE_ACCEPTANCE.md)。
 
 历史 Runner 证据见 [来源](RUN_38347140838_SOURCE_REVIEW.md)、[接口](RUN_38370843944_INTERFACE_REVIEW.md)。当时全入口闭合目标不再适用 V0 交付。
 

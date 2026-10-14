@@ -15,20 +15,21 @@ import sys
 import tempfile
 import time
 from datetime import date, datetime, timedelta, timezone
+from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from agents.sample_budget import SampleBudgetClient, SampleBudgetError
+from agents.sample_budget import SampleBudgetClient, SampleBudgetError, PriceContract
 
 
-def isolate_environment():
+def isolate_environment(*, identity_checks=False):
     # No production Secrets/Variables may authorize additional paid services,
     # mail or resumes. Keep both explicitly budgeted model roles, nothing else.
     for key in list(os.environ):
         if key.startswith(("SMTP_", "EMAIL_", "TAVILY_", "TWITTER_", "REDDIT_",
-                           "SEMANTIC_SCHOLAR_", "OPENALEX_")) or key in {
+                           "SEMANTIC_SCHOLAR_")) or (key.startswith("OPENALEX_") and not identity_checks) or key in {
                                "LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY",
                                "DASHSCOPE_API_KEY", "SUB_AGENT_API_KEY", "MAIN_AGENT_API_KEY"}:
             os.environ.pop(key, None)
@@ -83,7 +84,7 @@ async def _official_origin(url, now, lookback_days):
 
 
 async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, reference_time=None,
-                     lookback_days=3, primary_url="", main_guarded=None):
+                     lookback_days=3, primary_url="", main_guarded=None, identity_requests=0):
     # Late imports ensure .env/production configuration cannot influence this
     # explicitly isolated test. Use real stage implementations, never mocks.
     import httpx
@@ -156,6 +157,7 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
         orchestrator.delivery_contract_version = 2
         orchestrator.store, orchestrator.deep_concurrency = store, 1
         orchestrator.enricher = EvidenceEnricher(concurrency=1, budget_store=store.provider_budgets)
+        orchestrator.enricher.researchers.openalex_request_limit = identity_requests
         orchestrator.enricher.allow_partial_sources = True
         main_model = resolve_model("main").model
         orchestrator.synthesizer = ParadigmSynthesizer(concurrency=1, client=main_guarded, model=main_model)
@@ -163,6 +165,7 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
                                                             model=main_model, stage_cache=store.campaigns)
         completed, budget_pending, failed = await orchestrator._deep_analyze_in_batches(
             candidates, [], time.monotonic() + 900)
+        result["identity_requests"] = orchestrator.enricher.researchers.openalex_request_count
         if budget_pending or failed or len(completed) != 1:
             result["sample_execution_pending"] = len(budget_pending) + len(failed)
             raise ValueError("真实单路线研究存在执行待办；不生成阶段性报告")
@@ -217,7 +220,7 @@ def _verification_summary(candidate):
 
 
 async def execute(args):
-    isolate_environment()
+    isolate_environment(identity_checks=args.identity_requests > 0 and not args.models_only)
     from agents.llm_utils import build_client, request_policy, resolve_model
     from run_audit import run_audit
     from runtime_provenance import runtime_provenance
@@ -233,20 +236,34 @@ async def execute(args):
               "production_v0_accepted": False}
     result["model_request_policy"] = {role: request_policy(profile) for role, profile in profiles.items()}
     clients = {}
+    guarded = None
     try:
+        prices = json.loads(args.price_contracts)
+        if not isinstance(prices, dict) or set(prices) != {"sub", "main"}:
+            raise SampleBudgetError("price_contracts 须包含 sub/main 两个价格契约")
+        verified_on = date.fromisoformat(args.pricing_verified_on)
         for role in ("sub", "main"):
             clients[role], _ = build_client(role)
-            SampleBudgetClient._validate_transport(clients[role], profiles[role].model, profiles[role].base_url)
+            contract = PriceContract.parse(prices[role], model=profiles[role].model,
+                                          base_url=profiles[role].base_url, verified_on=verified_on)
+            SampleBudgetClient._validate_transport(clients[role], contract)
         guarded = SampleBudgetClient(clients["sub"], path=directory / "cost.json", budget_cny=args.budget_cny,
-                                    verified_on=date.fromisoformat(args.pricing_verified_on),
+                                    verified_on=verified_on, price_contract=prices["sub"],
                                     model=profiles["sub"].model, base_url=profiles["sub"].base_url)
         main_guarded = guarded.bind_client(clients["main"], role="main", model=profiles["main"].model,
-                                          base_url=profiles["main"].base_url)
+                                          base_url=profiles["main"].base_url, price_contract=prices["main"])
         try:
-            with tempfile.TemporaryDirectory(prefix="radar-one-route-") as temporary:
-                await asyncio.wait_for(run_sample(args.arxiv_id, guarded, Path(temporary), result,
-                    primary_url=args.primary_url, lookback_days=args.lookback_days,
-                    main_guarded=main_guarded), 1200)
+            if args.models_only:
+                from smokecheck import _check_models, smoke_failed
+                transports = {"sub": guarded, "main": main_guarded}
+                checks = await _check_models(client_factory=lambda role: (transports[role], profiles[role].model))
+                result["smoke_results"] = [asdict(check) for check in checks]
+                result["status"] = "failed" if smoke_failed(checks) else "model_smoke_passed"
+            else:
+                with tempfile.TemporaryDirectory(prefix="radar-one-route-") as temporary:
+                    await asyncio.wait_for(run_sample(args.arxiv_id, guarded, Path(temporary), result,
+                        primary_url=args.primary_url, lookback_days=args.lookback_days,
+                        main_guarded=main_guarded, identity_requests=args.identity_requests), 1200)
         except Exception as exc:
             result["error_type"] = type(exc).__name__
             # Do not persist HTTP/SDK exception bodies or credentials.
@@ -257,11 +274,18 @@ async def execute(args):
             (directory / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             run_audit.write({"sample_only": True, "production_v0_accepted": False},
                             status=result["status"], output_dir=directory)
-            if result["status"] != "failed":
+            if result["status"] not in {"failed", "model_smoke_passed"}:
                 _write_sample_review(result, directory)
         print(json.dumps({key: result.get(key) for key in ("status", "error_type", "screening_decision", "route_decision")}, ensure_ascii=False))
         print(json.dumps({"request_count": len(guarded.calls), "accounted_upper_cny": str(guarded.spent), "usage_unknown": guarded.unknown}, ensure_ascii=False))
         return 0 if result["status"] != "failed" else 1
+    except Exception as exc:
+        result.update(error_type=type(exc).__name__, failure_summary="配置/费用契约未通过，不发送报告。")
+        if guarded is not None:
+            result["cost"] = guarded.summary()
+        (directory / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps({"status": "failed", "error_type": type(exc).__name__}, ensure_ascii=False))
+        return 1
     finally:
         for client in clients.values():
             await client.close()
@@ -269,15 +293,20 @@ async def execute(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    selection = parser.add_mutually_exclusive_group(required=True)
+    selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--arxiv-id", default="")
     selection.add_argument("--primary-url", default="")
     parser.add_argument("--lookback-days", type=int, choices=(3, 7), default=3)
     parser.add_argument("--budget-cny", required=True)
     parser.add_argument("--pricing-verified-on", required=True)
+    parser.add_argument("--price-contracts", default=os.getenv("SAMPLE_PRICE_CONTRACTS", ""))
+    parser.add_argument("--models-only", action="store_true")
+    parser.add_argument("--identity-requests", type=int, choices=range(9), default=0)
     parser.add_argument("--live-authorized", action="store_true")
     args = parser.parse_args(argv)
-    if not args.live_authorized or (args.arxiv_id and not re.fullmatch(r"\d{4}\.\d{4,5}", args.arxiv_id)):
+    if (not args.live_authorized or (args.arxiv_id and not re.fullmatch(r"\d{4}\.\d{4,5}", args.arxiv_id))
+        or (args.models_only and (args.arxiv_id or args.primary_url))
+        or (not args.models_only and not (args.arxiv_id or args.primary_url))):
         parser.error("须明确授权并提供单个无版本 arXiv ID 或官方文章 URL")
     return asyncio.run(execute(args))
 

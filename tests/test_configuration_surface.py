@@ -35,7 +35,8 @@ class ConfigurationSurfaceTests(unittest.TestCase):
     def test_documented_common_cloud_controls_are_actually_mapped(self):
         workflow = (ROOT / ".github/workflows/weekly-radar.yml").read_text()
         for name in ("FOLLOW_BUILDERS_ENABLED", "FOLLOW_BUILDERS_FEED_URL",
-                     "TAVILY_SOCIAL_MAX_RESULTS", "PARADIGM_ALLOW_UPDATES", "LOG_LEVEL"):
+                     "TAVILY_SOCIAL_MAX_RESULTS", "PARADIGM_ALLOW_UPDATES", "LOG_LEVEL",
+                     "SUB_AGENT_REQUEST_OPTIONS", "MAIN_AGENT_REQUEST_OPTIONS"):
             self.assertRegex(workflow, re.escape(name) + r": \$\{\{ vars\." + re.escape(name) + r"(?: \|\|| \}\})")
 
     def test_status_does_not_claim_model_defaults_when_roles_are_missing(self):

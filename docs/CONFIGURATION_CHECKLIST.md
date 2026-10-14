@@ -14,7 +14,7 @@
 | 本地调度/自定义路径 | `SCHEDULE_*`、`PARADIGM_RUBRIC_PATH`、`FRONTIER_LANDSCAPE_PATH` 不在云端 Variables 映射中；GitHub cron 与默认仓库路径由工作流/代码管理 |
 | 云端邮件策略 | 当前固定 QQ 465/SSL，正式运行 `EMAIL_PUSH_ENABLED/REQUIRED=true`；同名 Repository Variables 不会改变这个固定策略 |
 
-共享的 `LLM_REQUEST_TIMEOUT_SECONDS` 与 `LLM_ENABLE_THINKING` 是请求策略，不是全局模型/Key。后者只对已核验官方 Qwen 3.7 Plus 北京组合生效，不保证任意模型关闭思考。`FOLLOW_BUILDERS_ENABLED/FEED_URL`、`TAVILY_SOCIAL_MAX_RESULTS`、`PARADIGM_ALLOW_UPDATES` 与 `LOG_LEVEL` 已映射到云端，默认不需要建这些 Variables。
+共享的 `LLM_REQUEST_TIMEOUT_SECONDS` 与 `LLM_ENABLE_THINKING` 是请求策略，不是全局模型/Key。后者是 DashScope 协议默认值，不依赖模型名或地址，不保证任意厂商关闭思考；角色请求选项可覆盖。`FOLLOW_BUILDERS_ENABLED/FEED_URL`、`TAVILY_SOCIAL_MAX_RESULTS`、`PARADIGM_ALLOW_UPDATES` 与 `LOG_LEVEL` 已映射到云端，默认不需要建这些 Variables。
 
 ## 最小配置
 
@@ -30,13 +30,15 @@
 
 ```env
 SUB_AGENT_PROVIDER=dashscope
-SUB_AGENT_MODEL=qwen3.7-plus
+SUB_AGENT_MODEL=qwen3.8-flash
 SUB_AGENT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 SUB_AGENT_LLM_API_KEY=
+SUB_AGENT_REQUEST_OPTIONS=
 MAIN_AGENT_PROVIDER=dashscope
-MAIN_AGENT_MODEL=qwen3.7-plus
+MAIN_AGENT_MODEL=qwen3.8-max
 MAIN_AGENT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 MAIN_AGENT_LLM_API_KEY=
+MAIN_AGENT_REQUEST_OPTIONS=
 LLM_REQUEST_TIMEOUT_SECONDS=180
 LLM_ENABLE_THINKING=false
 ```
@@ -60,9 +62,17 @@ Actions 对应：
 
 换某层模型时只改该层三项 Variables 和对应 Secret，另一层不受影响。不再读取旧 LLM_PROVIDER、LLM_MODEL、LLM_BASE_URL、LLM_API_KEY、DASHSCOPE_API_KEY、SUB_AGENT_API_KEY、MAIN_AGENT_API_KEY。部署前先配置两组新 Key 再删除旧项；GitHub 无法读回已有 Secret，须在 Secrets 页面重新填入，不把 Key 发到聊天。迁移可以先在两项 Secret 填同一个现有 Key，不必申请新 Key。信源 Key 不需要重置。
 
-Doctor 只核对配置完整、URL 格式和范围，不再限制 qwen3.7。Smoke 才验证真实连接和响应；同 provider/model/url/Key 才共用角色检查。未知模型/代理不会收到猜测的 Qwen 参数。已核验官方 Qwen 配置使用显式非思考与总输出限制，历史证据见 [模型复核](RUN_38238493094_MODEL_REVIEW.md)。
+Doctor 核对配置完整、URL 格式、请求选项结构，不限定模型 ID。Smoke 验证真实连接和响应；同 provider/model/url/Key/请求选项才共用检查。`PROVIDER=dashscope` 明确选择百炼兼容协议，即使换模型或 workspace 地址也应用配置；其他标签默认标准 Chat Completions，不根据模型名前缀猜 Qwen 参数。该协议默认显式非思考、总输出限制，仍须 Smoke 核验提供方真正支持的能力。
 
-独立 one-route-acceptance.yml 默认 3 天、单材料/单路线、两层合计 20 元内、核验当日 Qwen 价格保护；输入 arxiv_id 或 primary_url 二选一，并核对原始发布时间，不回溯旧样本。初筛使用 SUB，深挖/人物/写作使用 MAIN，两个实际接口须分别匹配已核验价格且共享一个总费用账本；任一不匹配就在首次请求前停止。价格契约不是通用生产模型限制。无邮件/生产状态，换模型后不要直接复用旧价格执行该测试，见 [单路线说明](ONE_ROUTE_ACCEPTANCE.md)。
+可选 Variables：`SUB_AGENT_REQUEST_OPTIONS` / `MAIN_AGENT_REQUEST_OPTIONS`，空值跟随提供方协议。JSON 只接受 `output_limit`（`max_tokens` 或 `max_completion_tokens`）、`extra_body` 对象、`omit_parameters` 数组（仅 `temperature` / `response_format`）。额外请求体整体替换默认值，不能包含模型/输出上限/凭据。举例：
+
+```json
+{"output_limit":"max_completion_tokens","extra_body":{"enable_thinking":false},"omit_parameters":[]}
+```
+
+旧模型不支持思考参数时可用 `{"output_limit":"max_tokens","extra_body":{}}`；不接受 temperature 或 JSON mode 的兼容接口可配置 `omit_parameters`，但完整 JSON/业务字段/finish_reason 闸门仍保留。修改选项会使对应模型缓存失效；设置这些 Variables 后不用修改代码。非兼容的原生 API 不能仅靠换 URL 接入；不要把密钥放这些 JSON 中。
+
+独立 one-route-acceptance.yml 默认 3 天、单材料/单路线、两层合计 20 元内；价格由 `price_contracts` 两角色 JSON 输入，不是代码中的模型/日期白名单。输入 arxiv_id 或 primary_url 二选一，核对原始发布时间；`models_only=true` 则不选原点，只各验一次模型。初筛使用 SUB，深挖/人物/写作使用 MAIN，两个实际接口分别匹配当日核验价格、输出契约，共享一个费用账本；未知用量停止。单路线 `identity_requests=0–8` 显式控制 OpenAlex 身份查询；其他收费平台和邮件不注入。价格契约不是生产模型限制，见 [单路线说明](ONE_ROUTE_ACCEPTANCE.md)。
 
 ## 研究量与取材
 

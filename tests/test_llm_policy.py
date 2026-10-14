@@ -11,7 +11,8 @@ from openai import AsyncOpenAI
 
 import config
 from agents.llm_utils import ModelPolicyClient, ResolvedModel, build_client, request_policy, completed_content
-from agents.sample_budget import SampleBudgetClient, BASE_URL, MODEL, PRICE_DATE
+from agents.sample_budget import SampleBudgetClient
+from tests.model_contract_fixture import BASE_URL, MODEL, PRICE_DATE, price_contract
 from database.paradigm_store import (_deep_checkpoint_input_signature,
                                      _trajectory_checkpoint_policy_signature)
 from paradigms.analyzer import _stage_cache_signature
@@ -44,7 +45,8 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.TemporaryDirectory() as directory:
                 if budget:
                     client = SampleBudgetClient(client, path=Path(directory) / "cost.json",
-                                                budget_cny=19, verified_on=PRICE_DATE, now=PRICE_DATE)
+                                                budget_cny=19, verified_on=PRICE_DATE, now=PRICE_DATE,
+                                                model=MODEL, base_url=BASE_URL, price_contract=price_contract())
                 await client.chat.completions.create(model=MODEL,
                     messages=[{"role": "user", "content": "offline"}], **params)
         finally:
@@ -89,22 +91,21 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
                 await client.create(model=MODEL, **args)
         create.assert_not_awaited()
 
-    async def test_unverified_provider_endpoint_model_and_override_not_modified(self):
+    async def test_generic_provider_does_not_infer_qwen_policy_from_model_name(self):
         params = {"model": MODEL, "max_tokens": 50}
-        for resolved in (profile(provider="openai"), profile(base_url="https://proxy.invalid/v1"),
-                         profile(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1/evil"),
-                         profile(model="qwen-unknown")):
+        for resolved in (profile(provider="openai"), profile(provider="custom-provider")):
             create = AsyncMock()
             client = ModelPolicyClient(SimpleNamespace(chat=SimpleNamespace(
                 completions=SimpleNamespace(create=create))), resolved)
             await client.create(**params)
             create.assert_awaited_once_with(**params)
-            self.assertEqual(request_policy(resolved), {})
+            self.assertEqual(request_policy(resolved)["extra_body"], {})
         create = AsyncMock()
         client = ModelPolicyClient(SimpleNamespace(chat=SimpleNamespace(
             completions=SimpleNamespace(create=create))), profile())
-        await client.create(model="other-model", max_tokens=50)
-        create.assert_awaited_once_with(model="other-model", max_tokens=50)
+        with self.assertRaises(ValueError):
+            await client.create(model="other-model", max_tokens=50)
+        create.assert_not_awaited()
 
     async def test_builder_keeps_retry_zero_and_sdk_lifecycle(self):
         with patch("agents.llm_utils.resolve_model", return_value=profile()):
@@ -116,6 +117,55 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
         self.assertTrue(client.is_closed())
+
+    async def test_provider_contract_survives_model_and_workspace_migration(self):
+        for name, endpoint in (("qwen3.8-flash", "https://ws-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"),
+                               ("qwen3.8-max", "https://new-gateway.invalid/v1"),
+                               ("future-configured-model", "https://another.invalid/v1")):
+            create = AsyncMock()
+            with patch.object(config, "LLM_ENABLE_THINKING", False):
+                client = ModelPolicyClient(SimpleNamespace(chat=SimpleNamespace(
+                    completions=SimpleNamespace(create=create))), profile(model=name, base_url=endpoint))
+            await client.create(model=name, max_tokens=64)
+            create.assert_awaited_once_with(model=name, max_completion_tokens=64,
+                                            extra_body={"enable_thinking": False})
+
+    async def test_custom_protocol_is_configuration_only_not_model_adapter_code(self):
+        create = AsyncMock()
+        options = json.dumps({"output_limit": "max_completion_tokens", "extra_body": {},
+                              "omit_parameters": ["temperature", "response_format"]})
+        client = ModelPolicyClient(SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create))), profile(provider="another-provider", request_options=options))
+        await client.create(model=MODEL, max_tokens=100, temperature=0,
+                            response_format={"type": "json_object"})
+        create.assert_awaited_once_with(model=MODEL, max_completion_tokens=100)
+
+    async def test_explicit_empty_body_disables_provider_default_extension(self):
+        create = AsyncMock()
+        client = ModelPolicyClient(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+                                   profile(request_options='{"output_limit":"max_tokens","extra_body":{}}'))
+        await client.create(model=MODEL, max_tokens=100)
+        create.assert_awaited_once_with(model=MODEL, max_tokens=100)
+
+    def test_bad_protocol_config_rejected_before_network_and_body_not_logged(self):
+        for raw in ('not-json', '[]', '{"output_limit":"typo"}', '{"extra_body":{"enable_thinking":"false"}}',
+                    '{"extra_body":{"api_key":"private"}}', '{"model":"other"}',
+                    '{"omit_parameters":["messages"]}', '{"output_limit":{}}', '{"output_limit":null}',
+                    '{"omit_parameters":[{}]}'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError) as captured:
+                request_policy(profile(request_options=raw))
+            self.assertNotIn("private", str(captured.exception))
+
+    def test_role_protocol_invalidates_cache_without_changing_model_name(self):
+        first = request_policy(profile())
+        other = request_policy(profile(request_options='{"output_limit":"max_tokens","extra_body":{}}'))
+        self.assertNotEqual(first, other)
+
+    def test_doctor_reports_bad_role_protocol_as_configuration_not_model_auth(self):
+        from healthcheck import _model_check
+        result = _model_check("offline", profile(request_options='{"unknown":1}'))
+        self.assertEqual(result.status, "missing")
+        self.assertIn("REQUEST_OPTIONS", result.note)
 
     def test_mode_invalidates_all_three_model_checkpoints(self):
         candidate = ParadigmCandidate(key="offline", name="离线样例", thesis="", problem_shift="", mechanism="")

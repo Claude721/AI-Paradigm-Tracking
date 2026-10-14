@@ -1,10 +1,33 @@
 # 有界单路线真实研究验收
 
-## 当前 3 天样本入口（2026-10-14）
+## 当前入口与配置驱动契约
 
 用户已授权最近 3 天真实小样本研究，沿用每次不超过 20 元、最多一条路线、独立状态、无邮件/自动续跑的边界。输入 arxiv_id 或 primary_url 二选一；后者只接受内置官方研究目录中真实链接的单篇文章。必须用原始发布时间落在运行冻结的 72 小时内，并读取一手正文，才调用模型。不会将 HF 收录时间、网页修改时间或旧论文 seed 视为近期发布。HF 原点日期与平台收录日期已分栏保存。
 
-2026-10-14 已重新核对[Qwen 官方容量与价格](https://help.aliyun.com/zh/model-studio/qwen3-7-plus)及[兼容 API 完整输出上限](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)。保守费用仍用每百万输入 6 元、输出 24 元和完整输入容量，不依赖 tokenizer/免费额度；本版只可核验当日执行。初筛读取 SUB，深挖/人物/写作读取 MAIN；两个实际客户端分别核验，共享一个总费用账本与 20 元停止线，不是每层各 20 元。任一实际模型/地址不匹配费用契约就在首次请求前停止，不静默换 API。新模型的付费样本须先核验其价格契约，正式生产不受旧样本价格限制。
+2026-10-14 重核当前 [Qwen 3.8 Flash](https://help.aliyun.com/zh/model-studio/qwen3-8-flash)、[Qwen 3.8 Max](https://help.aliyun.com/zh/model-studio/qwen3-8-max) 及[兼容 API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)。北京原价分别为每百万输入/输出 0.8/2.7 元与 12/36 元；完整输入上限 991808，使用总输出限制与 10 token 误差。运行配置仍从 MAIN/SUB Variables/Secrets 读取，不写入价格代码。
+
+工作流输入 `price_contracts` 为 `{ "sub": {...}, "main": {...} }`。每个对象须且只含以下字段，模型、地址与核验日期必须匹配当前实际配置；其他厂商/模型使用其真实契约值，不套用示例价格。`pricing_verified_on` 为当日 YYYY-MM-DD，不存在代码日历白名单：
+
+```json
+{
+  "model": "qwen3.8-flash",
+  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "input_limit": 991808,
+  "input_price_cny": "0.8",
+  "output_price_cny": "2.7",
+  "output_limit": "max_completion_tokens",
+  "output_tolerance": 10,
+  "response_models": ["qwen3.8-flash"],
+  "verified_on": "填写核验当日 YYYY-MM-DD",
+  "pricing_url": "https://help.aliyun.com/zh/model-studio/qwen3-8-flash",
+  "contract_url": "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions",
+  "completion_includes_reasoning": true
+}
+```
+
+上面是 sub 对象的模板，不是可直接执行的整份输入。使用 workspace 地址时填实际 API 根地址；main 对象填当前 MAIN 模型与官方原价、容量、响应别名。先核验提供方确实按该参数限制思考与回答合计，才能设置 completion_includes_reasoning=true。不存在已核验价格时停止，不能改为无预算调用；正常生产并不要求提供样本价格。
+
+初筛读取 SUB，深挖/人物/写作读取 MAIN。两个实际客户端分别核验，共享一个费用账本/锁/20 元停止线，不是每层各 20 元。每次预留完整输入容量，不依赖 tokenizer、免费额度或缓存折扣；响应有效用量才结算，未知扣费阻断所有角色。`models_only=true` 只各验一次模型，两个原点输入须留空。正常单路线 `identity_requests=0–8` 可保留已有 OPENALEX_API_KEY 做有界人物核验，Tavily/X/Reddit/Semantic Scholar/SMTP 仍隔离，盲区如实记录。
 
 研究与增强沿用 V0 部分来源容错，Rubric、人物、一手 URL 和中文路线质量门不放宽。observe/reject 形成明确的样本判断，不改写为成功空周报；完成判断后才生成 sample_review.md，执行失败只留诊断，绝不生成阶段性 memo。JSON/Markdown 制品明确 production_v0_accepted=false；不调用整周总编，不宣称覆盖所有 3 天信息。
 
@@ -12,7 +35,7 @@
 
 ## 历史验收与费用证据
 
-> 本页的 Qwen 专用费用保护只适用于当时授权的独立单路线测试，不限制正式流水线的模型/API 选择。正式模型可按[配置清单](CONFIGURATION_CHECKLIST.md)替换；新付费验收不能沿用其他提供方或过期价格，也不能据此自动执行。
+> 以下是旧版 Qwen 3.7 费用与隔离契约的历史记录，不是当前模型/价格/身份接口限制。当前使用上文配置驱动契约；新付费验收不能沿用其他提供方或过期价格，也不能据此自动执行。
 
 2026-10-12 授权：最多一条路线，单次人民币 API 总费用不超过 20 元，不发邮件、不自动续跑。独立工作流 `one-route-acceptance.yml` 仅有手动触发，默认不授权；不使用正式工作流的 seed 伪装缩小研究范围，不修改历史任务清单。输入为单个普通论文 arXiv ID、费用上限、官方价格核验日期与 `live_authorized=true`；不接受多条材料或多机制 Technical Report。
 

@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import config
-from agents.llm_utils import resolve_all
+from agents.llm_utils import resolve_all, request_policy
 from paradigms.landscape import load_landscape
 from paradigms.rubric import load_rubric
 
@@ -457,12 +457,17 @@ def _model_check(name, resolved) -> Check:
     endpoint = urlparse(getattr(resolved, "base_url", ""))
     provider_ok = bool(resolved.provider.strip())
     model_ok = bool(resolved.model.strip())
-    endpoint_ok = endpoint.scheme in {"http", "https"} and bool(endpoint.hostname) and not endpoint.username and not endpoint.password
+    endpoint_ok = (endpoint.scheme in {"http", "https"} and bool(endpoint.hostname)
+                   and not endpoint.username and not endpoint.password and not endpoint.query and not endpoint.fragment)
     status = "ready" if provider_ok and not missing and model_ok and endpoint_ok else "missing"
     note = f"{resolved.provider}/{resolved.model}；" + (
         "API 服务商未配置" if not provider_ok else "Key 未配置" if missing else "模型名未配置" if not model_ok else
         "兼容 API Base URL 无效" if not endpoint_ok else "配置完整（连通性及 JSON 质量需 Smoke 验证）"
     )
+    try:
+        request_policy(resolved)
+    except ValueError:
+        status, note = "missing", "角色 REQUEST_OPTIONS 无效；检查配置清单，不输出配置正文"
     return Check(name, "LLM", status, note)
 
 

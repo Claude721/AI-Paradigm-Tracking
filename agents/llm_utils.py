@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
@@ -20,10 +21,6 @@ import config
 logger = logging.getLogger(__name__)
 
 AgentRole = Literal["sub", "main"]
-
-# Only a verified request-policy contract; NEVER a configuration fallback.
-VERIFIED_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-
 
 @dataclass
 class ResolvedModel:
@@ -38,6 +35,7 @@ class ResolvedModel:
     api_key_from: str
     base_url: str
     base_url_from: str
+    request_options: str = ""
 
     @property
     def label(self) -> str:
@@ -58,8 +56,7 @@ class ResolvedModel:
             f"    Base URL : {self.base_url[:40]:15s} ← {self.base_url_from}",
         ]
         policy = request_policy(self)
-        if policy:
-            lines.append(f"    思考模式 : {'开启' if policy['enable_thinking'] else '关闭'}；输出上限约束思考与回答之和")
+        lines.append(f"    输出参数 : {policy['output_limit']}；请求策略来自角色配置/提供方协议，不依赖模型名或地址")
         return lines
 
 
@@ -88,6 +85,7 @@ def resolve_model(role: AgentRole) -> ResolvedModel:
         api_key_from=key_from,
         base_url=base_url,
         base_url_from=source(base_url),
+        request_options=getattr(config, prefix + "_REQUEST_OPTIONS", ""),
     )
 
 
@@ -97,18 +95,43 @@ def resolve_all() -> tuple[ResolvedModel, ResolvedModel]:
 
 
 def request_policy(resolved: ResolvedModel, *, model: str = "") -> dict:
-    """Only verified model/endpoint pairs receive provider-specific options.
+    """Configuration-driven Chat Completions dialect, also a cache identity.
 
-    This value is also part of durable model-result cache identities. Never
-    infer capabilities from a model-name prefix or send Qwen knobs to proxies.
+    Provider is an explicit protocol choice, NOT a price/trust assertion.
+    Model names and endpoint hosts never select business code paths. A new
+    compatible service needs configuration, not a new model allowlist.
     """
-    selected = model or resolved.model
-    if (resolved.provider == "dashscope"
-        and resolved.base_url.rstrip("/") == VERIFIED_DASHSCOPE_BASE_URL
-        and selected in {"qwen3.7-plus", "qwen3.7-plus-2026-05-26"}):
-        return {"version": 1, "enable_thinking": config.LLM_ENABLE_THINKING,
-                "output_limit": "max_completion_tokens"}
-    return {}
+    dashscope = resolved.provider.casefold() == "dashscope"
+    policy = {"version": 2,
+              "output_limit": "max_completion_tokens" if dashscope else "max_tokens",
+              "extra_body": {"enable_thinking": config.LLM_ENABLE_THINKING} if dashscope else {},
+              "omit_parameters": []}
+    raw = getattr(resolved, "request_options", "")
+    if raw:
+        try:
+            options = json.loads(raw)
+        except (ValueError, TypeError):
+            raise ValueError("角色 REQUEST_OPTIONS 必须为有效 JSON 对象") from None
+        if not isinstance(options, dict) or set(options) - {"output_limit", "extra_body", "omit_parameters"}:
+            raise ValueError("角色 REQUEST_OPTIONS 包含未知字段")
+        policy.update(options)
+    if not isinstance(policy["output_limit"], str) or policy["output_limit"] not in {"max_tokens", "max_completion_tokens"}:
+        raise ValueError("角色 REQUEST_OPTIONS.output_limit 无效")
+    body = policy["extra_body"]
+    if not isinstance(body, dict) or any(
+        not isinstance(key, str) or key in {"model", "messages", "max_tokens", "max_completion_tokens",
+        "stream", "tools", "tool_choice", "api_key", "authorization", "response_format"}
+        or any(word in key.casefold() for word in ("secret", "password", "token", "api_key", "authorization"))
+        for key in body
+    ):
+        raise ValueError("角色 REQUEST_OPTIONS.extra_body 无效或包含保留字段/凭据")
+    if "enable_thinking" in body and type(body["enable_thinking"]) is not bool:
+        raise ValueError("enable_thinking 必须为布尔值")
+    omissions = policy["omit_parameters"]
+    if not isinstance(omissions, list) or any(not isinstance(value, str) or value not in {"temperature", "response_format"} for value in omissions):
+        raise ValueError("omit_parameters 只允许 temperature / response_format")
+    policy["omit_parameters"] = sorted(set(omissions))
+    return policy
 
 
 class ModelPolicyClient:
@@ -129,19 +152,25 @@ class ModelPolicyClient:
 
     async def create(self, **kwargs):
         payload = dict(kwargs)
-        if payload.get("model") == self._resolved.model and self._policy:
+        if payload.get("model") != self._resolved.model:
+            raise ValueError("请求模型与本角色配置不一致；请修改角色配置，不在阶段内切换模型")
+        if self._policy:
             body = dict(payload.get("extra_body") or {})
-            mode = self._policy["enable_thinking"]
-            if "enable_thinking" in body and body["enable_thinking"] != mode:
-                raise ValueError("请求思考模式与已解析配置不一致")
-            body["enable_thinking"] = mode
-            payload["extra_body"] = body
-            if "max_tokens" in payload:
-                maximum = payload.pop("max_tokens")
-                if ("max_completion_tokens" in payload
-                    and payload["max_completion_tokens"] != maximum):
+            configured = self._policy["extra_body"]
+            if any(key in body and body[key] != value for key, value in configured.items()):
+                raise ValueError("请求参数与本角色 REQUEST_OPTIONS 配置冲突")
+            body.update(configured)
+            if body:
+                payload["extra_body"] = body
+            values = [payload.pop(key) for key in ("max_tokens", "max_completion_tokens") if key in payload]
+            if values:
+                if any(value != values[0] for value in values):
                     raise ValueError("请求包含冲突的输出上限")
-                payload["max_completion_tokens"] = maximum
+                if type(values[0]) is not int or values[0] < 1:
+                    raise ValueError("输出上限必须为正整数")
+                payload[self._policy["output_limit"]] = values[0]
+            for key in self._policy["omit_parameters"]:
+                payload.pop(key, None)
         return await self._client.chat.completions.create(**payload)
 
 
@@ -159,6 +188,11 @@ def build_client(
         if not value or value == "placeholder"]
     if missing:
         raise ValueError("本角色模型配置缺失：" + "、".join(missing))
+    endpoint = urlparse(resolved.base_url)
+    if (endpoint.scheme not in {"http", "https"} or not endpoint.hostname
+        or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment):
+        raise ValueError("本角色 BASE_URL 必须是无凭据、查询或片段的 API 根地址")
+    request_policy(resolved)  # Validate before allocating a network client.
     logger.info(f"初始化 LLM 客户端: {resolved.label} (role={role})")
     client = AsyncOpenAI(
         base_url=resolved.base_url,

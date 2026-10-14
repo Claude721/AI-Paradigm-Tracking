@@ -103,8 +103,7 @@ PARADIGM_RUBRIC_PATH = (
 )
 
 # ── 共享请求策略（不是模型身份或密钥 fallback） ──────────
-# Explicit mode for the verified official Qwen endpoint, not a generic
-# provider parameter. Default bounded JSON work does not spend on reasoning.
+# Shared default for DashScope's Chat Completions protocol, not model identity.
 LLM_ENABLE_THINKING: bool = _env_bool("LLM_ENABLE_THINKING", False)
 LLM_REQUEST_TIMEOUT_SECONDS: int = max(
     30,
@@ -122,12 +121,14 @@ SUB_AGENT_PROVIDER: str = os.getenv("SUB_AGENT_PROVIDER", "")
 SUB_AGENT_MODEL: str = os.getenv("SUB_AGENT_MODEL", "")
 SUB_AGENT_LLM_API_KEY: str = os.getenv("SUB_AGENT_LLM_API_KEY", "")
 SUB_AGENT_BASE_URL: str = os.getenv("SUB_AGENT_BASE_URL", "")
+SUB_AGENT_REQUEST_OPTIONS: str = os.getenv("SUB_AGENT_REQUEST_OPTIONS", "")
 
 # ── 主 Agent 独立配置（深挖/人物/报告） ───────────────────
 MAIN_AGENT_PROVIDER: str = os.getenv("MAIN_AGENT_PROVIDER", "")
 MAIN_AGENT_MODEL: str = os.getenv("MAIN_AGENT_MODEL", "")
 MAIN_AGENT_LLM_API_KEY: str = os.getenv("MAIN_AGENT_LLM_API_KEY", "")
 MAIN_AGENT_BASE_URL: str = os.getenv("MAIN_AGENT_BASE_URL", "")
+MAIN_AGENT_REQUEST_OPTIONS: str = os.getenv("MAIN_AGENT_REQUEST_OPTIONS", "")
 
 # Triage 阶段的分数阈值（>= 此分数才进入深度分析）
 TRIAGE_THRESHOLD: int = _env_int("TRIAGE_THRESHOLD", 5)

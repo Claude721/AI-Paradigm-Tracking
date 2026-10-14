@@ -56,7 +56,7 @@ class OpenAlexContractTests(unittest.IsolatedAsyncioTestCase):
             await OpenAlexSource(searches=['"world model"']).fetch()
         with patch.object(config, "OPENALEX_API_KEY", "offline-credential"):
             async with ASYNC_CLIENT(transport=transport) as client:
-                await ResearcherProfileClient._openalex_get(client, "https://api.openalex.org/authors", params={"search": "Known Researcher"})
+                await ResearcherProfileClient()._openalex_get(client, "https://api.openalex.org/authors", params={"search": "Known Researcher"})
         self.assertEqual(len(calls), 2)
 
     async def test_long_retry_after_is_not_shortened_or_retried(self):

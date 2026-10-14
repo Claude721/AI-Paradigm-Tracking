@@ -35,9 +35,11 @@ ORCID_BASE = "https://pub.orcid.org/v3.0"
 class ResearcherProfileClient:
     """只接收可回溯的公开资料；身份无法与当前论文对齐时不强行合并。"""
 
-    def __init__(self, concurrency: int = 3):
+    def __init__(self, concurrency: int = 3, *, openalex_request_limit: int | None = None):
         self.concurrency = max(concurrency, 1)
         self._semaphore = asyncio.Semaphore(self.concurrency)
+        self.openalex_request_limit = openalex_request_limit
+        self.openalex_request_count = 0
 
     async def enrich(
         self,
@@ -256,10 +258,13 @@ class ResearcherProfileClient:
             for work in response.json().get("results", [])
         )
 
-    @staticmethod
-    async def _openalex_get(client, url, *, params):
+    async def _openalex_get(self, client, url, *, params):
         # Never put a production Secret in URLs, exception text or redirected
         # requests. ORCID/homepage requests do not inherit this header.
+        if (self.openalex_request_limit is not None
+            and self.openalex_request_count >= self.openalex_request_limit):
+            raise RuntimeError("OpenAlex 有界身份查询上限已到；不继续发请求")
+        self.openalex_request_count += 1  # Before await: shared by concurrent people.
         return await client.get(url, params=params,
             headers={"Authorization": f"Bearer {config.OPENALEX_API_KEY}"}, follow_redirects=False)
 

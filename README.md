@@ -73,7 +73,7 @@ MAIN：路线综合、人物轨迹、中文起草与总编
 
 两套配置不继承全局、不互相借用、不猜测厂商默认模型；缺项会在模型调用前明确报错。可以使用同一模型和同一 Key，也可以用便宜的初筛模型加更强的研究模型。换某层时一起核对该层提供方、模型、地址和 Key，不用修改代码或重置数据库。
 
-模型不限 Qwen，但接口须支持 Chat Completions 与完整 JSON。`BASE_URL` 不填 `/chat/completions` 完整路径，也不夹带密钥。旧全局 `LLM_PROVIDER`、`LLM_MODEL`、`LLM_BASE_URL`、`LLM_API_KEY`、`DASHSCOPE_API_KEY` 以及旧角色 `*_API_KEY` 已不再读取。
+模型不限 Qwen，但接口须兼容 Chat Completions 并返回完整 JSON；不直接支持厂商原生 Messages/其他不兼容协议。`BASE_URL` 不填 `/chat/completions` 完整路径，也不夹带密钥。请求策略不绑定模型名、固定地址或日期：`dashscope` 选择显式思考模式与 `max_completion_tokens`，其他提供方默认标准 `max_tokens`。特殊接口只需设置该层可选 `SUB_AGENT_REQUEST_OPTIONS` / `MAIN_AGENT_REQUEST_OPTIONS` JSON，覆盖输出参数、额外请求体或不支持的参数，无需改研究代码。用法见[配置清单](docs/CONFIGURATION_CHECKLIST.md)。旧全局 `LLM_PROVIDER`、`LLM_MODEL`、`LLM_BASE_URL`、`LLM_API_KEY`、`DASHSCOPE_API_KEY` 以及旧角色 `*_API_KEY` 已不再读取。
 
 ### 信源与邮件
 
@@ -115,7 +115,7 @@ MAIN：路线综合、人物轨迹、中文起草与总编
 
 `TAVILY_SOCIAL_SEARCH_ENABLED=false` 关闭 Tavily；`TAVILY_DISCOVERY_DOMAINS` 限制正式搜索域名，留空不限制。`TAVILY_SOCIAL_SEARCH_DOMAINS` 只供 Smoke 样本，两者不是重复字段。未知用量不搜索/不退款，账本不能限制同账户其他客户端，也不能替代供应商 PAYG/账户硬限额。
 
-并发、批次、额外安全熔断、Rubric 路径及名单追加属于高级配置，通常无需调整。`LLM_ENABLE_THINKING` 只作用于代码中已核验的官方 Qwen 请求契约；不是对任意模型都生效的通用开关。默认值与作用范围详见[配置清单](docs/CONFIGURATION_CHECKLIST.md)。
+并发、批次、额外安全熔断、Rubric 路径及名单追加属于高级配置，通常无需调整。`LLM_ENABLE_THINKING` 是 DashScope 协议的默认模式，不按模型 ID 或 URL 判定；不是对所有厂商的通用开关，角色请求选项可独立覆盖。默认值与作用范围详见[配置清单](docs/CONFIGURATION_CHECKLIST.md)。
 
 ## 5. 工作流如何使用
 
@@ -132,7 +132,7 @@ MAIN：路线综合、人物轨迹、中文起草与总编
 | `seed_arxiv_ids` | 临时精确材料可见性，不绕过技术和承接门槛 |
 | `resume_campaign_id` | 只恢复指定固定计划，不启动新发现；须关闭 Smoke，不能重置 |
 
-独立 [one-route-acceptance.yml](.github/workflows/one-route-acceptance.yml) 才是无邮件、无生产状态的单路线真实样本，默认 3 天、两层合计最多 20 元。它仍使用已核验的特定模型/地域/日期价格契约；换模型后先更新对应价格保护，不能用旧 Qwen 价格测试新模型。
+独立 [one-route-acceptance.yml](.github/workflows/one-route-acceptance.yml) 是无邮件、无生产状态的单路线真实样本，默认 3 天、两层合计最多 20 元。`models_only=true` 可先只验两层模型。价格由 `price_contracts` 输入的两角色 JSON 契约提供，不在代码里绑定厂商、模型、地址或日历；换模型只需更新已核验价格数据，不能套用旧价格。单路线可显式允许最多 8 次 OpenAlex 身份查询，其他收费平台仍隔离。见[样本指南](docs/ONE_ROUTE_ACCEPTANCE.md)。
 
 信源子集接口检查与更多操作说明见[云端指南](docs/CLOUD_AUTOMATION.md)。不要把一次 Smoke、一个入口 passed 或 Workflow success 当成研究质量/完整生产验收。
 

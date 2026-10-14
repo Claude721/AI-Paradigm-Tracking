@@ -377,21 +377,23 @@ async def _check(
         )
 
 
-async def _check_models() -> list[SmokeResult]:
+async def _check_models(*, client_factory=None) -> list[SmokeResult]:
     results = []
     # Same model name does not prove the second role's endpoint/key works.
     # The credential stays only in this in-memory identity, never diagnostics.
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple] = set()
     for role, resolved in zip(("sub", "main"), resolve_all()):
-        identity = (resolved.provider, resolved.model, resolved.base_url.rstrip("/"), resolved.api_key)
+        identity = (resolved.provider, resolved.model, resolved.base_url.rstrip("/"), resolved.api_key,
+                    getattr(resolved, "request_options", ""))
         if identity in seen:
             results.append(_skipped(f"研究模型 {role}", f"与另一角色共用 {resolved.label}，不重复计费"))
             continue
         seen.add(identity)
         started = time.monotonic()
         receipt = {"reported": False}
+        client = None
         try:
-            client, model = build_client(role)
+            client, model = (client_factory or build_client)(role)
             response = await asyncio.wait_for(
                 client.chat.completions.create(
                     model=model,
@@ -436,6 +438,9 @@ async def _check_models() -> list[SmokeResult]:
                     usage=receipt,
                 )
             )
+        finally:
+            if client_factory is None and client is not None and hasattr(client, "close"):
+                await client.close()
     return results
 
 

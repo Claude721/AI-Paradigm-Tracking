@@ -47,6 +47,7 @@
 - 信源变化需要同步 `信源说明.md`；配置变化需要同步 `.env.example` 与 `docs/CONFIGURATION_CHECKLIST.md`。
 - GitHub Actions 或邮件语义变化需要同步 `docs/CLOUD_AUTOMATION.md`。
 - MAIN/SUB 的提供方、模型、地址与 Key 必须独立配置，不恢复全局或跨角色 fallback；Key 名称为 `SUB_AGENT_LLM_API_KEY` / `MAIN_AGENT_LLM_API_KEY`。
+- 兼容模型的请求协议与验收价格用配置/数据描述，不新增模型名、固定地址或日历白名单；模式/参数变化须进入模型缓存身份。费用未知保留预留并停止，不能为换模型绕过预算。
 - 云端配置只有 Workflow 显式映射才生效；删除/迁移旧参数时保留有效费用限制，不把本地调度参数写成 GitHub cron 配置。
 
 ## 本地验证
