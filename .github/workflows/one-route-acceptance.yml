@@ -50,9 +50,9 @@ jobs:
     timeout-minutes: 25
     env:
       AI_RADAR_SKIP_DOTENV: "true"
-      LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'dashscope' }}
-      LLM_MODEL: ${{ vars.LLM_MODEL || 'qwen3.7-plus' }}
-      LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1' }}
+      LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.DASHSCOPE_API_KEY }}
       LLM_ENABLE_THINKING: "false"
       GITHUB_TOKEN: ${{ github.token }}
@@ -74,6 +74,14 @@ jobs:
           cache: pip
       - name: 记录本轮执行代码版本
         run: python -m runtime_provenance
+      - name: 校验模型 Variables
+        run: |
+          for variable in LLM_PROVIDER LLM_MODEL LLM_BASE_URL; do
+            if [ -z "${!variable}" ]; then
+              echo "::error::请在 Settings → Secrets and variables → Actions → Variables 配置 $variable；API Key 仍放 Secrets。"
+              exit 1
+            fi
+          done
       - name: 安装依赖
         run: python -m pip install -r requirements.txt
       - name: 离线发布门（禁止网络、模型和邮件）

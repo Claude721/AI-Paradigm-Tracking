@@ -65,9 +65,9 @@ jobs:
     timeout-minutes: 90
     env:
       PIPELINE_MODE: paradigm
-      LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'dashscope' }}
-      LLM_MODEL: ${{ vars.LLM_MODEL || 'qwen3.7-plus' }}
-      LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1' }}
+      LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.DASHSCOPE_API_KEY }}
       LLM_REQUEST_TIMEOUT_SECONDS: ${{ vars.LLM_REQUEST_TIMEOUT_SECONDS || '180' }}
       LLM_ENABLE_THINKING: ${{ vars.LLM_ENABLE_THINKING || 'false' }}
@@ -204,6 +204,12 @@ jobs:
         run: |
           mkdir -p logs
           set -o pipefail
+          for variable in LLM_PROVIDER LLM_MODEL LLM_BASE_URL; do
+            if [ -z "${!variable}" ]; then
+              echo "::error::请在 Settings → Secrets and variables → Actions → Variables 配置 $variable；API Key 仍放 Secrets。"
+              exit 1
+            fi
+          done
           python main.py --doctor 2>&1 | tee logs/doctor.log
 
       - name: 恢复上一次去重状态

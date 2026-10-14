@@ -31,20 +31,24 @@ MAIN_AGENT_BASE_URL=
 MAIN_AGENT_API_KEY=
 ```
 
-Qwen 是兼容默认值，不是准入要求。可以填写其他提供方/代理的实际模型 ID、兼容地址和 Key；不支持 Chat Completions 或不能稳定输出完整 JSON 的接口需要更换/适配，不靠品牌名字判断能力。角色字段逐项继承全局，切换角色提供方时一起覆盖模型、地址、Key，防止旧地址与新 Key 混用。
+上面的 Qwen 是示例，不是准入要求。可以填写其他提供方/代理的实际模型 ID、兼容地址和 Key；不支持 Chat Completions 或不能稳定输出完整 JSON 的接口需要更换/适配，不靠品牌名字判断能力。LLM_PROVIDER 是 API 服务商标签（阿里云为 dashscope），不是必须写模型开发商；其他兼容服务商也可以使用其实际标签。LLM_BASE_URL 填 SDK 接口根地址，不含 /chat/completions 路径或密钥。角色字段逐项继承全局，切换角色提供方时一起覆盖模型、地址、Key，防止旧地址与新 Key 混用。
 
 Actions 对应：
 
 | 类型 | 名称 | 说明 |
 |---|---|---|
-| Variables | LLM_PROVIDER / LLM_MODEL / LLM_BASE_URL | 留空仍兼容当前 DashScope 配置 |
+| Variable | LLM_PROVIDER | 必填，当前为 dashscope（阿里云百炼） |
+| Variable | LLM_MODEL | 必填，当前为 qwen3.7-plus |
+| Variable | LLM_BASE_URL | 必填，当前为 https://dashscope.aliyuncs.com/compatible-mode/v1 |
 | Secret | LLM_API_KEY | 通用模型 Key；留空回退已有 DASHSCOPE_API_KEY |
 | Variables | SUB_AGENT_PROVIDER / MODEL / BASE_URL | 可选，留空继承全局 |
 | Secret | SUB_AGENT_API_KEY | 可选，留空继承全局 |
 | Variables | MAIN_AGENT_PROVIDER / MODEL / BASE_URL | 可选，留空继承全局 |
 | Secret | MAIN_AGENT_API_KEY | 可选，留空继承全局 |
 
-表中的角色缩写分别表示 SUB_AGENT_MODEL、SUB_AGENT_BASE_URL、MAIN_AGENT_MODEL、MAIN_AGENT_BASE_URL。换全局模型时清空不需要的角色覆盖。不要为了换模型同时重置所有信源 Key。
+设置路径：仓库 Settings → Secrets and variables → Actions → Variables → Repository variables。正式/Smoke 与单路线工作流均直接读取这三个全局 Variables；缺失时在调用模型前明确失败，不静默回退旧模型。source_check_only 不调用模型，因此不要求这三个字段。
+
+表中的角色缩写分别表示 SUB_AGENT_MODEL、SUB_AGENT_BASE_URL、MAIN_AGENT_MODEL、MAIN_AGENT_BASE_URL。换模型时改三个全局 Variables，并在 Secrets 更新 LLM_API_KEY；现有阿里云 Key 无需搬迁，仍兼容 DASHSCOPE_API_KEY。若同时存在两者，LLM_API_KEY 优先。清空不需要的角色 Variables **及角色 API Key Secrets**，否则角色专属值仍优先；没有角色覆盖时，初筛、深挖和写作一起继承全局。不必修改代码，也不要为换模型重置所有信源 Key。
 
 Doctor 只核对配置完整、URL 格式和范围，不再限制 qwen3.7。Smoke 才验证真实连接和响应；同 provider/model/url/Key 才共用角色检查。未知模型/代理不会收到猜测的 Qwen 参数。已核验官方 Qwen 配置使用显式非思考与总输出限制，历史证据见 [模型复核](RUN_38238493094_MODEL_REVIEW.md)。
 

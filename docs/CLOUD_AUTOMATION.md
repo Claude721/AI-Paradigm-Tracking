@@ -26,9 +26,10 @@ weekly-radar.yml 每周五 09:15（Asia/Shanghai）运行，Ubuntu / Python 3.12
 
 Settings → Secrets and variables → Actions：
 
-- 模型 Variables：LLM_PROVIDER、LLM_MODEL、LLM_BASE_URL。通用 Secret：LLM_API_KEY，留空兼容 DASHSCOPE_API_KEY。
+- 模型 Repository Variables 必填：LLM_PROVIDER（当前 dashscope）、LLM_MODEL（当前 qwen3.7-plus）、LLM_BASE_URL（当前 https://dashscope.aliyuncs.com/compatible-mode/v1）。正式/Smoke 与单路线工作流直接读取，无硬编码兜底；缺失时调用模型前明确报配置错误。纯信源检查不要求模型配置。
+- 通用 Secret：LLM_API_KEY，留空兼容 DASHSCOPE_API_KEY；两者同时存在时前者优先。API Key 不放 Variables。
 - 角色覆盖：SUB_AGENT_PROVIDER/MODEL/BASE_URL 与 MAIN_AGENT_PROVIDER/MODEL/BASE_URL（均使用完整角色前缀）；对应 SUB_AGENT_API_KEY、MAIN_AGENT_API_KEY Secrets 可选。
-- 不覆盖角色就全部留空继承全局。换提供方同时核对模型、地址、Key，不限 Qwen。
+- 不覆盖角色就把角色 Variables 和角色 API Key Secrets 全部留空继承全局。换提供方修改三个全局 Variables 与对应 Secret，无需改代码；同时核对模型、地址、Key，不限 Qwen。地址填兼容 API 根地址，不是 /chat/completions 完整路径。
 - 推荐 OPENALEX_API_KEY；GITHUB_TOKEN 自动取 github.token，不另建同名 Secret。
 - SMTP_USERNAME、SMTP_PASSWORD、SMTP_TO Secrets；现有 QQ SSL 发送路径不变。
 - X、未批准 Reddit、未批准 Semantic Scholar 保持关闭，不为 V0 新增付费平台。
