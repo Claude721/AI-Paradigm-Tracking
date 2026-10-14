@@ -1,19 +1,33 @@
-name: 单路线真实研究验收（最多20元，无邮件）
+name: 窗口内单路线真实研究验收（最多20元，无邮件）
 
 on:
   workflow_dispatch:
     inputs:
       arxiv_id:
         description: 单个普通论文 arXiv ID（不接受 Technical Report 或多条材料）
-        required: true
+        required: false
+        default: ""
         type: string
+      primary_url:
+        description: 或选一条已登记官方研究目录中的文章 URL（与 arxiv_id 二选一）
+        required: false
+        default: ""
+        type: string
+      lookback_days:
+        description: 按原始发布时间验证样本窗口；不是索引收录/修改时间
+        required: true
+        default: "3"
+        type: choice
+        options:
+          - "3"
+          - "7"
       budget_cny:
         description: 本次人民币 API 总费用上限（大于0、不超过20）
         required: true
         default: "20"
         type: string
       pricing_verified_on:
-        description: 已人工核验的官方价格日期；本版仅接受2026-10-12且只可当日执行
+        description: 已人工核验的官方价格日期；本版仅接受2026-10-14且只可当日执行
         required: true
         type: string
       live_authorized:
@@ -36,37 +50,57 @@ jobs:
     timeout-minutes: 25
     env:
       AI_RADAR_SKIP_DOTENV: "true"
-      LLM_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'dashscope' }}
+      LLM_MODEL: ${{ vars.LLM_MODEL || 'qwen3.7-plus' }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1' }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.DASHSCOPE_API_KEY }}
       LLM_ENABLE_THINKING: "false"
       GITHUB_TOKEN: ${{ github.token }}
       EMAIL_PUSH_ENABLED: "false"
       EMAIL_PUSH_REQUIRED: "false"
       PARADIGM_AUTO_RESUME_ENABLED: "false"
       SAMPLE_ARXIV_ID: ${{ inputs.arxiv_id }}
+      SAMPLE_PRIMARY_URL: ${{ inputs.primary_url }}
+      SAMPLE_LOOKBACK_DAYS: ${{ inputs.lookback_days }}
       SAMPLE_BUDGET_CNY: ${{ inputs.budget_cny }}
       SAMPLE_PRICING_DATE: ${{ inputs.pricing_verified_on }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
+      - name: 记录本轮执行代码版本
+        run: python -m runtime_provenance
       - name: 安装依赖
         run: python -m pip install -r requirements.txt
       - name: 离线发布门（禁止网络、模型和邮件）
         run: python scripts/offline_checks.py
       - name: 本次授权的一条路线（不调用主流程）
-        run: >-
-          python scripts/one_route_check.py --live-authorized
-          --arxiv-id "$SAMPLE_ARXIV_ID" --budget-cny "$SAMPLE_BUDGET_CNY"
-          --pricing-verified-on "$SAMPLE_PRICING_DATE"
+        run: |
+          selection=()
+          if [ -n "$SAMPLE_ARXIV_ID" ] && [ -z "$SAMPLE_PRIMARY_URL" ]; then
+            selection=(--arxiv-id "$SAMPLE_ARXIV_ID")
+          elif [ -n "$SAMPLE_PRIMARY_URL" ] && [ -z "$SAMPLE_ARXIV_ID" ]; then
+            selection=(--primary-url "$SAMPLE_PRIMARY_URL")
+          else
+            echo "必须且只能指定一条原点材料"
+            exit 1
+          fi
+          python scripts/one_route_check.py --live-authorized "${selection[@]}" \
+            --lookback-days "$SAMPLE_LOOKBACK_DAYS" --budget-cny "$SAMPLE_BUDGET_CNY" \
+            --pricing-verified-on "$SAMPLE_PRICING_DATE"
       - name: 保存验收与费用证据（不上传临时数据库）
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: paradigm-radar-one-route-${{ github.run_id }}
           path: |
             logs/one_route/*.json
             logs/one_route/*.md
             logs/offline_checks.json
+            logs/offline_checks.log
+            logs/runtime_provenance.json
           retention-days: 14

@@ -48,7 +48,7 @@ Actions 对应：
 
 Doctor 只核对配置完整、URL 格式和范围，不再限制 qwen3.7。Smoke 才验证真实连接和响应；同 provider/model/url/Key 才共用角色检查。未知模型/代理不会收到猜测的 Qwen 参数。已核验官方 Qwen 配置使用显式非思考与总输出限制，历史证据见 [模型复核](RUN_38238493094_MODEL_REVIEW.md)。
 
-独立 one-route-acceptance.yml 仍有专门的单路线、20 元内、核验当日 Qwen 价格保护；它不是通用生产模型限制。换模型后不要直接复用旧价格执行该测试，见 [单路线说明](ONE_ROUTE_ACCEPTANCE.md)。
+独立 one-route-acceptance.yml 默认 3 天、单材料/单路线、20 元内、核验当日 Qwen 价格保护；输入 arxiv_id 或 primary_url 二选一，并核对原始发布时间，不回溯旧样本。测试模型继承全局配置，但价格契约不匹配时停止；它不是通用生产模型限制。无邮件/生产状态，换模型后不要直接复用旧价格执行该测试，见 [单路线说明](ONE_ROUTE_ACCEPTANCE.md)。
 
 ## 研究量与取材
 

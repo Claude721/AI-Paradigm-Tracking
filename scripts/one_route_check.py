@@ -1,4 +1,4 @@
-"""Explicitly authorized, isolated one-paper/one-route real-model acceptance.
+"""Explicitly authorized, isolated recent-primary/one-route real acceptance.
 
 Never calls main/discovery/full workflow, restores production state, dispatches
 continuations, creates an outbox or imports the email sender. Artifacts are test
@@ -14,8 +14,9 @@ import re
 import sys
 import tempfile
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -33,11 +34,56 @@ def isolate_environment():
         "EMAIL_PUSH_REQUIRED": "false", "PARADIGM_AUTO_RESUME_ENABLED": "false",
         "KOL_X_SOURCE_ENABLED": "false", "TAVILY_SOCIAL_SEARCH_ENABLED": "false",
         "SEMANTIC_SCHOLAR_ENABLED": "false", "REDDIT_API_ACCESS_APPROVED": "false",
-        "LLM_PROVIDER": "dashscope", "LLM_MODEL": MODEL, "LLM_BASE_URL": BASE_URL,
         "LLM_ENABLE_THINKING": "false"})
+    for key, value in {"LLM_PROVIDER": "dashscope", "LLM_MODEL": MODEL, "LLM_BASE_URL": BASE_URL}.items():
+        os.environ.setdefault(key, value)
 
 
-async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, reference_time=None):
+def _require_recent_primary(origin, now, lookback_days):
+    from paradigms.models import _evidence_datetime
+    published = _evidence_datetime(origin.published_at)
+    if not published or not now - timedelta(days=lookback_days) <= published <= now:
+        raise ValueError("原始发布时间不在授权窗口，或无法核验；不支付模型、不回溯旧样本")
+
+
+async def _official_origin(url, now, lookback_days):
+    """One registered index + one linked article; never arbitrary URL input."""
+    import httpx
+    from research_watchlist import RESEARCH_SOURCES
+    from sources.document_limits import bounded_document_get
+    from sources.priority_research_source import (
+        PriorityResearchPageSource, _discover_index_links,
+    )
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.port not in {None, 443}:
+        raise ValueError("样本只能使用稳定的已登记官方 HTTPS 研究文章 URL")
+    index = next((record["url"] for record in RESEARCH_SOURCES
+                  if urlparse(record["url"]).hostname == parsed.hostname
+                  and parsed.path.startswith(urlparse(record["url"]).path.rstrip("/") + "/")), "")
+    if not index:
+        raise ValueError("文章不属于已登记官方研究目录；不猜测发布者身份")
+    async with httpx.AsyncClient(timeout=35, follow_redirects=False) as client:
+        response = await bounded_document_get(client, index)
+        response.raise_for_status()
+        links = _discover_index_links(response.text, index)
+        link = next((value for value in links if value.url == url and not value.fetch_url and not value.body_hint), None)
+        if link is None:
+            raise ValueError("官方索引未包含本次材料；不猜测或拼接原文链接")
+        response = await bounded_document_get(client, url)
+        response.raise_for_status()
+    source = PriorityResearchPageSource(pages=[index], lookback_days=lookback_days)
+    source.page_coverage[index] = {"detail_failures": 0, "detail_parsed": 0, "detail_outside_window": 0}
+    origin = source._parse_detail(index, link, response, now - timedelta(days=lookback_days), {})
+    if origin is None or origin.url != url:
+        raise ValueError("官方正文、原始日期或输入身份未通过生产解析契约")
+    _require_recent_primary(origin, now, lookback_days)
+    origin.raw["document_excerpt"] = origin.summary
+    origin.raw["document_source_url"] = origin.url
+    return origin
+
+
+async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, reference_time=None,
+                     lookback_days=3, primary_url=""):
     # Late imports ensure .env/production configuration cannot influence this
     # explicitly isolated test. Use real stage implementations, never mocks.
     import httpx
@@ -55,15 +101,21 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
 
     now = reference_time or datetime.now(timezone.utc)
     result["reference_time"] = now.isoformat()
-    with research_window(now, lookback_days=7):
-        source = ArxivSource(seed_arxiv_ids=[arxiv_id])
-        async with httpx.AsyncClient(timeout=35) as client:
-            rows = await source._fetch_seed_ids(client, [arxiv_id])
-        if len(rows) != 1:
-            raise ValueError("精确原点输入身份/基数未闭合")
-        origin = _raw_to_origin(rows[0])
-        if origin.identifiers.get("arxiv") != arxiv_id:
-            raise ValueError("返回了非本次授权材料")
+    result["lookback_days"] = lookback_days
+    result["window_start"] = (now - timedelta(days=lookback_days)).isoformat()
+    with research_window(now, lookback_days=lookback_days):
+        if primary_url:
+            origin = await _official_origin(primary_url, now, lookback_days)
+        else:
+            source = ArxivSource(seed_arxiv_ids=[arxiv_id], reference_time=now)
+            async with httpx.AsyncClient(timeout=35) as client:
+                rows = await source._fetch_seed_ids(client, [arxiv_id])
+            if len(rows) != 1:
+                raise ValueError("精确原点输入身份/基数未闭合")
+            origin = _raw_to_origin(rows[0])
+            if origin.identifiers.get("arxiv") != arxiv_id:
+                raise ValueError("返回了非本次授权材料")
+        _require_recent_primary(origin, now, lookback_days)
         result["primary"] = {"title": origin.title, "url": origin.url,
                              "published_at": origin.published_at}
         if origin.raw.get("origin_kind") == "technical_report":
@@ -82,6 +134,7 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
         if len(values) != 1 or values[0].evidence.fingerprint != origins[0].fingerprint:
             raise ValueError("模型返回多个机制或不匹配原点，停止而非截断")
         extraction = values[0]
+        result["screening_explanation"] = getattr(extraction, "technical_explanation", "")
         result["screening_decision"] = extraction.rubric_assessment.get("decision")
         result["screening_reason"] = extraction.rubric_assessment.get("decision_reason", "")
         if result["screening_decision"] not in {"deep_dive", "observe", "reject"}:
@@ -97,8 +150,10 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
         candidate.status = "pending_deep"
         store.save_candidates(candidates)
         orchestrator = ParadigmOrchestrator.__new__(ParadigmOrchestrator)
+        orchestrator.delivery_contract_version = 2
         orchestrator.store, orchestrator.deep_concurrency = store, 1
         orchestrator.enricher = EvidenceEnricher(concurrency=1, budget_store=store.provider_budgets)
+        orchestrator.enricher.allow_partial_sources = True
         orchestrator.synthesizer = ParadigmSynthesizer(concurrency=1, client=guarded, model=MODEL)
         orchestrator.trajectory = ResearcherTrajectoryAnalyzer(concurrency=1, client=guarded,
                                                             model=MODEL, stage_cache=store.campaigns)
@@ -128,7 +183,8 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
             result["input_violations"] = violations
             raise ValueError("单路线写作输入未闭合")
         generator = ParadigmReportGenerator(output_dir=directory, client=guarded, model=MODEL)
-        draft = await generator._draft_one_route(now.date().isoformat(), candidate, index=1, total=1)
+        from runtime_clock import scheduled_date
+        draft = await generator._draft_one_route(scheduled_date(now), candidate, index=1, total=1)
         # The actual production route-quality gate has run. Deliberately avoid
         # generate(): a one-route sample has NO weekly-wide coverage proof.
         result["route_test_draft"] = draft
@@ -161,6 +217,7 @@ async def execute(args):
     directory = Path("logs/one_route")
     directory.mkdir(parents=True, exist_ok=True)
     result = {"status": "failed", "runtime": runtime_provenance(), "arxiv_id": args.arxiv_id,
+              "primary_url": args.primary_url,
               "authorization": "最多一条路线；20 元内；无邮件、生产状态或自动续跑",
               "production_v0_accepted": False}
     result["model_request_policy"] = request_policy(resolve_model("sub"))
@@ -170,7 +227,8 @@ async def execute(args):
                                     verified_on=date.fromisoformat(args.pricing_verified_on), model=model)
         try:
             with tempfile.TemporaryDirectory(prefix="radar-one-route-") as temporary:
-                await asyncio.wait_for(run_sample(args.arxiv_id, guarded, Path(temporary), result), 1200)
+                await asyncio.wait_for(run_sample(args.arxiv_id, guarded, Path(temporary), result,
+                    primary_url=args.primary_url, lookback_days=args.lookback_days), 1200)
         except Exception as exc:
             result["error_type"] = type(exc).__name__
             # Do not persist HTTP/SDK exception bodies or credentials.
@@ -181,6 +239,8 @@ async def execute(args):
             (directory / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             run_audit.write({"sample_only": True, "production_v0_accepted": False},
                             status=result["status"], output_dir=directory)
+            if result["status"] != "failed":
+                _write_sample_review(result, directory)
         print(json.dumps({key: result.get(key) for key in ("status", "error_type", "screening_decision", "route_decision")}, ensure_ascii=False))
         print(json.dumps({"request_count": len(guarded.calls), "accounted_upper_cny": str(guarded.spent), "usage_unknown": guarded.unknown}, ensure_ascii=False))
         return 0 if result["status"] != "failed" else 1
@@ -190,14 +250,42 @@ async def execute(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arxiv-id", required=True)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--arxiv-id", default="")
+    selection.add_argument("--primary-url", default="")
+    parser.add_argument("--lookback-days", type=int, choices=(3, 7), default=3)
     parser.add_argument("--budget-cny", required=True)
     parser.add_argument("--pricing-verified-on", required=True)
     parser.add_argument("--live-authorized", action="store_true")
     args = parser.parse_args(argv)
-    if not args.live_authorized or not re.fullmatch(r"\d{4}\.\d{4,5}", args.arxiv_id):
-        parser.error("须明确授权真实模型并提供单个无版本 arXiv ID")
+    if not args.live_authorized or (args.arxiv_id and not re.fullmatch(r"\d{4}\.\d{4,5}", args.arxiv_id)):
+        parser.error("须明确授权并提供单个无版本 arXiv ID 或官方文章 URL")
     return asyncio.run(execute(args))
+
+
+def _write_sample_review(result, directory):
+    """Completed sample verdict, never a pending/phase memo or empty week report."""
+    primary = result["primary"]
+    decision = result.get("route_decision") or result.get("screening_decision")
+    label = {"report": "符合路线准入", "observe": "保留观察，不作为新路线交付",
+             "reject": "不符合路线准入"}.get(decision)
+    if not label or result.get("status") not in {"screening_closed", "route_judgment_closed", "route_quality_passed"}:
+        raise ValueError("未完成样本判断，不能生成研究结论")
+    reason = result.get("route_reason") or result.get("screening_reason", "")
+    if reason.startswith("Rubric 确定性得分"):
+        reason = ("当前证据未达到路线准入要求。主要证据缺口：" + reason.split("；主要未闭合问题：", 1)[1]
+                  if "；主要未闭合问题：" in reason else "当前机制证据未达到路线准入要求。")
+    text = result.get("route_test_draft") or "\n\n".join(value for value in (
+        reason,
+        result.get("explanation") or result.get("screening_explanation"),
+        "**讨论势能判断：**" + result["discussion_judgment"] if result.get("discussion_judgment") else "",
+    ) if value)
+    content = (f"# {result['lookback_days']} 天窗口研究样本结论\n\n"
+        f"本次选定材料为[{primary['title']}]({primary['url']})，原始发布时间为 {primary['published_at']}。"
+        f"对这份材料的判断是：{label}。\n\n{text}\n\n"
+        "本结论仅覆盖这一份已完成判断的材料，不推断整个窗口没有重要技术，也不声称所有平台已经覆盖。"
+        "这是独立研究测试，不是已发送的正式周报。\n")
+    (directory / "sample_review.md").write_text(content, encoding="utf-8")
 
 
 if __name__ == "__main__":

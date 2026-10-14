@@ -201,7 +201,8 @@ class SampleIsolationTests(unittest.IsolatedAsyncioTestCase):
         from scripts.one_route_check import run_sample
         from sources.base import RawProject
         row = RawProject(source="arxiv", name="Mechanism sample", url="https://arxiv.org/abs/2501.00663",
-                         description="Source facts", extra={"arxiv_id":"2501.00663", "all_authors":["Alex Chen"]})
+                         description="Source facts", created_at="2026-10-10T12:00:00Z",
+                         extra={"arxiv_id":"2501.00663", "all_authors":["Alex Chen"]})
         async def hydrate(origin):
             origin.raw["document_excerpt"] = "Verified source body " * 50
             return {"primary_document":"read"}

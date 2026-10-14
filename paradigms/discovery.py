@@ -488,7 +488,7 @@ def _hf_to_support(item: RawProject) -> TechnicalEvidence:
         title=item.name,
         url=item.url,
         summary="Hugging Face Daily Papers 的收藏、评论与代码仓库信号",
-        published_at=str(item.created_at or ""),
+        published_at=str(item.extra.get("hf_featured_at", item.created_at) or ""),
         authors=item.extra.get("all_authors", []),
         organization=item.extra.get("organization", ""),
         metrics={

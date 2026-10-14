@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 MODEL = "qwen3.7-plus"
 BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-PRICE_DATE = date(2026, 10, 12)
-PRICE_URL = "https://help.aliyun.com/zh/model-studio/model-pricing"
+PRICE_DATE = date(2026, 10, 14)
+PRICE_URL = "https://help.aliyun.com/zh/model-studio/qwen3-7-plus"
 CONTRACT_URL = "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions"
 INPUT_LIMIT = 1_000_000  # Whole published context, not a tokenizer estimate.
 INPUT_PRICE = Decimal("6")  # Highest Beijing tier, no discounts/cache assumptions.

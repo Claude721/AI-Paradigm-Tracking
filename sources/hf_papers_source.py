@@ -50,7 +50,11 @@ class HuggingFacePapersSource(BaseSource):
             author_names = [a.get("name", "") for a in authors if a.get("name")]
             first_author = author_names[0] if author_names else ""
 
-            published = str(item.get("publishedAt") or "")
+            # The Daily Papers feature date is NOT the original paper date.
+            # A Monday feature can concern a paper first published last Friday.
+            published = str(paper.get("publishedAt") or "")
+            featured = str(item.get("publishedAt") or "")
+            published_raw = published
             if published:
                 try:
                     published_dt = datetime.fromisoformat(
@@ -59,10 +63,10 @@ class HuggingFacePapersSource(BaseSource):
                     cutoff = research_now() - timedelta(
                         days=self.lookback_days
                     )
-                    if published_dt < cutoff:
+                    if published_dt < cutoff or published_dt > research_now():
                         continue
                 except ValueError:
-                    pass
+                    published = ""
             upvotes = paper.get("upvotes", 0)
             github_stars = paper.get("githubStars", 0) or 0
             github_repo = paper.get("githubRepo", "")
@@ -93,6 +97,9 @@ class HuggingFacePapersSource(BaseSource):
                         "github_repo": github_repo,
                         "num_comments": item.get("numComments", 0),
                         "type": "daily_paper",
+                        "source_published_at": published_raw,
+                        "hf_featured_at": featured,
+                        "date_basis": "paper_published" if published else "unknown",
                     },
                 )
             )

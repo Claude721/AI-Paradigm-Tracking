@@ -1,5 +1,15 @@
 # 有界单路线真实研究验收
 
+## 当前 3 天样本入口（2026-10-14）
+
+用户已授权最近 3 天真实小样本研究，沿用每次不超过 20 元、最多一条路线、独立状态、无邮件/自动续跑的边界。输入 arxiv_id 或 primary_url 二选一；后者只接受内置官方研究目录中真实链接的单篇文章。必须用原始发布时间落在运行冻结的 72 小时内，并读取一手正文，才调用模型。不会将 HF 收录时间、网页修改时间或旧论文 seed 视为近期发布。HF 原点日期与平台收录日期已分栏保存。
+
+2026-10-14 已重新核对[Qwen 官方容量与价格](https://help.aliyun.com/zh/model-studio/qwen3-7-plus)及[兼容 API 完整输出上限](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)。保守费用仍用每百万输入 6 元、输出 24 元和完整输入容量，不依赖 tokenizer/免费额度；本版只可核验当日执行。模型配置继承全局，实际模型/地址不匹配费用契约则明确停止，不静默换 API。
+
+研究与增强沿用 V0 部分来源容错，Rubric、人物、一手 URL 和中文路线质量门不放宽。observe/reject 形成明确的样本判断，不改写为成功空周报；完成判断后才生成 sample_review.md，执行失败只留诊断，绝不生成阶段性 memo。JSON/Markdown 制品明确 production_v0_accepted=false；不调用整周总编，不宣称覆盖所有 3 天信息。
+
+## 历史验收与费用证据
+
 > 本页的 Qwen 专用费用保护只适用于当时授权的独立单路线测试，不限制正式流水线的模型/API 选择。正式模型可按[配置清单](CONFIGURATION_CHECKLIST.md)替换；新付费验收不能沿用其他提供方或过期价格，也不能据此自动执行。
 
 2026-10-12 授权：最多一条路线，单次人民币 API 总费用不超过 20 元，不发邮件、不自动续跑。独立工作流 `one-route-acceptance.yml` 仅有手动触发，默认不授权；不使用正式工作流的 seed 伪装缩小研究范围，不修改历史任务清单。输入为单个普通论文 arXiv ID、费用上限、官方价格核验日期与 `live_authorized=true`；不接受多条材料或多机制 Technical Report。

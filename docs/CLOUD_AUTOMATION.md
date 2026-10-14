@@ -64,7 +64,7 @@ source_platform_checks 只有单次明确授权后才开启；Tavily/X 可能消
 
 独立 source-interface-acceptance.yml 仅验授权 NYU/Tavily，默认 live_authorized=false，无模型/邮件/生产状态。NYU 最多 8 次身份 GET，Tavily 在包含额度/PAYG 条件明确后最多 1 次 basic；未知限额不搜索。2026-10-13 单次授权已经执行，后续用户要求暂不调用，不自动追加复验。
 
-one-route-acceptance.yml 仍是专门的单路线模型测试，最多 20 元、无邮件/生产状态，现有价格保护绑定 Qwen 与人工核验日期。生产模型可替换不代表旧价格保护适用于其他 API。
+one-route-acceptance.yml 是窗口内单路线模型测试，默认 3 天，最多 20 元、无邮件/生产状态。arxiv_id 与 primary_url 必须且只能选一项；后者必须在已登记官方研究索引中原样出现，并由生产解析器确认正文与原始日期。旧论文、仅修改日期、无原始日期不支付模型；拒绝多机制 Technical Report，不为样本截断或放宽准入。费用保护本版绑定已于 2026-10-14 核验的北京 Qwen 当日价格；模型/地址沿用全局配置，其他模型明确停止而非静默套价。研究采用 V0 部分来源容错，但本条路线自身仍须完成真实判断。
 
 历史 Runner 证据见 [来源](RUN_38347140838_SOURCE_REVIEW.md)、[接口](RUN_38370843944_INTERFACE_REVIEW.md)。当时全入口闭合目标不再适用 V0 交付。
 
@@ -85,4 +85,4 @@ PARADIGM_AUTO_RESUME_ENABLED=false 默认不扩大支出。开启后只在状态
 
 部署代码后，先确认执行 SHA 与有效配置，再进行授权正式运行。从真实审计看本期选定/完成数、合格路线、用量与质量，而不是只看 Workflow 绿色。确认邮件、V0 状态上传、重复投递跳过、下一周新窗口推进。
 
-离线通过是工程发布条件，不是真实模型质量或生产稳定性证明。当前未在本轮启动任何真实验收，见 [工程状态](PROJECT_HEALTH_REPORT.md)。
+离线通过是工程发布条件，不是真实模型质量或生产稳定性证明。最近真实测试及尚未验收边界见 [工程状态](PROJECT_HEALTH_REPORT.md)。
