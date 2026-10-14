@@ -45,7 +45,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-模型不限定 Qwen。设置 LLM_PROVIDER、LLM_MODEL、LLM_BASE_URL 与 LLM_API_KEY，使用支持 Chat Completions 和完整 JSON 输出的兼容 API。角色专属 SUB_AGENT_* / MAIN_AGENT_* 默认留空继承全局；换提供方时同时核对地址和 Key。默认 Qwen 仅兼容已有部署。
+模型不限定 Qwen。SUB_AGENT_PROVIDER/MODEL/BASE_URL 与 MAIN_AGENT_PROVIDER/MODEL/BASE_URL 分别配置初筛和深挖/人物/写作（使用完整角色前缀）；Key 分别为 SUB_AGENT_LLM_API_KEY、MAIN_AGENT_LLM_API_KEY。使用支持 Chat Completions 和完整 JSON 的兼容 API；两套配置不继承全局、不互相借用、无厂商默认兜底。可以先用同一模型/Key，后续独立更换。
 
 OpenAlex Key 推荐配置以增强召回与人物身份，但未配置 OpenAlex/OpenReview 不是静态全局阻断。X 默认关闭，无需为 V0 申请付费 Token。Tavily 是可选索引线索，月度 credit 保护与提供方账户限额继续保留。
 
@@ -68,7 +68,7 @@ weekly-radar.yml 每周五 09:15（Asia/Shanghai）运行，job 上限 90 分钟
 
 云端 V0 使用 paradigm-radar-v0-state-<run_id> 独立状态：第一次从空库启动，不导入旧失败批次；旧 paradigm-radar-state-* 制品未删除。新 V0 状态逐次保存、恢复；已有 V0 快照均损坏时不能静默重置。手动 reset_state=true 仍可重建。
 
-Actions 模型 Variables 与通用 Key Secret 已支持切换；现有 DASHSCOPE_API_KEY 仍是全局 Key 兼容回退。不要提交 .env、数据库、日志或生成报告。见 [配置清单](docs/CONFIGURATION_CHECKLIST.md)、[云端运行](docs/CLOUD_AUTOMATION.md)。本机无需开机，不要重复调度。
+Actions 六项角色模型字段放 Variables，两项角色 Key 放 Secrets；旧全局 LLM_PROVIDER/MODEL/BASE_URL/API_KEY 与 DASHSCOPE_API_KEY 不再读取。不要提交 .env、数据库、日志或生成报告。见 [配置清单](docs/CONFIGURATION_CHECKLIST.md)、[云端运行](docs/CLOUD_AUTOMATION.md)。本机无需开机，不要重复调度。
 
 ## 代码与文档
 

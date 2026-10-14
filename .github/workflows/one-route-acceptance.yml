@@ -50,10 +50,14 @@ jobs:
     timeout-minutes: 25
     env:
       AI_RADAR_SKIP_DOTENV: "true"
-      LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
-      LLM_MODEL: ${{ vars.LLM_MODEL }}
-      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-      LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.DASHSCOPE_API_KEY }}
+      SUB_AGENT_PROVIDER: ${{ vars.SUB_AGENT_PROVIDER }}
+      SUB_AGENT_MODEL: ${{ vars.SUB_AGENT_MODEL }}
+      SUB_AGENT_BASE_URL: ${{ vars.SUB_AGENT_BASE_URL }}
+      SUB_AGENT_LLM_API_KEY: ${{ secrets.SUB_AGENT_LLM_API_KEY }}
+      MAIN_AGENT_PROVIDER: ${{ vars.MAIN_AGENT_PROVIDER }}
+      MAIN_AGENT_MODEL: ${{ vars.MAIN_AGENT_MODEL }}
+      MAIN_AGENT_BASE_URL: ${{ vars.MAIN_AGENT_BASE_URL }}
+      MAIN_AGENT_LLM_API_KEY: ${{ secrets.MAIN_AGENT_LLM_API_KEY }}
       LLM_ENABLE_THINKING: "false"
       GITHUB_TOKEN: ${{ github.token }}
       EMAIL_PUSH_ENABLED: "false"
@@ -76,7 +80,7 @@ jobs:
         run: python -m runtime_provenance
       - name: 校验模型 Variables
         run: |
-          for variable in LLM_PROVIDER LLM_MODEL LLM_BASE_URL; do
+          for variable in SUB_AGENT_PROVIDER SUB_AGENT_MODEL SUB_AGENT_BASE_URL MAIN_AGENT_PROVIDER MAIN_AGENT_MODEL MAIN_AGENT_BASE_URL; do
             if [ -z "${!variable}" ]; then
               echo "::error::请在 Settings → Secrets and variables → Actions → Variables 配置 $variable；API Key 仍放 Secrets。"
               exit 1

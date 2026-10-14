@@ -4,34 +4,10 @@
 快速配置: python main.py --setup
 查看状态: python main.py --status
 
-┌──────────────────────────────────────────────────────────┐
-│              模型配置优先级（从高到低）                      │
-├──────────────────────────────────────────────────────────┤
-│                                                          │
-│  子Agent(初筛)                主Agent(深度分析)            │
-│  ┌──────────────┐            ┌──────────────┐            │
-│  │SUB_AGENT_*   │            │MAIN_AGENT_*  │  ← 最高优先 │
-│  └──────┬───────┘            └──────┬───────┘            │
-│         │ 未设置时                    │ 未设置时             │
-│         ▼                           ▼                    │
-│  ┌──────────────────────────────────────────┐            │
-│  │  LLM_PROVIDER / LLM_MODEL / LLM_API_KEY │  ← 全局配置 │
-│  └──────────────────┬───────────────────────┘            │
-│                     │ 未设置时                             │
-│                     ▼                                    │
-│  ┌──────────────────────────────────────────┐            │
-│  │  Provider 内置默认值                       │  ← 兜底    │
-│  │  ollama → localhost:11434 / qwen3.7:14b  │            │
-│  │  dashscope → aliyun URL / qwen3.7-plus   │            │
-│  │  volcengine → volces URL / doubao-pro-32k│            │
-│  └──────────────────────────────────────────┘            │
-│                                                          │
-│  示例：                                                   │
-│  · 全用 Ollama:   只设 LLM_PROVIDER=ollama              │
-│  · 全用云端:      设 LLM_PROVIDER + LLM_API_KEY          │
-│  · 混合部署:      全局 ollama + MAIN_AGENT 设 dashscope  │
-│                                                          │
-└──────────────────────────────────────────────────────────┘
+模型配置严格分为两套，不继承全局、不互相借用、不猜测厂商默认值：
+  初筛/机制提取：SUB_AGENT_PROVIDER / MODEL / BASE_URL / LLM_API_KEY
+  深挖/人物/报告：MAIN_AGENT_PROVIDER / MODEL / BASE_URL / LLM_API_KEY
+以上字段使用完整角色前缀；API Key 在 GitHub 只放 Secrets。
 """
 
 import os
@@ -126,11 +102,7 @@ PARADIGM_RUBRIC_PATH = (
     else BASE_DIR / "rubrics" / "paradigm_rubric.json"
 )
 
-# ── 全局 LLM 配置（子/主 Agent 的共同 fallback） ─────────
-LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "")
-LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
-LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "")
-LLM_MODEL: str = os.getenv("LLM_MODEL", "")
+# ── 共享请求策略（不是模型身份或密钥 fallback） ──────────
 # Explicit mode for the verified official Qwen endpoint, not a generic
 # provider parameter. Default bounded JSON work does not spend on reasoning.
 LLM_ENABLE_THINKING: bool = _env_bool("LLM_ENABLE_THINKING", False)
@@ -145,20 +117,16 @@ SMOKE_CHECK_TIMEOUT_SECONDS: int = max(
     min(_env_int("SMOKE_CHECK_TIMEOUT_SECONDS", 30), 120),
 )
 
-# Ollama 便捷配置（仅当 provider=ollama 时作为 LLM_MODEL/LLM_BASE_URL 的补充）
-OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "")
-OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "")
-
-# ── 子 Agent 配置（初筛 Triage，留空继承全局） ────────────
+# ── 子 Agent 独立配置（初筛/机制提取） ───────────────────
 SUB_AGENT_PROVIDER: str = os.getenv("SUB_AGENT_PROVIDER", "")
 SUB_AGENT_MODEL: str = os.getenv("SUB_AGENT_MODEL", "")
-SUB_AGENT_API_KEY: str = os.getenv("SUB_AGENT_API_KEY", "")
+SUB_AGENT_LLM_API_KEY: str = os.getenv("SUB_AGENT_LLM_API_KEY", "")
 SUB_AGENT_BASE_URL: str = os.getenv("SUB_AGENT_BASE_URL", "")
 
-# ── 主 Agent 配置（深度分析，留空继承全局） ───────────────
+# ── 主 Agent 独立配置（深挖/人物/报告） ───────────────────
 MAIN_AGENT_PROVIDER: str = os.getenv("MAIN_AGENT_PROVIDER", "")
 MAIN_AGENT_MODEL: str = os.getenv("MAIN_AGENT_MODEL", "")
-MAIN_AGENT_API_KEY: str = os.getenv("MAIN_AGENT_API_KEY", "")
+MAIN_AGENT_LLM_API_KEY: str = os.getenv("MAIN_AGENT_LLM_API_KEY", "")
 MAIN_AGENT_BASE_URL: str = os.getenv("MAIN_AGENT_BASE_URL", "")
 
 # Triage 阶段的分数阈值（>= 此分数才进入深度分析）

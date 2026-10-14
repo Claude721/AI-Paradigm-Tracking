@@ -1,8 +1,7 @@
 """
 公共 LLM 工具 — 为多智能体提供统一的客户端构建和 JSON 解析能力
 
-模型解析优先级（每个字段独立解析）：
-  Agent 专属值 → 全局 LLM_* 值 → Provider 内置默认值
+MAIN/SUB 各自显式配置模型与密钥；不继承全局或另一角色，不猜测默认模型。
 """
 
 from __future__ import annotations
@@ -22,27 +21,8 @@ logger = logging.getLogger(__name__)
 
 AgentRole = Literal["sub", "main"]
 
-PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
-    "dashscope": {
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model": "qwen3.7-plus",
-        "api_key": "",
-    },
-    "volcengine": {
-        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-        "model": "doubao-pro-32k",
-        "api_key": "",
-    },
-}
-
-
-def _ollama_defaults() -> dict[str, str]:
-    """ollama 的默认值优先从 OLLAMA_* 环境变量读取"""
-    return {
-        "base_url": config.OLLAMA_BASE_URL or "http://localhost:11434/v1",
-        "model": config.OLLAMA_MODEL or "qwen3.7:14b",
-        "api_key": "ollama",
-    }
+# Only a verified request-policy contract; NEVER a configuration fallback.
+VERIFIED_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
 @dataclass
@@ -83,59 +63,31 @@ class ResolvedModel:
         return lines
 
 
-def _pick(agent_val: str, global_val: str, default_val: str) -> tuple[str, str]:
-    """三级优先级选择，返回 (值, 来源标签)"""
-    if agent_val:
-        return agent_val, "Agent专属配置"
-    if global_val:
-        return global_val, "全局LLM配置"
-    if default_val:
-        return default_val, "Provider默认值"
-    return "", "未配置"
-
-
 def resolve_model(role: AgentRole) -> ResolvedModel:
-    """解析指定角色的最终模型配置，返回完整的来源追踪"""
-    if role == "sub":
-        a_provider = config.SUB_AGENT_PROVIDER
-        a_model = config.SUB_AGENT_MODEL
-        a_key = config.SUB_AGENT_API_KEY
-        a_url = config.SUB_AGENT_BASE_URL
-    else:
-        a_provider = config.MAIN_AGENT_PROVIDER
-        a_model = config.MAIN_AGENT_MODEL
-        a_key = config.MAIN_AGENT_API_KEY
-        a_url = config.MAIN_AGENT_BASE_URL
-
-    # Step 1: 解析 provider
-    provider, provider_from = _pick(a_provider, config.LLM_PROVIDER, "ollama")
-    defaults = (
-        _ollama_defaults() if provider == "ollama"
-        else PROVIDER_DEFAULTS.get(provider, {})
-    )
-
-    # Step 2: 解析其余字段
-    model, model_from = _pick(a_model, config.LLM_MODEL, defaults.get("model", ""))
-    api_key, key_from = _pick(a_key, config.LLM_API_KEY, defaults.get("api_key", ""))
-    base_url, url_from = _pick(a_url, config.LLM_BASE_URL, defaults.get("base_url", ""))
-
-    if not api_key and provider != "ollama":
-        logger.warning(
-            f"[{role}] API Key 未配置！请运行 python main.py --setup"
-        )
-        api_key = "placeholder"
-        key_from = "未配置(将失败)"
+    """只读取本角色字段；缺项保留为空，Doctor/build_client 明确阻断。"""
+    if role not in {"sub", "main"}:
+        raise ValueError("未知模型角色")
+    prefix = "SUB_AGENT" if role == "sub" else "MAIN_AGENT"
+    provider = getattr(config, prefix + "_PROVIDER").strip()
+    model = getattr(config, prefix + "_MODEL").strip()
+    base_url = getattr(config, prefix + "_BASE_URL").strip()
+    api_key = getattr(config, prefix + "_LLM_API_KEY").strip()
+    def source(value):
+        return "Agent专属配置" if value else "未配置"
+    key_from = source(api_key)
+    if provider == "ollama" and not api_key:
+        api_key, key_from = "ollama", "本地免密"
 
     return ResolvedModel(
         role=role,
         provider=provider,
-        provider_from=provider_from,
+        provider_from=source(provider),
         model=model,
-        model_from=model_from,
+        model_from=source(model),
         api_key=api_key,
         api_key_from=key_from,
         base_url=base_url,
-        base_url_from=url_from,
+        base_url_from=source(base_url),
     )
 
 
@@ -152,7 +104,7 @@ def request_policy(resolved: ResolvedModel, *, model: str = "") -> dict:
     """
     selected = model or resolved.model
     if (resolved.provider == "dashscope"
-        and resolved.base_url.rstrip("/") == PROVIDER_DEFAULTS["dashscope"]["base_url"]
+        and resolved.base_url.rstrip("/") == VERIFIED_DASHSCOPE_BASE_URL
         and selected in {"qwen3.7-plus", "qwen3.7-plus-2026-05-26"}):
         return {"version": 1, "enable_thinking": config.LLM_ENABLE_THINKING,
                 "output_limit": "max_completion_tokens"}
@@ -200,6 +152,13 @@ def build_client(
 ) -> tuple[ModelPolicyClient, str]:
     """构建带显式供应商契约的客户端，返回 (client, model_name)"""
     resolved = resolve_model(role)
+    prefix = "SUB_AGENT" if role == "sub" else "MAIN_AGENT"
+    missing = [prefix + "_" + field for field, value in (
+        ("PROVIDER", resolved.provider), ("MODEL", resolved.model),
+        ("BASE_URL", resolved.base_url), ("LLM_API_KEY", resolved.api_key))
+        if not value or value == "placeholder"]
+    if missing:
+        raise ValueError("本角色模型配置缺失：" + "、".join(missing))
     logger.info(f"初始化 LLM 客户端: {resolved.label} (role={role})")
     client = AsyncOpenAI(
         base_url=resolved.base_url,

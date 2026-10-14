@@ -279,7 +279,7 @@ class DiscoveryResumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_scope_signature_tracks_queries_not_credentials(self):
         discovery = ParadigmDiscovery(lookback_days=7, high_signal_lookback_days=30)
         original = discovery._plan_signatures()
-        with patch.object(config, "LLM_API_KEY", "changed-offline-only"), patch.object(config, "OPENALEX_API_KEY", "changed-offline-only"):
+        with patch.object(config, "SUB_AGENT_LLM_API_KEY", "changed-offline-only"), patch.object(config, "OPENALEX_API_KEY", "changed-offline-only"):
             self.assertEqual(original, discovery._plan_signatures())
         with patch("paradigms.discovery.arxiv_query_plan", return_value=[{"group": "new", "query": "new-scope"}]):
             self.assertNotEqual(original["arxiv"], discovery._plan_signatures()["arxiv"])

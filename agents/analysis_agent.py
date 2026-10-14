@@ -12,9 +12,8 @@ import logging
 import re
 from dataclasses import dataclass
 
-from openai import AsyncOpenAI
-
 import config
+from agents.llm_utils import build_client
 from sources.base import RawProject
 
 logger = logging.getLogger(__name__)
@@ -94,28 +93,7 @@ class AnalysisAgent:
 
     def __init__(self, concurrency: int = 5):
         self.concurrency = concurrency
-        self.client = self._build_client()
-        self.model = self._get_model()
-
-    def _build_client(self) -> AsyncOpenAI:
-        if config.LLM_PROVIDER == "ollama":
-            return AsyncOpenAI(
-                base_url=config.OLLAMA_BASE_URL,
-                api_key="ollama",
-            )
-        if not config.LLM_API_KEY:
-            logger.warning(
-                "LLM_API_KEY 未配置！请在 .env 中设置，或将 LLM_PROVIDER 改为 ollama"
-            )
-        return AsyncOpenAI(
-            base_url=config.LLM_BASE_URL,
-            api_key=config.LLM_API_KEY or "placeholder",
-        )
-
-    def _get_model(self) -> str:
-        if config.LLM_PROVIDER == "ollama":
-            return config.OLLAMA_MODEL
-        return config.LLM_MODEL
+        self.client, self.model = build_client("main")
 
     async def run(self, projects: list[RawProject]) -> list[ScoredProject]:
         if not projects:

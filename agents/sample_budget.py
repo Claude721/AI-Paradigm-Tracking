@@ -9,6 +9,7 @@ import asyncio
 import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,14 +43,9 @@ class SampleBudgetClient:
             raise SampleBudgetError("费用上限无效") from exc
         if not budget.is_finite() or not 0 < budget <= 20:
             raise SampleBudgetError("单路线验收费用必须在 0 到 20 元内")
-        if model != MODEL or base_url.rstrip("/") != BASE_URL:
-            raise SampleBudgetError("实际模型/地域没有匹配的已核验价格")
+        self._validate_transport(client, model, base_url)
         if verified_on != PRICE_DATE or (now or datetime.now(timezone.utc).date()) != PRICE_DATE:
             raise SampleBudgetError("价格核验已过期；重新核验官方价格后才能运行")
-        if getattr(client, "max_retries", None) != 0:
-            raise SampleBudgetError("验收客户端必须关闭 SDK 隐式重试")
-        if str(getattr(client, "base_url", "")).rstrip("/") != BASE_URL:
-            raise SampleBudgetError("客户端实际服务地址与费用契约不一致")
         self.client, self.path, self.budget = client, Path(path), budget
         self.spent = Decimal(0)
         self.calls, self.unknown = [], False
@@ -74,7 +70,27 @@ class SampleBudgetClient:
         temporary.write_text(json.dumps(self.summary(), ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(self.path)
 
+    @staticmethod
+    def _validate_transport(client, model, base_url):
+        if model != MODEL or base_url.rstrip("/") != BASE_URL:
+            raise SampleBudgetError("实际模型/地域没有匹配的已核验价格")
+        if getattr(client, "max_retries", None) != 0:
+            raise SampleBudgetError("验收客户端必须关闭 SDK 隐式重试")
+        if str(getattr(client, "base_url", "")).rstrip("/") != BASE_URL:
+            raise SampleBudgetError("客户端实际服务地址与费用契约不一致")
+
+    def bind_client(self, client, *, model, base_url, role):
+        """Two transports/keys share ONE journal, lock, spend and stop line."""
+        self._validate_transport(client, model, base_url)
+        if role not in {"sub", "main"}:
+            raise SampleBudgetError("未知验收模型角色")
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+            create=partial(self._create, client, role))))
+
     async def create(self, **kwargs):
+        return await self._create(self.client, "sub", **kwargs)
+
+    async def _create(self, transport, role, **kwargs):
         allowed = {"model", "messages", "temperature", "max_tokens", "response_format"}
         if set(kwargs) - allowed or kwargs.get("model") != MODEL:
             raise SampleBudgetError("验收不允许工具、流式、额外计费参数或模型切换")
@@ -94,7 +110,7 @@ class SampleBudgetClient:
             if self.unknown or len(self.calls) >= 24 or self.spent + reserve > self.budget:
                 raise SampleBudgetError("费用/请求次数停止线或未知扣费阻断；未发出请求")
             self.spent += reserve
-            record = {"number": len(self.calls) + 1, "status": "reserved",
+            record = {"number": len(self.calls) + 1, "role": role, "status": "reserved",
                       "reserved_upper_cny": str(reserve), "maximum_output_tokens": maximum + 10}
             self.calls.append(record)
             try:
@@ -106,7 +122,7 @@ class SampleBudgetClient:
             payload.pop("max_tokens")
             payload["max_completion_tokens"] = maximum
             try:
-                response = await self.client.chat.completions.create(**payload)
+                response = await transport.chat.completions.create(**payload)
                 if getattr(response, "model", "") not in {MODEL, "qwen3.7-plus-2026-05-26"}:
                     raise SampleBudgetError("响应模型与已核验计费模型不一致")
                 usage = getattr(response, "usage", None)

@@ -26,10 +26,10 @@ weekly-radar.yml 每周五 09:15（Asia/Shanghai）运行，Ubuntu / Python 3.12
 
 Settings → Secrets and variables → Actions：
 
-- 模型 Repository Variables 必填：LLM_PROVIDER（当前 dashscope）、LLM_MODEL（当前 qwen3.7-plus）、LLM_BASE_URL（当前 https://dashscope.aliyuncs.com/compatible-mode/v1）。正式/Smoke 与单路线工作流直接读取，无硬编码兜底；缺失时调用模型前明确报配置错误。纯信源检查不要求模型配置。
-- 通用 Secret：LLM_API_KEY，留空兼容 DASHSCOPE_API_KEY；两者同时存在时前者优先。API Key 不放 Variables。
-- 角色覆盖：SUB_AGENT_PROVIDER/MODEL/BASE_URL 与 MAIN_AGENT_PROVIDER/MODEL/BASE_URL（均使用完整角色前缀）；对应 SUB_AGENT_API_KEY、MAIN_AGENT_API_KEY Secrets 可选。
-- 不覆盖角色就把角色 Variables 和角色 API Key Secrets 全部留空继承全局。换提供方修改三个全局 Variables 与对应 Secret，无需改代码；同时核对模型、地址、Key，不限 Qwen。地址填兼容 API 根地址，不是 /chat/completions 完整路径。
+- MAIN/SUB 独立的六项 Repository Variables 必填：SUB_AGENT_PROVIDER、SUB_AGENT_MODEL、SUB_AGENT_BASE_URL；MAIN_AGENT_PROVIDER、MAIN_AGENT_MODEL、MAIN_AGENT_BASE_URL。正式/Smoke 与单路线工作流读取同一套双层配置，无全局继承、跨角色借用或硬编码兜底。纯信源检查不要求模型配置。
+- 两项独立 Secret：SUB_AGENT_LLM_API_KEY、MAIN_AGENT_LLM_API_KEY；可以先填同一个现有 Key，但不能放 Variables。任一角色缺项在调用模型前明确失败。
+- 旧全局模型 Variables 及 DASHSCOPE_API_KEY / LLM_API_KEY / SUB_AGENT_API_KEY / MAIN_AGENT_API_KEY 不再读取；先配置新 Secret 再删旧项。GitHub 不提供旧值读回，不在聊天或日志中迁移明文。
+- 换某层提供方只修改该层三项 Variables 与对应 Secret，无需改代码，不限 Qwen。地址填兼容 API 根地址，不是 /chat/completions 完整路径。
 - 推荐 OPENALEX_API_KEY；GITHUB_TOKEN 自动取 github.token，不另建同名 Secret。
 - SMTP_USERNAME、SMTP_PASSWORD、SMTP_TO Secrets；现有 QQ SSL 发送路径不变。
 - X、未批准 Reddit、未批准 Semantic Scholar 保持关闭，不为 V0 新增付费平台。
@@ -65,7 +65,7 @@ source_platform_checks 只有单次明确授权后才开启；Tavily/X 可能消
 
 独立 source-interface-acceptance.yml 仅验授权 NYU/Tavily，默认 live_authorized=false，无模型/邮件/生产状态。NYU 最多 8 次身份 GET，Tavily 在包含额度/PAYG 条件明确后最多 1 次 basic；未知限额不搜索。2026-10-13 单次授权已经执行，后续用户要求暂不调用，不自动追加复验。
 
-one-route-acceptance.yml 是窗口内单路线模型测试，默认 3 天，最多 20 元、无邮件/生产状态。arxiv_id 与 primary_url 必须且只能选一项；后者必须在已登记官方研究索引中原样出现，并由生产解析器确认正文与原始日期。旧论文、仅修改日期、无原始日期不支付模型；拒绝多机制 Technical Report，不为样本截断或放宽准入。费用保护本版绑定已于 2026-10-14 核验的北京 Qwen 当日价格；模型/地址沿用全局配置，其他模型明确停止而非静默套价。研究采用 V0 部分来源容错，但本条路线自身仍须完成真实判断。
+one-route-acceptance.yml 是窗口内单路线模型测试，默认 3 天，两层合计最多 20 元、无邮件/生产状态。arxiv_id 与 primary_url 必须且只能选一项；后者必须在已登记官方研究索引中原样出现，并由生产解析器确认正文与原始日期。旧论文、仅修改日期、无原始日期不支付模型；拒绝多机制 Technical Report，不为样本截断或放宽准入。费用保护本版绑定已于 2026-10-14 核验的北京 Qwen 当日价格；初筛读取 SUB，深挖/人物/写作读取 MAIN，各自模型与实际地址须在首次请求前核验，两个客户端共享一个费用账本/停止线。不匹配时停止而非静默套价，正式生产不受该测试价格契约限制。研究采用 V0 部分来源容错，但本条路线自身仍须完成真实判断。
 
 历史 Runner 证据见 [来源](RUN_38347140838_SOURCE_REVIEW.md)、[接口](RUN_38370843944_INTERFACE_REVIEW.md)。当时全入口闭合目标不再适用 V0 交付。
 

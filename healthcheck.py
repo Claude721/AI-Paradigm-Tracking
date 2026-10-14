@@ -455,11 +455,12 @@ def print_checks() -> list[Check]:
 def _model_check(name, resolved) -> Check:
     missing = resolved.provider != "ollama" and (not resolved.api_key or resolved.api_key == "placeholder")
     endpoint = urlparse(getattr(resolved, "base_url", ""))
+    provider_ok = bool(resolved.provider.strip())
     model_ok = bool(resolved.model.strip())
     endpoint_ok = endpoint.scheme in {"http", "https"} and bool(endpoint.hostname) and not endpoint.username and not endpoint.password
-    status = "ready" if not missing and model_ok and endpoint_ok else "missing"
+    status = "ready" if provider_ok and not missing and model_ok and endpoint_ok else "missing"
     note = f"{resolved.provider}/{resolved.model}；" + (
-        "Key 未配置" if missing else "模型名未配置" if not model_ok else
+        "API 服务商未配置" if not provider_ok else "Key 未配置" if missing else "模型名未配置" if not model_ok else
         "兼容 API Base URL 无效" if not endpoint_ok else "配置完整（连通性及 JSON 质量需 Smoke 验证）"
     )
     return Check(name, "LLM", status, note)

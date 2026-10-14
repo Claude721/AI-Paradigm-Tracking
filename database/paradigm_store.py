@@ -1742,8 +1742,8 @@ def _safe_error_text(error: Exception | str) -> str:
         value = str(error).replace("\n", " ")
     for name in (
         "LLM_API_KEY",
-        "SUB_AGENT_API_KEY",
-        "MAIN_AGENT_API_KEY",
+        "SUB_AGENT_LLM_API_KEY",
+        "MAIN_AGENT_LLM_API_KEY",
         "OPENALEX_API_KEY",
         "SEMANTIC_SCHOLAR_API_KEY",
         "GITHUB_TOKEN",

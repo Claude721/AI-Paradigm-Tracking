@@ -5,54 +5,50 @@
 ## 最小配置
 
 - PIPELINE_MODE=paradigm。
-- 一套能完成 Chat Completions / JSON 的模型 API，模型名、地址和 Key 对应。
+- MAIN/SUB 分别配置能完成 Chat Completions / JSON 的模型 API，各自模型名、地址和 Key 对应；可以使用同一模型和同一 Key。
 - 默认公开来源保持开启；运行时至少 2 个一手发现通道可用。OpenAlex 与 GitHub 推荐，但不是全部信源都必须配置/成功。
 - 如需邮件，SMTP 配置完整；已有发信功能不需要重新设计。
 - 自动续跑、X、未获批 Reddit 和未获批 Semantic Scholar 保持关闭。
 
 ## 模型可替换
 
-本地全局字段：
+本地两套独立字段（下列模型与地址只是示例，不是运行兜底）：
 
 ```env
-LLM_PROVIDER=dashscope
-LLM_MODEL=qwen3.7-plus
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-LLM_API_KEY=
+SUB_AGENT_PROVIDER=dashscope
+SUB_AGENT_MODEL=qwen3.7-plus
+SUB_AGENT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+SUB_AGENT_LLM_API_KEY=
+MAIN_AGENT_PROVIDER=dashscope
+MAIN_AGENT_MODEL=qwen3.7-plus
+MAIN_AGENT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+MAIN_AGENT_LLM_API_KEY=
 LLM_REQUEST_TIMEOUT_SECONDS=180
 LLM_ENABLE_THINKING=false
-SUB_AGENT_PROVIDER=
-SUB_AGENT_MODEL=
-SUB_AGENT_BASE_URL=
-SUB_AGENT_API_KEY=
-MAIN_AGENT_PROVIDER=
-MAIN_AGENT_MODEL=
-MAIN_AGENT_BASE_URL=
-MAIN_AGENT_API_KEY=
 ```
 
-上面的 Qwen 是示例，不是准入要求。可以填写其他提供方/代理的实际模型 ID、兼容地址和 Key；不支持 Chat Completions 或不能稳定输出完整 JSON 的接口需要更换/适配，不靠品牌名字判断能力。LLM_PROVIDER 是 API 服务商标签（阿里云为 dashscope），不是必须写模型开发商；其他兼容服务商也可以使用其实际标签。LLM_BASE_URL 填 SDK 接口根地址，不含 /chat/completions 路径或密钥。角色字段逐项继承全局，切换角色提供方时一起覆盖模型、地址、Key，防止旧地址与新 Key 混用。
+上面的 Qwen 是示例，不是准入要求。MAIN 与 SUB 可以使用不同厂商、不同模型、不同地址和不同 Key；各自独立，不继承全局、不互相借用、不猜测厂商默认模型。提供方字段是 API 服务商标签（阿里云为 dashscope），不是必须写模型开发商；地址填 SDK 接口根地址，不含 /chat/completions 路径或密钥。接口须支持 Chat Completions 和完整 JSON。本地 Ollama 也须显式填写本角色 provider/model/base_url，只有 Key 可以免填。
 
 Actions 对应：
 
 | 类型 | 名称 | 说明 |
 |---|---|---|
-| Variable | LLM_PROVIDER | 必填，当前为 dashscope（阿里云百炼） |
-| Variable | LLM_MODEL | 必填，当前为 qwen3.7-plus |
-| Variable | LLM_BASE_URL | 必填，当前为 https://dashscope.aliyuncs.com/compatible-mode/v1 |
-| Secret | LLM_API_KEY | 通用模型 Key；留空回退已有 DASHSCOPE_API_KEY |
-| Variables | SUB_AGENT_PROVIDER / MODEL / BASE_URL | 可选，留空继承全局 |
-| Secret | SUB_AGENT_API_KEY | 可选，留空继承全局 |
-| Variables | MAIN_AGENT_PROVIDER / MODEL / BASE_URL | 可选，留空继承全局 |
-| Secret | MAIN_AGENT_API_KEY | 可选，留空继承全局 |
+| Variable | SUB_AGENT_PROVIDER | 必填，初筛 API 服务商 |
+| Variable | SUB_AGENT_MODEL | 必填，初筛/机制提取模型 ID |
+| Variable | SUB_AGENT_BASE_URL | 必填，初筛接口根地址 |
+| Secret | SUB_AGENT_LLM_API_KEY | SUB 专用 Key，云端必填 |
+| Variable | MAIN_AGENT_PROVIDER | 必填，深挖 API 服务商 |
+| Variable | MAIN_AGENT_MODEL | 必填，综合判断/人物/写作模型 ID |
+| Variable | MAIN_AGENT_BASE_URL | 必填，深挖接口根地址 |
+| Secret | MAIN_AGENT_LLM_API_KEY | MAIN 专用 Key，云端必填 |
 
-设置路径：仓库 Settings → Secrets and variables → Actions → Variables → Repository variables。正式/Smoke 与单路线工作流均直接读取这三个全局 Variables；缺失时在调用模型前明确失败，不静默回退旧模型。source_check_only 不调用模型，因此不要求这三个字段。
+设置路径：仓库 Settings → Secrets and variables → Actions。六个模型字段放 Variables → Repository variables；两个 Key 放 Secrets → Repository secrets。正式/Smoke 与单路线工作流均读取这两套配置；任一角色缺失时在调用模型前明确失败。source_check_only 不调用模型，因此不要求模型配置。
 
-表中的角色缩写分别表示 SUB_AGENT_MODEL、SUB_AGENT_BASE_URL、MAIN_AGENT_MODEL、MAIN_AGENT_BASE_URL。换模型时改三个全局 Variables，并在 Secrets 更新 LLM_API_KEY；现有阿里云 Key 无需搬迁，仍兼容 DASHSCOPE_API_KEY。若同时存在两者，LLM_API_KEY 优先。清空不需要的角色 Variables **及角色 API Key Secrets**，否则角色专属值仍优先；没有角色覆盖时，初筛、深挖和写作一起继承全局。不必修改代码，也不要为换模型重置所有信源 Key。
+换某层模型时只改该层三项 Variables 和对应 Secret，另一层不受影响。不再读取旧 LLM_PROVIDER、LLM_MODEL、LLM_BASE_URL、LLM_API_KEY、DASHSCOPE_API_KEY、SUB_AGENT_API_KEY、MAIN_AGENT_API_KEY。部署前先配置两组新 Key 再删除旧项；GitHub 无法读回已有 Secret，须在 Secrets 页面重新填入，不把 Key 发到聊天。迁移可以先在两项 Secret 填同一个现有 Key，不必申请新 Key。信源 Key 不需要重置。
 
 Doctor 只核对配置完整、URL 格式和范围，不再限制 qwen3.7。Smoke 才验证真实连接和响应；同 provider/model/url/Key 才共用角色检查。未知模型/代理不会收到猜测的 Qwen 参数。已核验官方 Qwen 配置使用显式非思考与总输出限制，历史证据见 [模型复核](RUN_38238493094_MODEL_REVIEW.md)。
 
-独立 one-route-acceptance.yml 默认 3 天、单材料/单路线、20 元内、核验当日 Qwen 价格保护；输入 arxiv_id 或 primary_url 二选一，并核对原始发布时间，不回溯旧样本。测试模型继承全局配置，但价格契约不匹配时停止；它不是通用生产模型限制。无邮件/生产状态，换模型后不要直接复用旧价格执行该测试，见 [单路线说明](ONE_ROUTE_ACCEPTANCE.md)。
+独立 one-route-acceptance.yml 默认 3 天、单材料/单路线、两层合计 20 元内、核验当日 Qwen 价格保护；输入 arxiv_id 或 primary_url 二选一，并核对原始发布时间，不回溯旧样本。初筛使用 SUB，深挖/人物/写作使用 MAIN，两个实际接口须分别匹配已核验价格且共享一个总费用账本；任一不匹配就在首次请求前停止。价格契约不是通用生产模型限制。无邮件/生产状态，换模型后不要直接复用旧价格执行该测试，见 [单路线说明](ONE_ROUTE_ACCEPTANCE.md)。
 
 ## 研究量与取材
 

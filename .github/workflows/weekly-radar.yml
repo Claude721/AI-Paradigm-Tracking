@@ -65,21 +65,17 @@ jobs:
     timeout-minutes: 90
     env:
       PIPELINE_MODE: paradigm
-      LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
-      LLM_MODEL: ${{ vars.LLM_MODEL }}
-      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-      LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.DASHSCOPE_API_KEY }}
       LLM_REQUEST_TIMEOUT_SECONDS: ${{ vars.LLM_REQUEST_TIMEOUT_SECONDS || '180' }}
       LLM_ENABLE_THINKING: ${{ vars.LLM_ENABLE_THINKING || 'false' }}
       SMOKE_CHECK_TIMEOUT_SECONDS: ${{ vars.SMOKE_CHECK_TIMEOUT_SECONDS || '30' }}
       SUB_AGENT_PROVIDER: ${{ vars.SUB_AGENT_PROVIDER }}
       SUB_AGENT_MODEL: ${{ vars.SUB_AGENT_MODEL }}
       SUB_AGENT_BASE_URL: ${{ vars.SUB_AGENT_BASE_URL }}
-      SUB_AGENT_API_KEY: ${{ secrets.SUB_AGENT_API_KEY }}
+      SUB_AGENT_LLM_API_KEY: ${{ secrets.SUB_AGENT_LLM_API_KEY }}
       MAIN_AGENT_PROVIDER: ${{ vars.MAIN_AGENT_PROVIDER }}
       MAIN_AGENT_MODEL: ${{ vars.MAIN_AGENT_MODEL }}
       MAIN_AGENT_BASE_URL: ${{ vars.MAIN_AGENT_BASE_URL }}
-      MAIN_AGENT_API_KEY: ${{ secrets.MAIN_AGENT_API_KEY }}
+      MAIN_AGENT_LLM_API_KEY: ${{ secrets.MAIN_AGENT_LLM_API_KEY }}
       OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
       SEMANTIC_SCHOLAR_ENABLED: ${{ vars.SEMANTIC_SCHOLAR_ENABLED || 'false' }}
       SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
@@ -204,7 +200,7 @@ jobs:
         run: |
           mkdir -p logs
           set -o pipefail
-          for variable in LLM_PROVIDER LLM_MODEL LLM_BASE_URL; do
+          for variable in SUB_AGENT_PROVIDER SUB_AGENT_MODEL SUB_AGENT_BASE_URL MAIN_AGENT_PROVIDER MAIN_AGENT_MODEL MAIN_AGENT_BASE_URL; do
             if [ -z "${!variable}" ]; then
               echo "::error::请在 Settings → Secrets and variables → Actions → Variables 配置 $variable；API Key 仍放 Secrets。"
               exit 1
@@ -303,9 +299,8 @@ jobs:
           EMAIL_PUSH_ENABLED: "false"
           EMAIL_PUSH_REQUIRED: "false"
           SMTP_PASSWORD: ""
-          LLM_API_KEY: ""
-          SUB_AGENT_API_KEY: ""
-          MAIN_AGENT_API_KEY: ""
+          SUB_AGENT_LLM_API_KEY: ""
+          MAIN_AGENT_LLM_API_KEY: ""
         run: |
           mkdir -p logs
           set -o pipefail

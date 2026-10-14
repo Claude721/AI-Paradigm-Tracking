@@ -450,8 +450,8 @@ def _safe_public_text(value: str) -> str:
     )
     for name in (
         "LLM_API_KEY",
-        "SUB_AGENT_API_KEY",
-        "MAIN_AGENT_API_KEY",
+        "SUB_AGENT_LLM_API_KEY",
+        "MAIN_AGENT_LLM_API_KEY",
         "OPENALEX_API_KEY",
         "SEMANTIC_SCHOLAR_API_KEY",
         "GITHUB_TOKEN",

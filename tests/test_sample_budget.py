@@ -64,6 +64,42 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
             await self.request(self.client(budget_cny=1))
         self.create.assert_not_awaited()
 
+    async def test_main_sub_transports_share_one_total_budget_and_use_own_client(self):
+        self.create.return_value = response(prompt=1_000_000, output=5000)
+        other_create = AsyncMock(return_value=response(prompt=1_000_000, output=5000))
+        other = SimpleNamespace(max_retries=0, base_url=BASE_URL,
+                                chat=SimpleNamespace(completions=SimpleNamespace(create=other_create)))
+        shared = self.client()
+        main = shared.bind_client(other, model=MODEL, base_url=BASE_URL, role="main")
+        await self.request(shared)
+        await self.request(main.chat.completions)
+        await self.request(shared)
+        with self.assertRaises(SampleBudgetError):
+            await self.request(main.chat.completions)
+        self.assertEqual((self.create.await_count, other_create.await_count), (2, 1))
+        self.assertEqual(shared.spent, Decimal("18.36"))
+        self.assertEqual([row["role"] for row in shared.calls], ["sub", "main", "sub"])
+
+    async def test_main_unknown_usage_blocks_sub_without_new_spend(self):
+        other_create = AsyncMock(side_effect=TimeoutError("private"))
+        other = SimpleNamespace(max_retries=0, base_url=BASE_URL,
+                                chat=SimpleNamespace(completions=SimpleNamespace(create=other_create)))
+        shared = self.client()
+        main = shared.bind_client(other, model=MODEL, base_url=BASE_URL, role="main")
+        with self.assertRaises(SampleBudgetError):
+            await self.request(main.chat.completions)
+        with self.assertRaises(SampleBudgetError):
+            await self.request(shared)
+        self.create.assert_not_awaited()
+        self.assertEqual(other_create.await_count, 1)
+        self.assertTrue(shared.unknown)
+
+    async def test_unverified_main_model_is_rejected_before_either_role_spends(self):
+        shared = self.client()
+        with self.assertRaises(SampleBudgetError):
+            shared.bind_client(self.raw, model="another-model", base_url=BASE_URL, role="main")
+        self.create.assert_not_awaited()
+
     async def test_timeout_reserves_and_never_implicitly_retries(self):
         self.create.side_effect = TimeoutError("sensitive text")
         client = self.client()
@@ -186,16 +222,27 @@ class SampleIsolationTests(unittest.IsolatedAsyncioTestCase):
         from scripts.one_route_check import isolate_environment
         import os
         with patch.dict(os.environ, {"SMTP_PASSWORD":"private", "TAVILY_API_KEY":"private",
-                                    "OPENALEX_API_KEY":"private", "MAIN_AGENT_API_KEY":"private",
-                                    "LLM_API_KEY":"authorized-model-key", "LLM_ENABLE_THINKING":"true",
+                                    "OPENALEX_API_KEY":"private", "MAIN_AGENT_API_KEY":"old-private",
+                                    "SUB_AGENT_LLM_API_KEY":"authorized-sub-key", "MAIN_AGENT_LLM_API_KEY":"authorized-main-key",
+                                    "LLM_API_KEY":"old-private", "LLM_ENABLE_THINKING":"true",
                                     "EMAIL_PUSH_ENABLED":"true"}, clear=True):
             isolate_environment()
-            self.assertEqual(os.environ["LLM_API_KEY"], "authorized-model-key")
-            for key in ("SMTP_PASSWORD", "TAVILY_API_KEY", "OPENALEX_API_KEY", "MAIN_AGENT_API_KEY"):
+            self.assertEqual(os.environ["SUB_AGENT_LLM_API_KEY"], "authorized-sub-key")
+            self.assertEqual(os.environ["MAIN_AGENT_LLM_API_KEY"], "authorized-main-key")
+            for key in ("SMTP_PASSWORD", "TAVILY_API_KEY", "OPENALEX_API_KEY", "MAIN_AGENT_API_KEY", "LLM_API_KEY"):
                 self.assertNotIn(key, os.environ)
             self.assertEqual(os.environ["EMAIL_PUSH_ENABLED"], "false")
             self.assertEqual(os.environ["PARADIGM_AUTO_RESUME_ENABLED"], "false")
             self.assertEqual(os.environ["LLM_ENABLE_THINKING"], "false")
+
+    def test_sample_isolation_does_not_invent_missing_models(self):
+        from scripts.one_route_check import isolate_environment
+        import os
+        with patch.dict(os.environ, {}, clear=True):
+            isolate_environment()
+            for role in ("MAIN_AGENT", "SUB_AGENT"):
+                for field in ("PROVIDER", "MODEL", "BASE_URL", "LLM_API_KEY"):
+                    self.assertNotIn(role + "_" + field, os.environ)
 
     async def test_real_sqlite_origin_identity_uses_actual_stage_contract(self):
         from scripts.one_route_check import run_sample
