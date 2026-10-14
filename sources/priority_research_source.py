@@ -564,6 +564,10 @@ class PriorityResearchPageSource:
         else:
             publisher_evidence = f"用户追加的重点入口，尚无内置 owner 核验：{index_url}"
         summary_limit = 60_000 if origin_kind == "technical_report" else 16_000
+        # A prefix-only excerpt can omit a study's limitations/conclusion and
+        # turn separately successful experiments into a false complete system.
+        from .arxiv_document_source import _distributed_text_excerpt
+        excerpt = _distributed_text_excerpt(body, limit=summary_limit)
         return TechnicalEvidence(
                 source=self.source_name,
                 evidence_type=EvidenceType.TECHNICAL_BLOG,
@@ -571,7 +575,7 @@ class PriorityResearchPageSource:
                 # 永久保留索引发现的稳定 URL；HTTP 跳转终点可能是带
                 # Expires/Signature 的临时 CDN 下载地址。
                 url=link.url,
-                summary=body[:summary_limit],
+                summary=excerpt,
                 published_at=(published_dt.isoformat() if published_dt else ""),
                 authors=list(dict.fromkeys(authors)),
                 # 内置入口使用已核验 owner；用户自定义入口只保留域名，避免
@@ -602,6 +606,8 @@ class PriorityResearchPageSource:
                     "resolved_fetch_host": urlparse(str(response.url)).netloc,
                     "linked_research_documents": linked_documents,
                     "source_owner_id": str(source_meta.get("owner", "")) if source_meta else "",
+                    "document_excerpt_basis": "distributed" if len(body) > summary_limit else "complete",
+                    "document_body_characters": len(body),
                 },
         )
 

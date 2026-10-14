@@ -173,5 +173,60 @@ class OfficialBylineTests(unittest.TestCase):
         self.assertEqual(_seed_profiles(origin, [], 3)[0].current_affiliation, "Verified employer")
 
 
+class SampleDeliveryGateTests(unittest.TestCase):
+    def candidate(self, *, formal=False, tier="established", team=False):
+        from paradigms.models import ParadigmCandidate, TechnicalEvidence, EvidenceType, ResearcherProfile
+        candidate = ParadigmCandidate(key="sample", name="已判断路线", thesis="", problem_shift="", mechanism="",
+                                      publisher_tier=tier, is_formal_technical_report=formal)
+        candidate.evidence = [TechnicalEvidence(source="priority-research-page", evidence_type=EvidenceType.TECHNICAL_BLOG,
+            title="Official article", url=ARTICLE, organization="Anthropic",
+            authors=["Anthropic Research Team"] if team else ["William Zhou", "Daniel Freeman"],
+            raw={"origin_kind": "technical_report" if formal else "official_model_release"})]
+        if not team:
+            candidate.researchers = [ResearcherProfile(name="William Zhou", role="公开署名作者/贡献角色未披露")]
+        return candidate
+
+    def test_real_case_official_blog_cannot_hide_unverified_people(self):
+        from paradigms.models import verified_organization_attribution
+        from agents.paradigm_orchestrator import _delivery_profile_ready
+        from reports.paradigm_generator import _report_input_violations
+        candidate = self.candidate()
+        self.assertEqual(verified_organization_attribution(candidate), {})
+        self.assertFalse(_delivery_profile_ready(candidate))
+        self.assertTrue(_report_input_violations([candidate]))
+
+    def test_even_formal_report_cannot_drop_named_unready_person(self):
+        from paradigms.models import verified_organization_attribution
+        self.assertEqual(verified_organization_attribution(self.candidate(formal=True)), {})
+
+    def test_collective_established_report_exception_is_retained(self):
+        from paradigms.models import verified_organization_attribution
+        self.assertEqual(verified_organization_attribution(self.candidate(formal=True, team=True))["name"], "Anthropic")
+        for tier in ("unknown", "monitored", "verified"):
+            self.assertEqual(verified_organization_attribution(self.candidate(formal=True, team=True, tier=tier)), {})
+
+    def test_long_official_source_retains_end_limitations(self):
+        from sources.priority_research_source import PriorityResearchPageSource, _ResearchLink
+        body = "Opening claim " * 1800 + " Middle experiment " * 1800 + " IMPORTANT_FINAL_LIMITATION: full-system capability not demonstrated."
+        html = '<html><head><title>Research</title><meta property="article:published_time" content="2026-10-12T09:30:00Z"></head><body><main>' + body + '</main></body></html>'
+        response = httpx.Response(200, text=html, request=httpx.Request("GET", ARTICLE))
+        source = PriorityResearchPageSource(pages=[INDEX], lookback_days=3)
+        source.page_coverage[INDEX] = {"detail_failures": 0, "detail_parsed": 0, "detail_outside_window": 0}
+        with research_window(NOW, lookback_days=3):
+            origin = source._parse_detail(INDEX, _ResearchLink(title="Research", url=ARTICLE), response,
+                NOW - timedelta(days=3), {})
+        self.assertIn("IMPORTANT_FINAL_LIMITATION", origin.summary)
+        self.assertEqual(origin.raw["document_excerpt_basis"], "distributed")
+
+    def test_writing_prompts_keep_experiment_conditions_separate(self):
+        from skills.loader import SkillLoader
+        loader = SkillLoader()
+        for name in ("paradigm_extraction", "paradigm_synthesis", "weekly_research_memo", "weekly_route_draft"):
+            with self.subTest(skill=name):
+                text = loader.load(name)
+                self.assertIn("端到端", text)
+                self.assertIn("预测", text)
+
+
 if __name__ == "__main__":
     unittest.main()

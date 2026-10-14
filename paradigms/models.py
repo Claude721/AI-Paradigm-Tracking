@@ -1014,30 +1014,22 @@ def verified_organization_attribution(
 ) -> dict[str, str]:
     """为未披露自然人贡献结构的正式组织发布保留可核验归因。
 
-    不把组织虚构成人物，也不允许未知网页借此绕过人物契约。只有已建立
-    发布者，或已核验组织的正式技术报告，且存在安全一手 URL 时才成立。
+    不把组织虚构成人物。仅已建立机构的正式技术报告可以在未披露可靠
+    自然人角色时用组织归因；普通官方博客不能绕过人物核验。
     """
 
-    official_organization_release = any(
-        evidence.evidence_type
-        in {
-            EvidenceType.TECHNICAL_BLOG,
-            EvidenceType.CONCEPT_ESSAY,
-            EvidenceType.ORIGINAL_IMPLEMENTATION,
-        }
-        and str(evidence.raw.get("origin_kind", "")).startswith("official_")
-        for evidence in candidate.evidence
-    )
-    if candidate.publisher_tier == "established":
-        publisher_ready = bool(
-            candidate.is_formal_technical_report or official_organization_release
-        )
-    else:
-        publisher_ready = bool(
-            candidate.publisher_tier == "verified"
-            and candidate.is_formal_technical_report
-        )
-    if not publisher_ready:
+    if candidate.publisher_tier != "established" or not candidate.is_formal_technical_report:
+        return {}
+    # A named but unverified person cannot disappear into a team-only fallback.
+    names = [name for evidence in candidate.evidence if evidence.evidence_type in ORIGIN_EVIDENCE_TYPES
+             for name in evidence.authors] + [profile.name for profile in candidate.researchers]
+    organizations = {normalize_paradigm_name(evidence.organization) for evidence in candidate.evidence
+                     if evidence.organization}
+    has_named_person = any(plausible_researcher_name(name)
+        and normalize_paradigm_name(name) not in organizations
+        and not re.search(r"(?:\bteam\b|\bconsortium\b|\bcollaboration\b|研究团队|课题组)$", name.strip(), re.I)
+        for name in names)
+    if has_named_person and not delivery_researcher_profiles(candidate.researchers):
         return {}
     for evidence in candidate.evidence:
         if evidence.evidence_type not in ORIGIN_EVIDENCE_TYPES:

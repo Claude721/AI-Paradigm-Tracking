@@ -1733,6 +1733,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         item.publisher_tier = "established"
         item.is_formal_technical_report = True
         item.evidence[0].organization = "Example Research Lab"
+        item.evidence[0].authors = ["Example Research Team"]
         content = _attach_researcher_index(
             "# Radar\n\n## 接下来真正值得盯的信号\n\n继续观察。",
             [item],
