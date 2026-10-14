@@ -14,6 +14,7 @@ from .models import (
 )
 from .reputation import resolve_organization, verified_priority_researcher
 from .rubric import finalize_candidate_rubric, substantive_secondary
+from .evidence_association import countable_evidence
 
 
 def score_candidate(candidate: ParadigmCandidate) -> ParadigmCandidate:
@@ -58,21 +59,22 @@ def is_reportable(candidate: ParadigmCandidate) -> bool:
 
 
 def effective_solidity_score(candidate: ParadigmCandidate) -> float:
-    types = [item.evidence_type for item in candidate.evidence]
+    evidence = [item for item in candidate.evidence if countable_evidence(candidate, item)]
+    types = [item.evidence_type for item in evidence]
     independent_replications = sum(
         item.evidence_type == EvidenceType.INDEPENDENT_REPLICATION
         and item.raw.get("independence") == "independent"
-        for item in candidate.evidence
+        for item in evidence
     )
     implementations = sum(
         item.evidence_type == EvidenceType.IMPLEMENTATION
         and _counts_as_momentum_evidence(item, route_key=candidate.key)
-        for item in candidate.evidence
+        for item in evidence
     )
     origins = sum(item in ORIGIN_EVIDENCE_TYPES for item in types)
     review_replies = sum(
         int(_numeric_value(item.metrics.get("review_replies", 0)))
-        for item in candidate.evidence
+        for item in evidence
         if item.source == "openreview"
     )
     bonus = (
@@ -89,7 +91,7 @@ def _momentum_score(candidate: ParadigmCandidate) -> float:
     countable = [
         item
         for item in candidate.evidence
-        if _counts_as_momentum_evidence(item, route_key=candidate.key)
+        if countable_evidence(candidate, item) and _counts_as_momentum_evidence(item, route_key=candidate.key)
     ]
     sources = {item.source for item in countable}
     types = {item.evidence_type for item in countable}
@@ -149,7 +151,7 @@ def _researcher_score(candidate: ParadigmCandidate) -> float:
 def _volume_score(candidate: ParadigmCandidate) -> float:
     # 绝对量最多贡献总分 5%，只作佐证，不作门槛。
     countable = sum(
-        _counts_as_momentum_evidence(item, route_key=candidate.key)
+        countable_evidence(candidate, item) and _counts_as_momentum_evidence(item, route_key=candidate.key)
         for item in candidate.evidence
     )
     return min(math.log2(countable + 1) * 2.5, 10.0)
@@ -164,6 +166,8 @@ def _assess_publisher(candidate: ParadigmCandidate) -> None:
         if item.evidence_type in ORIGIN_EVIDENCE_TYPES
     )
     for item in candidate.evidence:
+        if item.evidence_type not in ORIGIN_EVIDENCE_TYPES:
+            continue  # A commentator/implementer is not the origin publisher.
         if item.raw.get("publisher_tier") == "established":
             established.append(
                 str(item.raw.get("publisher_evidence") or item.organization or item.source)
@@ -177,8 +181,7 @@ def _assess_publisher(candidate: ParadigmCandidate) -> None:
             established.append(str(organization["name"]))
         elif organization:
             verified.append(f"{organization['name']}：监测组织，尚不自动背书")
-        elif item.organization:
-            verified.append(item.organization)
+        # A free-text affiliation alone is not a verified publisher anchor.
     for profile in candidate.researchers:
         organization = resolve_organization(profile.current_affiliation)
         if organization and organization["tier"] == "established":
@@ -240,13 +243,13 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
             _numeric_value(item.metrics.get("forks", 0)) >= 3
             or _numeric_value(item.metrics.get("stars", 0)) >= 50
         )
-        for item in candidate.evidence
+        for item in candidate.evidence if countable_evidence(candidate, item)
     )
     official_release = any(
         item.raw.get("publisher_tier") == "established"
         and item.raw.get("origin_kind")
         in {"technical_report", "official_research", "official_model_release"}
-        for item in candidate.evidence
+        for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES
     )
     if candidate.is_formal_technical_report and candidate.publisher_tier == "established":
         return True, "已核验的前沿组织发布正式 Technical Report，进入优先解读"

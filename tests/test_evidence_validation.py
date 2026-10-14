@@ -18,6 +18,7 @@ from paradigms.models import (
 from paradigms.rubric import objective_answers, substantive_secondary
 from paradigms.scoring import _admission_gate, _momentum_score
 from reports.paradigm_generator import _candidate_dossier, _compact_route_dossier
+from tests.test_paradigm_pipeline import rubric_assessment
 
 
 def route() -> ParadigmCandidate:
@@ -62,6 +63,7 @@ def model_selects(candidate: ParadigmCandidate, index: int = 1) -> None:
             {
                 "innovation_types": ["architecture"],
                 "mental_model": {"observation_axis": "状态转移"},
+                "rubric_answers": [item for item in rubric_assessment(stage="final")["answers"] if item["source"] == "model"],
                 "substantive_uptake_evidence_indices": [index],
             },
             visible_evidence_indices={index},
@@ -203,6 +205,7 @@ class EvidenceValidationTests(unittest.TestCase):
             ParadigmSynthesizer._apply_synthesis_payload(
                 compact,
                 {"innovation_types": ["architecture"],
+                 "rubric_answers": [item for item in rubric_assessment(stage="final")["answers"] if item["source"] == "model"],
                  "mental_model": {"observation_axis": "状态转移"},
                  "substantive_uptake_evidence_indices": [1]},
                 visible_evidence_indices=set(),
@@ -294,6 +297,7 @@ class EvidenceValidationTests(unittest.TestCase):
         def resynthesize(mechanism: str | None = None) -> None:
             payload = {
                 "innovation_types": ["architecture"],
+                "rubric_answers": [item for item in rubric_assessment(stage="final")["answers"] if item["source"] == "model"],
                 "mental_model": {"observation_axis": "状态转移"},
                 "substantive_uptake_evidence_indices": [],
             }
@@ -333,6 +337,7 @@ class EvidenceValidationTests(unittest.TestCase):
             ParadigmSynthesizer._apply_synthesis_payload(
                 candidate,
                 {"innovation_types": ["architecture"],
+                 "rubric_answers": [item for item in rubric_assessment(stage="final")["answers"] if item["source"] == "model"],
                  "mental_model": {"observation_axis": "状态转移"},
                  "substantive_uptake_evidence_indices": []},
                 visible_evidence_indices=set(),
@@ -365,6 +370,8 @@ class EvidenceValidationTests(unittest.TestCase):
             metrics={"stars": 55, "forks": 2},
             raw={
                 "relationship": "paper_linked_repository",
+                "association_version": 2,
+                "origin_fingerprint": candidate.evidence[0].fingerprint,
                 "independence": "official",
             },
         ))

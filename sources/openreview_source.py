@@ -46,17 +46,20 @@ class OpenReviewSource:
         stage_cache=None,
         clock=None,
         sleeper=None,
+        max_pages_per_query: int | None = None,
     ):
         self.lookback_days = max(lookback_days, 1)
         self.limit = min(max(limit, 1), 100)
         self.venues = config.OPENREVIEW_VENUES if venues is None else venues
         self.searches = searches or DEFAULT_SEARCHES
         self.concurrency = max(concurrency, 1)
+        self.max_pages_per_query = max(1, config.PARADIGM_SOURCE_PAGE_LIMIT if max_pages_per_query is None else max_pages_per_query)
         self.request_count = 0
         self.rate_limited_requests = 0
         self.failed_queries = 0
         self.not_executed_queries = 0
         self.completed_queries = 0
+        self.limited_queries = 0
         self.result_count = 0
         self.relevance_filtered_count = 0
         self.undated_filtered_count = 0
@@ -76,7 +79,7 @@ class OpenReviewSource:
             return []
         try:
             results = await self.fetch()
-            incomplete = bool(self.failed_queries or self.not_executed_queries)
+            incomplete = bool(self.failed_queries or self.not_executed_queries or self.limited_queries)
             self.fetch_status = "partial" if incomplete else "completed"
             self.fetch_error = "PartialQueryFailure" if incomplete else ""
             return results
@@ -92,6 +95,7 @@ class OpenReviewSource:
         self.failed_queries = 0
         self.not_executed_queries = 0
         self.completed_queries = 0
+        self.limited_queries = 0
         self.result_count = 0
         self.relevance_filtered_count = 0
         self.undated_filtered_count = 0
@@ -105,7 +109,7 @@ class OpenReviewSource:
 
         async def search_one(client, venue: str, query: str):
             async with semaphore:
-                signature = hashlib.sha256(json.dumps([2, research_now().isoformat(), self.lookback_days, venue, query, self.limit]).encode()).hexdigest()
+                signature = hashlib.sha256(json.dumps([3, research_now().isoformat(), self.lookback_days, venue, query, self.limit, self.max_pages_per_query]).encode()).hexdigest()
                 cached = self.stage_cache.cache_get("openreview_pages", signature) if self.stage_cache else None
                 offset, seen_pages, evidence, complete = 0, set(), {}, False
                 if cached is not None:
@@ -132,7 +136,7 @@ class OpenReviewSource:
                     progress["status"] = "not_executed_rate_limit"
                     return list(evidence.values()), False
                 try:
-                    while True:
+                    for _ in range(self.max_pages_per_query):
                         params = {
                             # Public API v2 /notes/search contract: term is the
                             # search expression; group scopes the invitation.
@@ -182,6 +186,14 @@ class OpenReviewSource:
                         progress.update(offset=offset, pages=len(seen_pages), results=len(evidence), status="completed" if complete else "pending")
                         if complete:
                             return list(evidence.values()), True
+                    # Search API ordering is not guaranteed chronological.
+                    # This is a bounded recall gap, not an exhaustive zero.
+                    self.limited_queries += 1
+                    progress["status"] = "page_limit"
+                    return list(evidence.values()), False
+                except asyncio.CancelledError:
+                    progress["status"] = "interrupted"
+                    raise
                 except OpenReviewCircuitOpen:
                     self.not_executed_queries += 1
                     progress["status"] = "not_executed_rate_limit"
@@ -309,6 +321,7 @@ class OpenReviewSource:
                 if not self.completed_queries
                 and not self.failed_queries
                 and not self.not_executed_queries
+                and not self.limited_queries
                 else "rate_limited"
                 if self._circuit_open and not self.completed_queries
                 else "partial_rate_limited"
@@ -316,13 +329,15 @@ class OpenReviewSource:
                 else "query_failed"
                 if self.failed_queries and not self.completed_queries
                 else "partial"
-                if self.failed_queries or self.not_executed_queries
+                if self.failed_queries or self.not_executed_queries or self.limited_queries
                 else "completed_after_retry"
                 if self.rate_limited_requests
                 else "completed"
             ),
             "queries": len(self.venues) * len(self.searches),
             "completed_queries": self.completed_queries,
+            "limited_queries": self.limited_queries,
+            "max_pages_per_query": self.max_pages_per_query,
             "failed_queries": self.failed_queries,
             "not_executed_queries": self.not_executed_queries,
             "requests": self.request_count,

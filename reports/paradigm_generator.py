@@ -95,7 +95,7 @@ class ParadigmReportGenerator:
         ordered = sorted(candidates, key=lambda item: item.total_score, reverse=True)
         if not ordered:
             content = self._empty_report(date, stats)
-            if stats.get("delivery_contract_version") == 2:
+            if stats.get("delivery_contract_version") in {2, 3}:
                 content = _attach_coverage_boundary(content, stats)
         else:
             preflight = _report_input_violations(ordered)
@@ -416,7 +416,7 @@ class ParadigmReportGenerator:
             f"本期获取 {stats.get('origin_count', 0)} 份一手材料，按来源广度选定并完成 "
             f"{stats['delivery_scope']['origin_completed']} 份材料的原点初筛，以及 "
             f"{stats['delivery_scope']['deep_completed']} 条选定机制的深挖核验。"
-            if stats.get("delivery_contract_version") == 2 else
+            if stats.get("delivery_contract_version") in {2, 3} else
             f"本期共扫描 {stats.get('origin_count', 0)} 份一手机制材料，已完成配置信源的召回与全部计划研究判断。"
         )
         return f"""# AI 技术范式雷达
@@ -772,6 +772,8 @@ def _route_draft_violations(
         violations.append("出现内部评分")
     if _has_long_english_excerpt(value):
         violations.append("出现英文原文长句或成段摘录")
+    if _has_internal_evidence_labels(value):
+        violations.append("暴露内部证据字段；必须用自然中文解释事实与未知边界")
     if _contains_absolute_paradigm_claim(value):
         violations.append("路线正文使用了无边界的新范式绝对表述")
     linked_urls = _markdown_link_targets(value)
@@ -859,7 +861,7 @@ def _researcher_dossier(profile: ResearcherProfile) -> dict:
 
 
 def _public_stats(stats: dict) -> dict:
-    if stats.get("delivery_contract_version") == 2:
+    if stats.get("delivery_contract_version") in {2, 3}:
         scope = stats["delivery_scope"]
         return {key: stats[key] for key in (
             "origin_count", "ordinary_discovery_lookback_days", "high_signal_discovery_lookback_days",
@@ -965,6 +967,8 @@ def _editorial_violations(
         violations.append("把早期技术路线写成无边界的确定新范式结论")
     if _has_long_english_excerpt(content):
         violations.append("出现英文原文长句或成段摘录")
+    if _has_internal_evidence_labels(content):
+        violations.append("暴露内部证据字段；必须用自然中文解释事实与未知边界")
     violations.extend(_momentum_brief_violations(content, candidates or []))
     violations.extend(_researcher_profile_violations(candidates or []))
     if require_researcher_index and candidates:
@@ -1036,7 +1040,10 @@ def _momentum_evidence(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
         EvidenceType.PRODUCT_ADOPTION,
     }
     selected = []
+    from paradigms.evidence_association import countable_evidence
     for value in candidate.evidence:
+        if not countable_evidence(candidate, value):
+            continue
         if value.evidence_type not in evidence_types:
             continue
         if value.raw.get("indexed_discovery_only"):
@@ -1432,7 +1439,7 @@ def _attach_research_scope_boundary(content: str, stats: dict) -> str:
 def _attach_coverage_boundary(content: str, stats: dict) -> str:
     """Coverage defects belong in failure audit, not a formal research memo."""
     require_completed_research(stats, content=content)
-    if stats.get("delivery_contract_version") == 2:
+    if stats.get("delivery_contract_version") in {2, 3}:
         content = re.sub(r"(?m)^> 本期取材范围：.*(?:\n|$)", "", content).rstrip()
         proof = stats["delivery_scope"]
         note = ("本期取材范围：从 " + str(len(proof["usable_primary_sources"])) +
@@ -1552,6 +1559,10 @@ def _all_http_urls(content: str) -> set[str]:
         if value:
             urls.add(_normalized_url(value))
     return urls
+
+
+def _has_internal_evidence_labels(content: str) -> bool:
+    return bool(re.search(r"\b(?:source_fact|interpretive_compression|evidence_status|rubric_answers)\b|`(?:unknown|inference|verified|pending_deep)`", content))
 
 
 def _quality_event_detail(

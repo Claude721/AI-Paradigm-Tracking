@@ -420,7 +420,10 @@ def assess_candidate_freshness(
     dated_primary: list[tuple[datetime, TechnicalEvidence]] = []
     undated_primary: list[TechnicalEvidence] = []
     current_uptake: list[TechnicalEvidence] = []
+    from .evidence_association import countable_evidence
     for evidence in candidate.evidence:
+        if not countable_evidence(candidate, evidence):
+            continue
         if evidence.evidence_type in primary_types:
             published = _evidence_datetime(evidence.published_at)
             if published:
@@ -659,6 +662,8 @@ class ResearcherProfile:
     public_bio_excerpt: str = ""
     key_person_reason: str = ""
     contact_search_notes: list[str] = field(default_factory=list)
+    identity_search_status: str = ""
+    contact_search_status: str = ""
 
     @property
     def public_contacts(self) -> dict[str, str]:
@@ -680,6 +685,8 @@ class ResearcherProfile:
 
         if self.public_contacts:
             return True
+        if self.contact_search_status:
+            return self.contact_search_status == "completed"
         completed_markers = (
             "已检索",
             "检索失败",
@@ -1096,6 +1103,12 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
                 or any(not isinstance(value, str) for value in receipt.get("evidence_fingerprints", []))):
             raise ValueError("社区查询回执结构无效")
         history = receipt.get("failure_history", [])
+        for field_name in ("raw_result_count", "retained_result_count", "filtered_result_count", "confirmed_credits"):
+            if field_name in receipt and (type(receipt[field_name]) is not int or receipt[field_name] < 0):
+                raise ValueError("社区查询诊断计数无效")
+        for field_name in ("request_id", "query_kind"):
+            if field_name in receipt and (not isinstance(receipt[field_name], str) or len(receipt[field_name]) > 200):
+                raise ValueError("社区查询诊断身份无效")
         if not isinstance(history, list) or any(
             not isinstance(item, dict) or item.get("status") not in {"failed", "not_executed", "not_configured"}
             or not isinstance(item.get("reason"), str) or not isinstance(item.get("input_signature"), str)
@@ -1150,6 +1163,7 @@ def _researcher_profile_from_dict(payload: dict[str, Any]) -> ResearcherProfile:
             "name", "role", "current_affiliation", "research_trajectory",
             "public_email", "public_email_source", "background_summary",
             "public_bio_excerpt", "key_person_reason",
+            "identity_search_status", "contact_search_status",
         },
         lists={
             "prior_affiliations", "representative_works", "contact_search_notes",
@@ -1157,6 +1171,9 @@ def _researcher_profile_from_dict(payload: dict[str, Any]) -> ResearcherProfile:
         mappings={"profile_urls", "identifiers"},
         numbers={"trajectory_consistency"},
     )
+    for field_name in ("identity_search_status", "contact_search_status"):
+        if payload.get(field_name, "") not in {"", "completed", "failed", "not_configured"}:
+            raise ValueError("人物检索状态无效")
     return ResearcherProfile(
         **_known_dataclass_fields(ResearcherProfile, payload)
     )

@@ -61,10 +61,16 @@ class ResearcherProfileClient:
         ) as client:
             async def enrich_one(profile: ResearcherProfile) -> None:
                 async with self._semaphore:
+                    profile.identity_search_status = "not_configured"
+                    profile.contact_search_status = "not_configured"
                     if config.OPENALEX_API_KEY:
                         try:
                             await self._openalex(client, profile, evidence)
+                            profile.identity_search_status = "completed"
+                            profile.contact_search_status = "completed"
                         except Exception as exc:
+                            profile.identity_search_status = "failed"
+                            profile.contact_search_status = "failed"
                             logger.warning("OpenAlex 人物增强失败 [%s]: %s", profile.name, type(exc).__name__)
                             _note(profile, f"OpenAlex 检索失败：{type(exc).__name__}")
                     else:
@@ -74,11 +80,17 @@ class ResearcherProfileClient:
                         try:
                             await self._orcid(client, profile, orcid)
                         except Exception as exc:
+                            profile.contact_search_status = "failed"
                             logger.warning("ORCID 人物增强失败 [%s]: %s", profile.name, type(exc).__name__)
                             _note(profile, f"ORCID 检索失败：{type(exc).__name__}")
                     else:
                         _note(profile, "未获得可核验的 ORCID")
                     await self._homepage_contacts(client, profile)
+                    if profile.public_contacts:
+                        # Links supplied by the current work/verified academic
+                        # identity are valid anchors even if a supplement fails.
+                        profile.identity_search_status = "completed"
+                        profile.contact_search_status = "completed"
 
             # A same-name historical profile without a shared identifier is
             # kept for the route, but must not be re-identified against this
@@ -143,10 +155,10 @@ class ResearcherProfileClient:
             )
             if response.status_code >= 400:
                 _note(profile, f"OpenAlex 作者检索返回 HTTP {response.status_code}")
-                return
+                response.raise_for_status()
             matches = [
                 item
-                for item in response.json().get("results", [])
+                for item in _openalex_results(response)
                 if _name_similarity(profile.name, item.get("display_name", "")) >= 0.92
             ]
             best = await self._match_current_work(client, matches, evidence.title)
@@ -194,7 +206,7 @@ class ResearcherProfileClient:
         if works_response.status_code >= 400:
             return
         works = []
-        for work in works_response.json().get("results", []):
+        for work in _openalex_results(works_response):
             title = work.get("display_name", "")
             if not title:
                 continue
@@ -247,7 +259,7 @@ class ResearcherProfileClient:
             },
         )
         if response.status_code >= 400:
-            return False
+            response.raise_for_status()
         return any(
             SequenceMatcher(
                 None,
@@ -255,7 +267,7 @@ class ResearcherProfileClient:
                 str(work.get("display_name", "")).lower(),
             ).ratio()
             >= 0.82
-            for work in response.json().get("results", [])
+            for work in _openalex_results(response)
         )
 
     async def _openalex_get(self, client, url, *, params):
@@ -281,7 +293,7 @@ class ResearcherProfileClient:
         )
         if response.status_code >= 400:
             _note(profile, f"ORCID 公开记录返回 HTTP {response.status_code}")
-            return
+            response.raise_for_status()
         payload = response.json()
         person = payload.get("person") or {}
         researcher_urls = ((person.get("researcher-urls") or {}).get("researcher-url") or [])
@@ -351,11 +363,14 @@ class ResearcherProfileClient:
             response = await client.get(homepage)
             if response.status_code >= 400:
                 _note(profile, f"个人主页返回 HTTP {response.status_code}")
+                profile.contact_search_status = "failed"
                 return
             content = html.unescape(response.text[:500_000])
         except Exception as exc:
             _note(profile, f"个人主页读取失败：{type(exc).__name__}")
+            profile.contact_search_status = "failed"
             return
+        profile.contact_search_status = "completed"
         mailto = re.search(
             r"href\s*=\s*['\"]mailto:([^?'\"#\s]+)", content, re.IGNORECASE
         )
@@ -384,6 +399,31 @@ class ResearcherProfileClient:
             if len(bio) >= 40:
                 profile.public_bio_excerpt = bio
                 _note(profile, "已读取个人主页公开简介，用于核验教育与研究背景")
+        if not profile.public_bio_excerpt:
+            # Many researcher sites use ordinary paragraphs, not SEO metadata.
+            # Only retain professional first-person/name-linked biography.
+            safe_body = re.sub(r"<(script|style|nav|footer)\b[^>]*>.*?</\1>", " ", content, flags=re.I | re.S)
+            paragraphs = re.findall(r"<p\b[^>]*>(.*?)</p>", safe_body, flags=re.I | re.S)
+            bio_parts = []
+            for paragraph in paragraphs:
+                text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", paragraph)).strip()
+                if (40 <= len(text) <= 2500
+                    and re.search(r"\b(?:research|professor|Ph\.?D|doctoral|postdoc|student|engineer)\b|研究|博士|教授|工程师", text, re.I)
+                    and (re.search(r"\b(?:I am|I'm|My research|I received|I obtained|I work)\b|本人|我[是的在]", text, re.I)
+                         or profile.name.casefold() in text.casefold())):
+                    bio_parts.append(text)
+            if bio_parts:
+                profile.public_bio_excerpt = " ".join(bio_parts)[:1200]
+                _note(profile, "已读取个人主页公开职业简介段落，用于核验教育与研究背景")
+
+
+def _openalex_results(response):
+    payload = response.json()
+    if (not isinstance(payload, dict) or payload.get("error")
+        or not isinstance(payload.get("results"), list)
+        or any(not isinstance(item, dict) for item in payload["results"])):
+        raise ValueError("OpenAlex results contract is invalid; not a completed no-match search")
+    return payload["results"]
 
 
 def _seed_profiles(

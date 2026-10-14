@@ -13,12 +13,23 @@ from runtime_clock import research_days, research_now
 SEARCH_STATUSES = {"completed", "disabled", "not_configured", "failed", "not_executed"}
 
 
-def record_search(candidate, provider, status, *, reason="", count=0):
+def record_search(candidate, provider, status, *, reason="", count=0, diagnostics=None):
     if status not in SEARCH_STATUSES:
         raise ValueError("Invalid community search status")
     candidate.community_search_receipts[provider] = {
         "status": status, "reason": reason, "result_count": count,
     }
+    if diagnostics:
+        for key, value in diagnostics.items():
+            if key in {"raw_result_count", "retained_result_count", "filtered_result_count", "confirmed_credits"}:
+                if type(value) is not int or value < 0:
+                    raise ValueError("Invalid search diagnostic count")
+            elif key in {"request_id", "query_kind"}:
+                if not isinstance(value, str) or len(value) > 200:
+                    raise ValueError("Invalid search diagnostic identity")
+            else:
+                raise ValueError("Unknown search diagnostic")
+        candidate.community_search_receipts[provider].update(diagnostics)
 
 
 def search_receipt_summary(candidate):
@@ -73,7 +84,7 @@ def search_signature(candidate, provider):
                             bool(config.REDDIT_CLIENT_SECRET), bool(config.REDDIT_USER_AGENT)],
         "x_official": [config.KOL_X_SOURCE_ENABLED, bool(config.TWITTER_BEARER_TOKEN)],
     }
-    payload = [1, provider, candidate.key, candidate.name, candidate.keywords,
+    payload = [2, provider, candidate.key, candidate.name, candidate.keywords,
                origins, research_now().isoformat(), research_days(), settings.get(provider)]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 

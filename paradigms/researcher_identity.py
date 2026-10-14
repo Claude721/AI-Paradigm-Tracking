@@ -60,6 +60,7 @@ def merge_researcher_profiles(
         for field in (
             "role", "current_affiliation", "research_trajectory",
             "background_summary", "public_bio_excerpt", "key_person_reason",
+            "identity_search_status", "contact_search_status",
         ):
             if not getattr(match, field):
                 setattr(match, field, getattr(profile, field))

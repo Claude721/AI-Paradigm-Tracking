@@ -23,6 +23,8 @@ description: 对 Technical Report 机制索引中的单个机制回答版本化 
 
 只返回一个合法 JSON 对象：
 
+以下只展示单题格式。实际 rubric_answers 必须覆盖本阶段 common 和所选类型的全部题 ID，每题恰好一次；不要照抄示例只答一题。无法确认的题显式回答 unknown，不能省略。
+
 {{
   "assessment": {{
     "thesis": "这项机制为哪条技术演化提供了什么新证据",

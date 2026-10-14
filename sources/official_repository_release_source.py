@@ -601,6 +601,9 @@ def _linked_primary_material(owner_id: str, readme: str, homepage: str) -> str:
     def allowed(value: str) -> bool:
         parsed = urlparse(value)
         host = (parsed.hostname or "").casefold().removeprefix("www.")
+        path = parsed.path.casefold()
+        if re.search(r"(?:^|/)(?:legal|license|licenses|privacy|terms|trademarks?|code-of-conduct|support)(?:/|$)", path):
+            return False  # Corporate policy/docs are never technical origins.
         return bool(
             host
             and host != "github.com"

@@ -30,6 +30,7 @@ from paradigms.discovery import ParadigmDiscovery
 from paradigms.enrichment import EvidenceEnricher
 from paradigms.search_receipts import incomplete_searches
 from paradigms.models import (
+    key_researcher_profiles,
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
     _evidence_datetime,
@@ -86,10 +87,10 @@ class ParadigmOrchestrator:
 
     async def run(self, *, reference_time: datetime | None = None, resume_only: bool = False) -> dict:
         active = self.store.campaigns.active()
-        bounded = getattr(self, "delivery_contract_version", None) == 2
+        bounded = getattr(self, "delivery_contract_version", None) in {2, 3}
         now = reference_time or datetime.now(timezone.utc)
         if bounded and active and not resume_only and active.status != "waiting_delivery" and (
-            active.stats.get("delivery_contract_version") != 2 or
+            active.stats.get("delivery_contract_version") != self.delivery_contract_version or
             now - active.reference_time >= timedelta(days=active.ordinary_days)
         ):
             self.store.campaigns.supersede(active.campaign_id)
@@ -97,7 +98,7 @@ class ParadigmOrchestrator:
             active = None
         if resume_only and active is None:
             raise RuntimeError("没有待续跑的研究批次；--resume-research 不启动新发现")
-        if bounded and resume_only and active.stats.get("delivery_contract_version") != 2:
+        if bounded and resume_only and active.stats.get("delivery_contract_version") != self.delivery_contract_version:
             raise RuntimeError("旧版研究计划不能按 V0 交付契约续跑；请执行普通运行建立新计划，旧对象保留为历史")
         with research_window(active.reference_time if active else reference_time,
                              observation_time=reference_time or datetime.now(timezone.utc),
@@ -138,7 +139,7 @@ class ParadigmOrchestrator:
         }
         reopener = getattr(self.store, "reopen_failed_community_judgments", None)
         stats["community_failed_judgments_reopened"] = (
-            reopener(allow_partial_sources=True) if callable(reopener) and getattr(self, "delivery_contract_version", None) == 2
+            reopener(allow_partial_sources=True) if callable(reopener) and getattr(self, "delivery_contract_version", None) in {2, 3}
             else reopener() if callable(reopener) else 0
         )
         queue_before = self.store.work_queue_snapshot(reference_time=research_now())
@@ -147,7 +148,7 @@ class ParadigmOrchestrator:
         if self.campaign.discovery is None:
             batch = await self.discovery.run()
             stats["discovery_resumed"] = False
-        elif getattr(self, "delivery_contract_version", None) == 2:
+        elif getattr(self, "delivery_contract_version", None) in {2, 3}:
             batch = self.campaign.discovery
             stats["discovery_resumed"] = True
             stats["discovery_retry_sources"] = []
@@ -159,7 +160,7 @@ class ParadigmOrchestrator:
             stats["discovery_resumed"] = True
             stats["discovery_retry_sources"] = sorted(retry_sources)
             batch = await self.discovery.retry(self.campaign.discovery) if retry_sources else self.campaign.discovery
-        if getattr(self, "delivery_contract_version", None) == 2:
+        if getattr(self, "delivery_contract_version", None) in {2, 3}:
             from paradigms.delivery_policy import validated_discovery
             batch, rejected = validated_discovery(batch)
             for key, count in rejected.items():
@@ -360,7 +361,7 @@ class ParadigmOrchestrator:
                 recall_lanes=recall_lanes,
             )
         )
-        bounded = getattr(self, "delivery_contract_version", None) == 2
+        bounded = getattr(self, "delivery_contract_version", None) in {2, 3}
         if bounded:
             from paradigms.delivery_policy import bounded_origins
             selected = bounded_origins(batch.origins, limit=config.PARADIGM_RESEARCH_ORIGIN_LIMIT,
@@ -855,11 +856,26 @@ class ParadigmOrchestrator:
                 f"持久化契约的记录；来源 {checkpoint_rejection_sources}",
             )
         reportable = [candidate for candidate in candidates if is_reportable(candidate)]
-        delivery_profile_deferred = [
+        profile_unready = [
             candidate
             for candidate in reportable
             if not _delivery_profile_ready(candidate)
         ]
+        profile_observed = [candidate for candidate in profile_unready
+            if key_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT) and all(
+                profile.identity_search_status == "completed"
+                and profile.contact_search_status == "completed"
+                for profile in key_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT)
+            )]
+        for candidate in profile_observed:
+            candidate.status = "observe"
+            candidate.rejection_reason = "已完成公开人物检索，但尚无足够可核验身份/职业背景，不具备本期交付资格，保留观察"
+            candidate.rubric_assessment = {**candidate.rubric_assessment,
+                "decision": "observe", "decision_reason": candidate.rejection_reason}
+        observed_keys = {candidate.key for candidate in profile_observed}
+        reportable = [candidate for candidate in reportable if candidate.key not in observed_keys]
+        stats["delivery_profile_observed_count"] = len(profile_observed)
+        delivery_profile_deferred = [candidate for candidate in profile_unready if candidate.key not in observed_keys]
         if delivery_profile_deferred:
             deferred_keys = {
                 candidate.key for candidate in delivery_profile_deferred
@@ -1066,13 +1082,13 @@ class ParadigmOrchestrator:
         stats["result_kind"] = "research_blocked" if stats["research_incomplete"] or stats["coverage_incomplete"] else "complete_memo" if reportable else "complete_no_signal"
         if bounded:
             from paradigms.delivery_policy import delivery_proof
-            stats["delivery_contract_version"] = 2
+            stats["delivery_contract_version"] = self.delivery_contract_version
             stats["delivery_scope"] = delivery_proof(stats, reportable, ledger,
                 minimum_sources=config.PARADIGM_MIN_PRIMARY_SOURCES)
             # Diagnostics above remain honest. A scoped, evidence-qualified
             # result is independent of unrelated acquisition/backlog failures.
-            stats["result_kind"] = "complete_memo" if reportable else (
-                "complete_no_signal" if ledger["pending_total_count"] == 0 else "research_blocked")
+            stats["result_kind"] = ("research_blocked" if ledger["pending_total_count"] else
+                "complete_memo" if reportable else "complete_no_signal")
         from paradigms.completion import research_completion_violations
         ready = not research_completion_violations(stats)
         self.store.campaigns.save_stats(self.campaign.campaign_id, stats, ready=ready)
@@ -1120,7 +1136,7 @@ class ParadigmOrchestrator:
             ) else "backfill"
             origin_queues[lane].append(item)
         initial_deep = self.store.load_pending_deep_candidates()
-        bounded = getattr(self, "delivery_contract_version", None) == 2
+        bounded = getattr(self, "delivery_contract_version", None) in {2, 3}
         if bounded:
             member_keys = self.store.campaigns.candidate_keys(self.campaign.campaign_id)
             initial_deep = [item for item in initial_deep if item.key in member_keys]
@@ -1194,13 +1210,14 @@ class ParadigmOrchestrator:
 
         def active_lanes():
             active = set()
+            origins_remaining = bounded and any(origin_queues.values())
             for lane in origin_queues:
                 clean_deep_queue(lane)
-                if origin_queues[lane] or deep_queues[lane]:
+                if origin_queues[lane] or (not origins_remaining and deep_queues[lane]):
                     active.add(lane)
             while refresh_queue and refresh_queue[0].key not in refresh_keys:
                 refresh_queue.popleft()
-            if refresh_queue:
+            if refresh_queue and not origins_remaining:
                 active.add("updates")
             return active
 
@@ -1236,7 +1253,7 @@ class ParadigmOrchestrator:
             if lane is None:
                 break
             stage = "refresh" if lane == "updates" else (
-                "deep" if deep_queues[lane] and (
+                "deep" if deep_queues[lane] and not (bounded and any(origin_queues.values())) and (
                     not origin_queues[lane] or previous_stage[lane] == "origin"
                 ) else "origin"
             )
@@ -1348,9 +1365,7 @@ class ParadigmOrchestrator:
                         deep_tasks[key] = rebased
                         deep_plan[key] = rebased
                         history_index.upsert(rebased)
-                    limit = config.PARADIGM_DEEP_SAFETY_LIMIT
-                    if bounded:
-                        limit = min(limit or config.PARADIGM_RESEARCH_DEEP_LIMIT, config.PARADIGM_RESEARCH_DEEP_LIMIT)
+                    limit = 0 if bounded else config.PARADIGM_DEEP_SAFETY_LIMIT
                     if limit > 0 and key not in visited_deep_keys and len(visited_deep_keys) >= limit:
                         # Remove only from this process's runnable queue. The
                         # durable snapshot and final safety ledger retain it.
@@ -1440,9 +1455,7 @@ class ParadigmOrchestrator:
         safety_deep = []
         for key, item in deep_tasks.items():
             snapshot = _deferred_deep_snapshot(self.store, item, supporting)
-            deep_limit = config.PARADIGM_DEEP_SAFETY_LIMIT
-            if bounded:
-                deep_limit = min(deep_limit or config.PARADIGM_RESEARCH_DEEP_LIMIT, config.PARADIGM_RESEARCH_DEEP_LIMIT)
+            deep_limit = 0 if bounded else config.PARADIGM_DEEP_SAFETY_LIMIT
             if deep_limit > 0 and key not in visited_deep_keys and len(visited_deep_keys) >= deep_limit:
                 safety_deep.append(snapshot)
             else:
@@ -1857,7 +1870,7 @@ class ParadigmOrchestrator:
                         fresh, values, "external_enrichment"
                     )
                     from paradigms.search_receipts import blocking_searches
-                    blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) == 2)
+                    blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3})
                     search_failed = [item for item in values if blocked(item)]
                     values = [item for item in values if not blocked(item)]
                     fresh = [item for item in fresh if not blocked(item)]
@@ -2040,7 +2053,7 @@ class ParadigmOrchestrator:
                     allow_subset=True,
                 )
                 from paradigms.search_receipts import blocking_searches
-                blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) == 2)
+                blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3})
                 search_failed = [item for item in candidate_batch if blocked(item)]
                 values = [item for item in values if not blocked(item)]
                 if values:

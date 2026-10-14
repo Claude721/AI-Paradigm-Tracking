@@ -70,7 +70,7 @@ def research_completion_violations(stats: dict) -> list[str]:
     """
     if not isinstance(stats, dict):
         return ["缺少可核验的研究完成记录"]
-    if type(stats.get("delivery_contract_version")) is int and stats["delivery_contract_version"] == 2:
+    if type(stats.get("delivery_contract_version")) is int and stats["delivery_contract_version"] in {2, 3}:
         from .delivery_policy import violations
         return violations(stats)
     if "delivery_contract_version" in stats:
@@ -239,7 +239,7 @@ def require_completed_research(stats: dict, *, content: str = "", candidates=Non
         violations.append("报告候选仍有 pending_deep 研究检查点")
     if candidates is not None:
         from .search_receipts import incomplete_searches
-        if stats.get("delivery_contract_version") == 2:
+        if stats.get("delivery_contract_version") in {2, 3}:
             expected = (stats.get("delivery_scope") or {}).get("routes", [])
             actual = sorted([{"key": item.key, "signature": item.report_signature}
                              for item in candidates], key=lambda item: item["key"])

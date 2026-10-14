@@ -154,7 +154,8 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
         candidate.status = "pending_deep"
         store.save_candidates(candidates)
         orchestrator = ParadigmOrchestrator.__new__(ParadigmOrchestrator)
-        orchestrator.delivery_contract_version = 2
+        from paradigms.delivery_policy import VERSION
+        orchestrator.delivery_contract_version = VERSION
         orchestrator.store, orchestrator.deep_concurrency = store, 1
         orchestrator.enricher = EvidenceEnricher(concurrency=1, budget_store=store.provider_budgets)
         orchestrator.enricher.researchers.openalex_request_limit = identity_requests

@@ -335,6 +335,8 @@ class OfflineReplayTests(unittest.IsolatedAsyncioTestCase):
             metrics={"stars": 135},
             raw={
                 "relationship": "paper_linked_repository",
+                "association_version": 2,
+                "origin_fingerprint": primary.fingerprint,
                 "independence": "official",
                 "metric_delta": {"stars": 25},
                 "metric_delta_observed_at": "2026-09-11T00:00:00+00:00",

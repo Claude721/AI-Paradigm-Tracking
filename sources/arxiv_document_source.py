@@ -317,6 +317,9 @@ def parse_arxiv_html(
         url
         for url in project_urls
         if urlparse(url).netloc.casefold() in {"github.com", "www.github.com"}
+        and len([part for part in urlparse(url).path.split("/") if part]) == 2
+        and urlparse(url).path.split("/")[1].casefold() != "arxiv"
+        and urlparse(url).path.split("/")[2].casefold() != "latexml"
     ]
     author_roles = _infer_author_roles(parser.authors, parser.equal_contribution_names)
     return {
@@ -391,10 +394,18 @@ class _ArxivHTMLParser(HTMLParser):
         self._current_href = ""
         self._current_anchor: list[str] = []
         self._in_author_anchor = False
+        self._ignored_tags: list[tuple[str, bool]] = []
+        self._ignored_depth = 0
+        self._anchor_in_document = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = {key: value or "" for key, value in attrs}
         classes = set(values.get("class", "").split())
+        ignored = tag in {"nav", "footer", "script", "style"} or bool(classes & {"ltx_bibliography", "ltx_note_outer", "ltx_page_footer", "ltx_page_header"})
+        if tag not in {"meta", "link", "img", "br", "hr", "input"}:
+            self._ignored_tags.append((tag, ignored))
+            if ignored:
+                self._ignored_depth += 1
         if tag in {"article", "section", "p", "figcaption"}:
             self._capture_document += 1
         if "ltx_affiliation" in classes:
@@ -410,17 +421,21 @@ class _ArxivHTMLParser(HTMLParser):
             self._current_href = urljoin(self.base_url, href) if href else ""
             self._current_anchor = []
             self._in_author_anchor = self._capture_author > 0
+            self._anchor_in_document = not self._ignored_depth
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in {"meta", "link", "img", "br", "hr", "input"}:
+            return
         if tag == "a" and self._current_href:
             label = _compact_text(" ".join(self._current_anchor))
             if self._in_author_anchor and label:
                 self.author_profile_urls.setdefault(label, self._current_href)
-            elif _looks_like_project_link(label, self._current_href):
+            elif self._anchor_in_document and _looks_like_project_link(label, self._current_href):
                 self.project_urls.append(self._current_href)
             self._current_href = ""
             self._current_anchor = []
             self._in_author_anchor = False
+            self._anchor_in_document = False
         if self._capture_author and tag == "span":
             name = _compact_text(" ".join(self._current_author))
             if name and name not in self.authors:
@@ -452,12 +467,18 @@ class _ArxivHTMLParser(HTMLParser):
             self._capture_note -= 1
         if self._capture_document and tag in {"article", "section", "p", "figcaption"}:
             self._capture_document -= 1
+        for index in range(len(self._ignored_tags) - 1, -1, -1):
+            if self._ignored_tags[index][0] == tag:
+                closed = self._ignored_tags[index:]
+                del self._ignored_tags[index:]
+                self._ignored_depth = max(0, self._ignored_depth - sum(ignored for _, ignored in closed))
+                break
 
     def handle_data(self, data: str) -> None:
         value = data.strip()
         if not value:
             return
-        if self._capture_document:
+        if self._capture_document and not self._ignored_depth:
             self.document_parts.append(value)
         if self._capture_affiliation:
             self._current_affiliation.append(value)
@@ -561,6 +582,9 @@ def _looks_like_project_link(label: str, url: str) -> bool:
     host = urlparse(url).netloc.casefold()
     if not host or "arxiv.org" in host:
         return False
+    if host in {"github.com", "www.github.com"}:
+        # A dependency mentioned in prose is not this paper's implementation.
+        return bool(re.search(r"\b(?:code|github|implementation|repository|source)\b|代码|实现", label, re.I))
     text = f"{label} {url}".casefold()
     markers = ("project", "code", "github", "demo", "dataset", "model")
     return any(marker in text for marker in markers)

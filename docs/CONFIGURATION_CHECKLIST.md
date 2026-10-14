@@ -82,16 +82,15 @@ Doctor 核对配置完整、URL 格式、请求选项结构，不限定模型 ID
 | PARADIGM_RECALL_OVERLAP_DAYS | 14 | 正式报告、重点研究者、官方入口回补 |
 | PARADIGM_BOOTSTRAP_LOOKBACK_DAYS | 14 | 冷启动也保持有界，不引入 60 天积压 |
 | PARADIGM_RESEARCH_ORIGIN_LIMIT | 48 | 本期跨发布者/来源轮转选定原点，1–500 |
-| PARADIGM_RESEARCH_DEEP_LIMIT | 8 | 本轮深挖最多路线，1–50 |
 | PARADIGM_RESEARCH_REFRESH_LIMIT | 4 | 最久未检查历史路线，0–50；0 关闭刷新 |
 | PARADIGM_MIN_PRIMARY_SOURCES | 2 | 最少可用一手发现通道，1–9；不是独立复现数 |
 | PARADIGM_SOURCE_QUERY_LIMIT | 100 | arXiv 每查询原点上限，1–1000，仍保留各车道 |
-| PARADIGM_SOURCE_PAGE_LIMIT | 2 | OpenAlex 与已支持官方目录每查询分页上限，1–20 |
+| PARADIGM_SOURCE_PAGE_LIMIT | 2 | OpenAlex/OpenReview/已支持官方目录每查询分页上限，1–20；到限不是穷尽成功 |
 | PARADIGM_OFFICIAL_DETAIL_LIMIT | 6 | 每官方入口本进程新增详情上限，1–100 |
 
 这些是研究排期和正常取材边界，不是技术淘汰，不声称全量完成。已有 GitHub Variables 会覆盖默认；显式 30/60 天不是废弃配置，会继续增加高信号回补范围。有效回补窗口不小于普通窗口，冷启动不小于回补窗口。若希望使用 14 天起点，再明确改值或删除相应覆盖，不在清理时静默改研究范围。
 
-以下额外熔断默认仍为 0：PARADIGM_DISCOVERY_SAFETY_LIMIT、PARADIGM_ANALYSIS_SAFETY_LIMIT、PARADIGM_DEEP_SAFETY_LIMIT、PARADIGM_REPORT_SAFETY_LIMIT、PARADIGM_REFRESH_SAFETY_LIMIT。0 仅取消额外熔断，不取消 V0 有界研究计划。熔断/超时/未选不写成 Rubric 淘汰。
+以下额外熔断默认仍为 0：PARADIGM_DISCOVERY_SAFETY_LIMIT、PARADIGM_ANALYSIS_SAFETY_LIMIT、PARADIGM_REPORT_SAFETY_LIMIT、PARADIGM_REFRESH_SAFETY_LIMIT。熔断/超时/未选不写成 Rubric 淘汰。v3 全量深挖不可配置 Top-K：旧 PARADIGM_RESEARCH_DEEP_LIMIT / PARADIGM_DEEP_SAFETY_LIMIT 已从正式 Workflow 和配置向导移除，遗留 Variables 不生效，可删除且无须替代。本期合格深挖候选全部必做，未闭合时即使有部分合格路线也禁止正式交付。
 
 PARADIGM_RUBRIC_PATH、FRONTIER_LANDSCAPE_PATH 默认留空使用仓库量表/地图。PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS=2、PARADIGM_MIN_SECONDARY_ENGAGEMENT=50 是客观承接辅助边界，不是模型主观分。PARADIGM_ALLOW_UPDATES=true，相同证据签名不重复交付。
 

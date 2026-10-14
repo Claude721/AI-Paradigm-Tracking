@@ -303,9 +303,11 @@ STAR_THRESHOLD: int = _env_int("STAR_THRESHOLD", 50)
 PIPELINE_MODE: str = os.getenv("PIPELINE_MODE", "paradigm").strip().lower()
 
 # V0 is a bounded editorial research plan, not an exhaustive weekly census.
-# These limits select work to attempt; they never mean a technical rejection.
+# Origin/refresh limits select work, never a technical rejection. Qualified
+# hypotheses are all mandatory deep work; there is no deep Top-K setting.
 PARADIGM_RESEARCH_ORIGIN_LIMIT: int = max(1, _env_int("PARADIGM_RESEARCH_ORIGIN_LIMIT", 48))
-PARADIGM_RESEARCH_DEEP_LIMIT: int = max(1, _env_int("PARADIGM_RESEARCH_DEEP_LIMIT", 8))
+# Compatibility attribute only. V3 never reads this to limit its cohort.
+PARADIGM_RESEARCH_DEEP_LIMIT: int = 0
 PARADIGM_RESEARCH_REFRESH_LIMIT: int = max(0, _env_int("PARADIGM_RESEARCH_REFRESH_LIMIT", 4))
 PARADIGM_MIN_PRIMARY_SOURCES: int = max(1, _env_int("PARADIGM_MIN_PRIMARY_SOURCES", 2))
 PARADIGM_SOURCE_QUERY_LIMIT: int = max(1, _env_int("PARADIGM_SOURCE_QUERY_LIMIT", 100))

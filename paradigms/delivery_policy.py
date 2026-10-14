@@ -11,7 +11,7 @@ import json
 
 from .models import ORIGIN_EVIDENCE_TYPES, _evidence_datetime, nonnegative_number, technical_evidence_from_dict
 
-VERSION = 2
+VERSION = 3
 PRIMARY_ADAPTERS = frozenset({
     "arxiv", "huggingface-papers", "openalex", "openreview", "research-blog",
     "priority-research-page", "curated-kol-feeds", "high-signal-forums",
@@ -106,6 +106,9 @@ def delivery_proof(stats, candidates, ledger, *, minimum_sources):
         "refresh_completed": ledger["refresh_completed"],
         "rejected_origin_count": stats.get("discovery_rejected_origins", 0),
         "scoped_pending_count": ledger["pending_total_count"],
+        **({"deep_scope_keys": ledger["deep_scope_keys"],
+            "deep_scope_sealed": ledger["deep_scope_sealed"]}
+           if stats.get("delivery_contract_version") == VERSION else {}),
         "routes": sorted([
             {"key": item.key, "signature": item.report_signature}
             for item in candidates
@@ -146,6 +149,21 @@ def violations(stats):
         issues.append("完成深挖数超过研究计划")
     if proof["refresh_completed"] > proof["refresh_planned"]:
         issues.append("完成刷新数超过研究计划")
+    # A route entering the cohort is a research obligation, never a top-N
+    # editorial sample. Nonempty output cannot hide unfinished peer judgments.
+    if proof["scoped_pending_count"] or proof["origin_completed"] != proof["origin_planned"] or proof["origin_selected"] != proof["origin_planned"]:
+        issues.append("本期选定原点未全部完成，禁止交付部分研究结果")
+    if proof["deep_completed"] != proof["deep_planned"] or proof["refresh_completed"] != proof["refresh_planned"]:
+        issues.append("本期深挖/刷新候选未全部闭合，禁止截取部分路线交付")
+    if stats.get("delivery_contract_version") == VERSION:
+        keys = proof.get("deep_scope_keys")
+        if (proof.get("deep_scope_sealed") is not True or
+                not isinstance(keys, list) or any(not isinstance(key, str) or not key for key in keys) or
+                len(set(keys)) != len(keys) or len(keys) != proof["deep_planned"] or
+                keys != ledger.get("deep_scope_keys") or ledger.get("deep_scope_sealed") is not True):
+            issues.append("全部深挖候选的身份清单未封存或与任务账本不一致")
+        if any(stats.get(key, 0) for key in ("delivery_profile_deferred_count", "delivery_source_deferred_count", "report_safety_deferred_count")):
+            issues.append("本期候选人物、原文或报告资格仍未全部闭合")
     if routes:
         if len(routes) > proof["deep_completed"] + proof["refresh_completed"]:
             issues.append("非空报告缺少完成的逐路线研究判断")

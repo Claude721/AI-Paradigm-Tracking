@@ -32,6 +32,7 @@ from .rubric import (
     legacy_dimension_scores,
     normalize_innovation_types,
     rubric_prompt,
+    validate_model_answers,
 )
 
 logger = logging.getLogger(__name__)
@@ -395,6 +396,8 @@ class ParadigmAnalyzer:
                     else "\n上一轮 JSON 或 Rubric 回答不完整。请重新输出完整 JSON，"
                     "确保 common 与所选 innovation_types 的每一道题都出现一次。"
                 )
+                if attempt:
+                    repair_note += f"\n确定性校验失败：{last_error}"
                 response = await run_audit.chat_completion(client, stage="paradigm_extraction", role="sub", subject=evidence.title,
                     model=model,
                     messages=[{"role": "user", "content": prompt + repair_note}],
@@ -409,6 +412,8 @@ class ParadigmAnalyzer:
                 payload = parse_json_object(completed_content(response) or "{}")
                 hypotheses = payload.get("hypotheses")
                 payloads = hypotheses if isinstance(hypotheses, list) else [payload]
+                if len(payloads) != 1 or not isinstance(payloads[0], dict):
+                    raise ValueError("普通原点必须且只能返回一个机制假说；只有正式 Technical Report 可拆分多个")
                 parsed = [
                     self._from_payload(evidence, item)
                     for item in payloads
@@ -796,6 +801,8 @@ class ParadigmAnalyzer:
                     if attempt == 0
                     else "\n上一轮 JSON 或 Rubric 不完整。只修正本机制，输出合法 JSON。"
                 )
+                if attempt:
+                    repair_note += f"\n确定性校验失败：{last_error}"
                 response = await run_audit.chat_completion(client, stage="technical_report_mechanism", role="sub", subject=f"{evidence.title} / mechanism-{index}",
                     model=model,
                     messages=[{"role": "user", "content": prompt + repair_note}],
@@ -889,6 +896,7 @@ class ParadigmAnalyzer:
         if not isinstance(raw_types, list):
             raw_types = [payload.get("novelty_type", "other")]
         innovation_types = normalize_innovation_types(raw_types)
+        validate_model_answers("screening", innovation_types, payload.get("rubric_answers"))
         assessment = evaluate_rubric(
             stage="screening",
             innovation_types=innovation_types,
@@ -1392,6 +1400,7 @@ class ParadigmSynthesizer:
             raw_types = candidate.innovation_types or [
                 candidate.novelty_type or "other"
             ]
+        validate_model_answers("final", raw_types, payload.get("rubric_answers"))
         assessment = evaluate_rubric(
             stage="final",
             innovation_types=raw_types,

@@ -5,6 +5,8 @@ description: 把一条已经通过研究门槛的技术路线写成可独立校�
 
 你是 AI 技术范式雷达的路线作者。你只负责下面**一条**已经通过研究门槛的技术路线；不要写整份周报的开头、总结或其他路线，也不要重新筛选候选。
 
+不要把 source_fact、interpretive_compression、evidence_status 或 unknown 标签写进文章；用自然中文保留事实、简化假设和未披露边界。旧瓶颈只描述本材料比较的旧方案，不扩成所有同类系统的必然前提。话题相似的仓库、依赖库和 HTML 导航不能当作本文实现或外部承接。
+
 日期：{date}
 路线序号：{route_index}/{route_total}
 路线档案：{route_dossier}

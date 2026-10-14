@@ -28,6 +28,7 @@ from .models import (
 from .researcher_identity import merge_researcher_profiles
 from .async_utils import gather_scoped
 from .search_receipts import blocking_searches, record_search
+from .evidence_association import references_origin, countable_evidence, VERSION as ASSOCIATION_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,7 @@ class EvidenceEnricher:
 
         async def refresh_one(candidate: ParadigmCandidate) -> ParadigmCandidate | None:
             async with semaphore:
+                candidate.evidence = [item for item in candidate.evidence if countable_evidence(candidate, item)]
                 previous = {
                     item.fingerprint: copy.deepcopy(item)
                     for item in candidate.evidence
@@ -177,6 +179,7 @@ class EvidenceEnricher:
         return [item for item in refreshed if item is not None]
 
     async def _external_enrichment(self, candidate: ParadigmCandidate) -> None:
+        candidate.evidence = [item for item in candidate.evidence if countable_evidence(candidate, item)]
         candidate.community_search_receipts.pop("community_runtime", None)
         candidate.community_coverage.pop("community_runtime", None)
         lead = candidate.evidence[0]
@@ -240,7 +243,7 @@ class EvidenceEnricher:
                 ),
             }
         candidate.evidence = _dedupe_evidence(
-            candidate.evidence, route_key=candidate.key
+            [item for item in candidate.evidence if countable_evidence(candidate, item)], route_key=candidate.key
         )
         if blocking_searches(candidate, allow_partial=getattr(self, "allow_partial_sources", False)):
             return  # Never pay for downstream judgments on incomplete inputs.
@@ -263,31 +266,15 @@ class EvidenceEnricher:
     def _attach_support(
         candidate: ParadigmCandidate, supporting: list[TechnicalEvidence]
     ) -> None:
-        candidate_ids = {
-            str(value).lower()
-            for item in candidate.evidence
-            for value in item.identifiers.values()
-            if value
-        }
-        titles = [item.title.lower() for item in candidate.evidence]
         for item in supporting:
-            support_ids = {
-                str(value).lower() for value in item.identifiers.values() if value
-            }
-            title_match = max(
-                (SequenceMatcher(None, item.title.lower(), title).ratio() for title in titles),
-                default=0.0,
-            )
-            if candidate_ids & support_ids or title_match >= 0.9:
+            # Shared topic words are discovery leads, not route evidence. They
+            # remain in the discovery snapshot and cannot lend stars/publisher
+            # identity to an unrelated hypothesis, including folded records.
+            if references_origin(candidate, item) and countable_evidence(candidate, item):
                 candidate.evidence.append(copy.deepcopy(item))
                 repository = str(item.raw.get("github_repo", "")).strip()
                 if repository:
-                    candidate.evidence.append(
-                        _official_repository_evidence(item, repository)
-                    )
-                continue
-            if _lexically_related(candidate, item):
-                candidate.evidence.append(copy.deepcopy(item))
+                    candidate.evidence.append(_official_repository_evidence(item, repository))
 
     @staticmethod
     def supporting_signature(
@@ -301,7 +288,7 @@ class EvidenceEnricher:
         community bodies/authors never enter the durable signature.
         """
         if not supporting:
-            return hashlib.sha256(b"[]").hexdigest()
+            return hashlib.sha256(json.dumps([ASSOCIATION_VERSION, []], ensure_ascii=False).encode()).hexdigest()
         probe = copy.copy(candidate)
         probe.evidence = list(candidate.evidence)
         original_count = len(probe.evidence)
@@ -327,7 +314,7 @@ class EvidenceEnricher:
             json.dumps(value, ensure_ascii=False, sort_keys=True)
             for value in relevant
         }
-        encoded = json.dumps(sorted(records), ensure_ascii=False)
+        encoded = json.dumps([ASSOCIATION_VERSION, sorted(records)], ensure_ascii=False)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -338,22 +325,8 @@ def _merge_profiles(existing, new):
 def _lexically_related(
     candidate: ParadigmCandidate, evidence: TechnicalEvidence
 ) -> bool:
-    """只为后续 LLM 审计提供小规模候选，不直接认定为趋势证据。"""
-    haystack = f"{evidence.title} {evidence.summary}".casefold()
-    phrases = [candidate.name, candidate.route_family, *candidate.keywords]
-    exact = any(
-        len(value.strip()) >= 7 and value.casefold() in haystack
-        for value in phrases
-        if value
-    )
-    tokens = {
-        token.casefold()
-        for value in phrases
-        for token in value.replace("-", " ").split()
-        if len(token) >= 5
-    }
-    overlap = sum(token in haystack for token in tokens)
-    return exact or overlap >= 2
+    """Compatibility name; topical keyword overlap cannot authorize evidence."""
+    return references_origin(candidate, evidence)
 
 
 def _official_repository_evidence(
@@ -366,7 +339,7 @@ def _official_repository_evidence(
         evidence_type=EvidenceType.IMPLEMENTATION,
         title=full_name,
         url=url,
-        summary="Hugging Face 论文元数据直接关联的代码仓库",
+        summary="一手材料或同工作索引明确关联的代码仓库",
         published_at=source.published_at,
         authors=source.authors,
         metrics={"stars": source.metrics.get("stars", 0)},
@@ -374,6 +347,9 @@ def _official_repository_evidence(
         raw={
             "relationship": "paper_linked_repository",
             "independence": "official",
+            "association_version": ASSOCIATION_VERSION,
+            "origin_fingerprint": source.fingerprint,
+            "origin_work_ids": {key: value for key, value in source.identifiers.items() if key in {"arxiv", "doi", "openreview"}},
         },
     )
 

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from paradigms.completion import ResearchNotCompleteError, require_completed_research
 from paradigms.discovery import DiscoveryBatch
 from paradigms.models import (
+    ORIGIN_EVIDENCE_TYPES,
     candidate_from_dict, scrub_ephemeral_evidence,
     technical_evidence_from_dict,
 )
@@ -196,7 +197,7 @@ class CampaignStore:
 
     def set_origin_scope(self, key, origins, *, input_diagnostics=None):
         campaign = self.get(key, load_discovery=False)
-        if campaign.stats.get("delivery_contract_version") != 2:
+        if campaign.stats.get("delivery_contract_version") not in {2, 3}:
             return
         if "origin_scope" in campaign.stats:
             return
@@ -305,7 +306,7 @@ class CampaignStore:
         from database.paradigm_store import _deep_checkpoint_input_signature, _persistable_candidate
         with self.store.transaction():
             campaign = self.get(key, load_discovery=False)
-            bounded = campaign.stats.get("delivery_contract_version") == 2
+            bounded = campaign.stats.get("delivery_contract_version") in {2, 3}
             scope = set(campaign.stats.get("origin_scope", []))
             with self.store._connect() as conn:
                 origins = conn.execute("""SELECT e.fingerprint, o.source_signature, e.last_analyzed_at
@@ -336,15 +337,24 @@ class CampaignStore:
                         self.store.save_candidates([item])
                 member_keys = self.candidate_keys(key)
                 if bounded:
-                    import config
-                    deep_members = {row[0] for row in conn.execute("SELECT object_key FROM campaign_work WHERE campaign_id=? AND kind='deep'", (key,))}
-                    # Recover downstream snapshots after a crash, but admit a
-                    # bounded deep plan, not every hypothesis from the recall.
-                    pool = [item for item in candidates.values() if item.status == "pending_deep" and
-                            item.key not in member_keys and any(e.fingerprint in scope for e in item.evidence)]
-                    pool.sort(key=lambda item: (-item.total_score, item.execution_failure_count, item.key))
-                    capacity = max(0, config.PARADIGM_RESEARCH_DEEP_LIMIT - len(deep_members))
-                    member_keys.update(item.key for item in pool[:capacity])
+                    # Every qualified hypothesis from the selected origins is
+                    # mandatory. No model, score ordering or configured cap may
+                    # remove it from the persistent completion denominator.
+                    pool = [item for item in candidates.values() if
+                            item.key not in member_keys and any(e.fingerprint in scope and e.evidence_type in ORIGIN_EVIDENCE_TYPES for e in item.evidence)
+                            and (item.status == "pending_deep" or item.screening_rubric.get("decision") in {"deep_dive", "observe"} or item.deep_checkpoint_stage)]
+                    for item in pool:
+                        if item.status != "pending_deep" and (
+                            item.deep_checkpoint_stage != "research_complete"
+                            or item.deep_checkpoint_input_signature != _deep_checkpoint_input_signature(item)
+                        ):
+                            # A past verdict is not evidence of closure under a
+                            # changed model/policy. Revisit affected scope, not
+                            # every unrelated historical route in the database.
+                            item.status = "pending_deep"
+                            self.store.save_candidates([item])
+                    self.include(key, "deep", [(item.key, _deep_checkpoint_input_signature(item), _persistable_candidate(item).to_dict()) for item in pool])
+                    member_keys.update(item.key for item in pool)
                 self.include(key, "deep", [(item.key, _deep_checkpoint_input_signature(item), _persistable_candidate(item).to_dict())
                     for item in candidates.values() if item.status == "pending_deep" and
                     (not bounded or item.key in member_keys)])
@@ -369,6 +379,13 @@ class CampaignStore:
             result[f"{kind}_completed"] = sum(count for lane, status, count in counts if lane == kind and status == "completed")
             result[f"{kind}_pending"] = result[f"{kind}_planned"] - result[f"{kind}_completed"]
         result["pending_total_count"] = sum(result[f"{kind}_pending"] for kind in ("origin", "deep", "refresh"))
+        if campaign.stats.get("delivery_contract_version") == 3:
+            with self.store._connect() as conn:
+                result["deep_scope_keys"] = sorted(row[0] for row in conn.execute(
+                    "SELECT object_key FROM campaign_work WHERE campaign_id=? AND kind='deep'", (key,)))
+            # Origin closure seals the cohort deterministically. Reconciliation
+            # reopens this proof if a parent revision becomes pending again.
+            result["deep_scope_sealed"] = result["origin_pending"] == 0
         return result
 
     def save_stats(self, key, stats, *, ready=False):
@@ -387,7 +404,7 @@ class CampaignStore:
     def bind_delivery(self, key, delivery_key, *, delivered=False):
         self.require_ready(key)
         snapshot = self.reconcile(key)
-        if snapshot["pending_total_count"] and self.get(key, load_discovery=False).stats.get("delivery_contract_version") != 2:
+        if snapshot["pending_total_count"]:
             raise ResearchNotCompleteError(["持久化研究批次仍有未闭合任务"])
         with self.store._connect() as conn:
             conn.execute("UPDATE research_campaigns SET delivery_key=?, status=?, updated_at=? WHERE campaign_id=?", (delivery_key, "delivered" if delivered else "waiting_delivery", _now(), key))
@@ -397,7 +414,7 @@ class CampaignStore:
         if campaign is None or campaign.status not in {"ready", "waiting_delivery"} or campaign.discovery is None or not campaign.stats.get("refresh_scope_sealed"):
             raise ResearchNotCompleteError(["持久化研究批次没有有效的完整研究凭据"])
         require_completed_research(campaign.stats)
-        if campaign.stats.get("delivery_contract_version") == 2:
+        if campaign.stats.get("delivery_contract_version") in {2, 3}:
             from paradigms.delivery_policy import delivery_proof
             expected = campaign.stats["delivery_scope"]["routes"]
             saved = self.store.load_candidate_snapshots([row["key"] for row in expected])
@@ -405,7 +422,8 @@ class CampaignStore:
                 raise ResearchNotCompleteError(["交付路线检查点丢失或一手输入已换版"])
             actual = delivery_proof({"frontier_coverage": campaign.discovery.coverage,
                                     "research_scope_origin_count": len(campaign.stats.get("origin_scope", [])),
-                                    "discovery_rejected_origins": campaign.stats.get("discovery_rejected_origins", 0)}, saved,
+                                    "discovery_rejected_origins": campaign.stats.get("discovery_rejected_origins", 0),
+                                    "delivery_contract_version": campaign.stats.get("delivery_contract_version")}, saved,
                                     self.reconcile(key), minimum_sources=campaign.stats["delivery_scope"]["minimum_primary_sources"])
             if actual != campaign.stats["delivery_scope"]:
                 raise ResearchNotCompleteError(["本期交付凭据与持久化研究结果不一致"])

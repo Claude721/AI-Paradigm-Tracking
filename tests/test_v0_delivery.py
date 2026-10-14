@@ -58,7 +58,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
     def process(self, discovered=None, *, accepted=False, omit=()):
         with patch("agents.paradigm_orchestrator.ParadigmStore", return_value=self.store):
             value = ParadigmOrchestrator()
-        self.assertEqual(value.delivery_contract_version, 2)
+        self.assertEqual(value.delivery_contract_version, 3)
         self.assertTrue(value.discovery.bounded)
         self.assertEqual(value.discovery.arxiv.query_result_limit, config.PARADIGM_SOURCE_QUERY_LIMIT)
         self.assertEqual(value.discovery.priority_pages.per_page, config.PARADIGM_OFFICIAL_DETAIL_LIMIT)
@@ -116,17 +116,19 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.status, "pending_render")
         self.assertEqual(self.store.load_pending_origins()[0].fingerprint, old.fingerprint)
 
-    async def test_healthy_route_delivered_with_bad_peer_and_partial_community(self):
+    async def test_healthy_route_preserved_but_bad_selected_peer_blocks_delivery(self):
         bad = origin(2)
         process = self.process(batch([origin(), bad]), accepted=True, omit={bad.fingerprint})
         result = await process.run(reference_time=NOW)
         self.assertEqual(len(process.pending_delivery), 1, result)
         self.assertEqual(result["research_campaign"]["origin_pending"], 1)
         self.assertEqual(process.pending_delivery[0].community_search_receipts["tavily_social_web"]["status"], "failed")
-        require_completed_research(result, candidates=process.pending_delivery)
-        job = self.store.enqueue_report(process.pending_delivery, result, report_date=result["report_date"])
-        self.assertEqual(len(job.candidates), 1)
-        self.assertEqual(self.store.campaigns.active().status, "waiting_delivery")
+        with self.assertRaises(ResearchNotCompleteError):
+            require_completed_research(result, candidates=process.pending_delivery)
+        with self.assertRaises(ResearchNotCompleteError):
+            self.store.enqueue_report(process.pending_delivery, result, report_date=result["report_date"])
+        self.assertIsNone(self.store.load_pending_report_job())
+        self.assertEqual(result["result_kind"], "research_blocked")
         self.assertEqual(len(self.store.load_pending_origins()), 1)
 
     async def test_no_usable_inputs_cannot_be_successful_empty(self):
@@ -138,8 +140,11 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_scoped_email_does_not_claim_all_tasks_completed(self):
         bad = origin(2)
-        process = self.process(batch([origin(), bad]), accepted=True, omit={bad.fingerprint})
+        bad.published_at = "2020-01-01T00:00:00+00:00"
+        self.store.observe_origins([bad])
+        process = self.process(accepted=True)
         result = await process.run(reference_time=NOW)
+        require_completed_research(result, candidates=process.pending_delivery)
         report = self.path / ("paradigm_radar_" + result["report_date"] + ".md")
         report.write_text("# 已核验的中文路线报告", encoding="utf-8")
         with (
@@ -286,7 +291,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(process.pending_delivery[0].freshness_assessment["classification"], "historical_reactivated")
         self.store.enqueue_report(process.pending_delivery, stats, report_date=stats["report_date"])
 
-    async def test_deep_plan_is_bounded_without_rejecting_unselected_hypotheses(self):
+    async def test_every_qualified_hypothesis_is_deeply_researched_despite_old_cap(self):
         process = self.process(batch([origin(i) for i in range(1, 4)]))
         async def extract(items):
             return [ParadigmExtraction(evidence=item, is_candidate=True,
@@ -305,9 +310,11 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
             result = await process.run(reference_time=NOW)
             require_completed_research(result, candidates=[])
             self.store.enqueue_report([], result, report_date=result["report_date"])
-        self.assertEqual(result["delivery_scope"]["deep_planned"], 1)
-        self.assertEqual(result["delivery_scope"]["deep_completed"], 1)
-        self.assertEqual(len(self.store.load_pending_deep_candidates()), 2)
+        self.assertEqual(result["delivery_scope"]["deep_planned"], 3)
+        self.assertEqual(result["delivery_scope"]["deep_completed"], 3)
+        self.assertEqual(len(result["delivery_scope"]["deep_scope_keys"]), 3)
+        self.assertTrue(result["delivery_scope"]["deep_scope_sealed"])
+        self.assertEqual(len(self.store.load_pending_deep_candidates()), 0)
 
     async def test_failed_discovery_commit_rolls_back_scope_and_source_acknowledgement(self):
         process = self.process()
@@ -320,6 +327,92 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.load_pending_origins(), [])
         result = await self.process().run(reference_time=NOW)
         require_completed_research(result, candidates=[])
+
+    async def test_full_58_hypothesis_cohort_is_not_a_top_k_sample(self):
+        origins = [origin(index) for index in range(1, 4)]
+        for item in origins:
+            item.raw["origin_kind"] = "technical_report"
+        process = self.process(batch(origins))
+        origins_seen, deep_seen = set(), set()
+
+        async def extract(items):
+            origins_seen.update(item.fingerprint for item in items)
+            return [ParadigmExtraction(evidence=item, is_candidate=True,
+                canonical_name=f"Independent mechanism {item.title}-{index}",
+                thesis="独立机制假说",
+                problem_shift=f"Distinct causal interface {item.title}-{index}",
+                mechanism=f"Distinct intervention {item.title}-{index}",
+                keywords=[f"mechanism-{item.fingerprint}-{index}"], innovation_types=["architecture"],
+                rubric_assessment=rubric_assessment(stage="screening"))
+                for item in items for index in range(18 if item.fingerprint == origins[-1].fingerprint else 20)]
+
+        async def conclude(items):
+            self.assertEqual(len(origins_seen), 3, "deep work cannot precede cohort discovery")
+            for item in items:
+                deep_seen.add(item.key)
+                weak = {value["id"] for value in load_rubric()["common_criteria"] + load_rubric()["type_criteria"]["architecture"]}
+                item.rubric_assessment = rubric_assessment(stage="final", weak_ids=weak)
+            return items
+
+        process.analyzer.run = extract
+        process.synthesizer.run = conclude
+        with patch.object(config, "PARADIGM_RESEARCH_DEEP_LIMIT", 1), patch.object(config, "PARADIGM_DEEP_SAFETY_LIMIT", 1):
+            result = await process.run(reference_time=NOW)
+        require_completed_research(result, candidates=[])
+        self.assertEqual(len(deep_seen), 58)
+        self.assertEqual(result["delivery_scope"]["deep_planned"], 58)
+        self.assertEqual(result["delivery_scope"]["deep_completed"], 58)
+        self.assertEqual(set(result["delivery_scope"]["deep_scope_keys"]), deep_seen)
+        self.assertEqual(self.store.load_pending_deep_candidates(), [])
+
+    async def test_missing_deep_output_blocks_whole_delivery_but_keeps_peers(self):
+        process = self.process(batch([origin(index) for index in range(1, 4)]), accepted=True)
+        async def extract(items):
+            return [ParadigmExtraction(evidence=item, is_candidate=True, canonical_name=item.title,
+                thesis="独立机制假说",
+                problem_shift=item.title, mechanism=item.title, keywords=[item.title],
+                innovation_types=["architecture"], rubric_assessment=rubric_assessment(stage="screening")) for item in items]
+        base = process.synthesizer.run
+        async def omit_one(items):
+            return await base([item for item in items if item.name != origin(2).title])
+        process.analyzer.run = extract
+        process.synthesizer.run = omit_one
+        result = await process.run(reference_time=NOW)
+        self.assertEqual(result["delivery_scope"]["deep_planned"], 3)
+        self.assertEqual(result["delivery_scope"]["deep_completed"], 2)
+        self.assertEqual(len(self.store.load_pending_deep_candidates()), 1)
+        with self.assertRaises(ResearchNotCompleteError):
+            self.store.enqueue_report(process.pending_delivery, result, report_date=result["report_date"])
+
+    async def test_completed_identity_search_without_match_is_observation_not_execution_pending(self):
+        process = self.process(accepted=True)
+        base = process.enricher.run
+        async def no_match(items, supporting):
+            result = await base(items, supporting)
+            for item in result:
+                item.researchers[0].profile_urls = {}
+                item.researchers[0].identifiers = {}
+                item.researchers[0].contact_search_notes = ["已检索 OpenAlex，无当前论文匹配；无已核验主页"]
+                item.researchers[0].identity_search_status = "completed"
+                item.researchers[0].contact_search_status = "completed"
+            return result
+        process.enricher.run = no_match
+        result = await process.run(reference_time=NOW)
+        self.assertEqual(result["delivery_profile_observed_count"], 1)
+        self.assertEqual(result["delivery_profile_deferred_count"], 0)
+        self.assertEqual(result["delivery_scope"]["deep_completed"], 1)
+        require_completed_research(result, candidates=[])
+
+    async def test_manifest_reconciliation_cannot_drop_a_completed_qualified_candidate(self):
+        process = self.process(accepted=True)
+        result = await process.run(reference_time=NOW)
+        campaign_id = result["research_campaign"]["campaign_id"]
+        with self.store._connect() as conn:
+            conn.execute("DELETE FROM campaign_work WHERE campaign_id=? AND kind='deep'", (campaign_id,))
+        ledger = self.store.campaigns.reconcile(campaign_id)
+        self.assertEqual(ledger["deep_scope_keys"], [process.pending_delivery[0].key])
+        self.assertEqual(ledger["deep_planned"], 1)
+        self.assertEqual(ledger["deep_completed"], 1)
 
     async def test_legacy_explicit_resume_stops_before_discovery_without_changing_state(self):
         campaign = self.store.campaigns.begin(reference_time=NOW, ordinary_days=7,

@@ -139,7 +139,7 @@ def _send_sync(
         message["X-AI-Radar-Delivery-Key"] = delivery_key
     if is_paradigm:
         status_line = "AI 技术范式雷达本期研究与交付已完成。"
-        if stats.get("delivery_contract_version") == 2:
+        if stats.get("delivery_contract_version") in {2, 3}:
             scope = stats["delivery_scope"]
             research_note = (
                 f"完成原点初筛：{scope['origin_completed']} 份；选定机制深挖：{scope['deep_completed']} 条；历史路线刷新：{scope['refresh_completed']} 条。\n"

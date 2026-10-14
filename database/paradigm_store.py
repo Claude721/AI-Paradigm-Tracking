@@ -657,9 +657,9 @@ class ParadigmStore:
             if campaign_id:
                 self.campaigns.require_ready(campaign_id, candidates)
                 ledger = self.campaigns.reconcile(campaign_id)
-                if ledger["pending_total_count"] and stats.get("delivery_contract_version") != 2:
+                if ledger["pending_total_count"]:
                     raise ResearchNotCompleteError(["研究批次任务清单未闭合"])
-            elif stats.get("delivery_contract_version") == 2:
+            elif stats.get("delivery_contract_version") in {2, 3}:
                 raise ResearchNotCompleteError(["V0 交付缺少持久化本期研究批次"])
             job = self._enqueue_completed_report(candidates, stats, report_date=report_date)
             if campaign_id:
@@ -1934,11 +1934,16 @@ def _deep_checkpoint_input_signature(candidate: ParadigmCandidate) -> str:
         "skills/paradigm_synthesis/SKILL.md",
         "skills/technical-mental-model/SKILL.md",
         "rubrics/paradigm_rubric.json",
+        "paradigms/evidence_association.py",
+        "paradigms/scoring.py",
+        "paradigms/rubric.py",
+        "sources/researcher_profile_source.py",
     ):
         policy.update(relative.encode("utf-8"))
         policy.update((root / relative).read_bytes())
     payload = {
         "policy_version": DEEP_SYNTHESIS_CHECKPOINT_VERSION,
+        "evidence_association_version": 2,
         "policy_content_signature": policy.hexdigest(),
         "key": candidate.key,
         "origins": sorted(

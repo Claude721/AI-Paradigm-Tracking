@@ -540,20 +540,15 @@ class FrontierContractTests(unittest.TestCase):
         )
         self.assertEqual(parsed["author_roles"]["Blair Singh"], "共同第一作者")
 
-    def test_high_potential_observe_candidate_gets_review_not_auto_report(self) -> None:
+    def test_priority_researcher_cannot_promote_observe_into_deep(self) -> None:
         extraction = _observe_extraction(
             {
                 "origin_priority": 2,
                 "priority_researcher_match": True,
             }
         )
-        self.assertTrue(is_priority_review(extraction))
-        self.assertEqual(len(cluster_extractions([extraction])), 1)
-        # 复核通道只让它进入深挖；最终报告仍必须重新通过 final Rubric。
-        candidate = cluster_extractions([extraction])[0]
-        candidate.rubric_assessment = extraction.rubric_assessment
-        score_candidate(candidate)
-        self.assertFalse(is_reportable(candidate))
+        self.assertFalse(is_priority_review(extraction))
+        self.assertEqual(cluster_extractions([extraction]), [])
 
     def test_manual_seed_is_recall_only_not_editorial_priority(self) -> None:
         extraction = _observe_extraction(
@@ -578,7 +573,7 @@ class FrontierContractTests(unittest.TestCase):
         self.assertFalse(is_priority_review(extraction))
         self.assertEqual(cluster_extractions([extraction]), [])
 
-    def test_established_official_report_gets_bounded_re_review(self) -> None:
+    def test_established_report_cannot_promote_observe_into_deep(self) -> None:
         extraction = _observe_extraction(
             {
                 "origin_priority": 3,
@@ -586,8 +581,8 @@ class FrontierContractTests(unittest.TestCase):
                 "publisher_tier": "established",
             }
         )
-        self.assertTrue(is_priority_review(extraction))
-        self.assertEqual(len(cluster_extractions([extraction])), 1)
+        self.assertFalse(is_priority_review(extraction))
+        self.assertEqual(cluster_extractions([extraction]), [])
 
     def test_unknown_official_repo_cannot_replace_publisher_or_independent_evidence(self) -> None:
         item = _route_candidate(

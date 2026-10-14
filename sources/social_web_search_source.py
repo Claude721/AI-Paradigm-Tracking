@@ -69,12 +69,11 @@ class SocialWebSearchClient:
                 f"Tavily 额度检查未通过：{reason}；本候选未执行搜索，不代表零讨论"
             )
             return []
-        query = (
-            f'"{_clean_query(title)}" '
-            "(analysis OR discussion OR notes OR implementation OR replication)"
-        )
-        if identifier:
-            query = f'{query} OR "{_clean_query(identifier)}"'
+        # A long exact title plus a Boolean expression over-constrains web
+        # recall (and search engines need not interpret OR as expected).
+        # Recall broadly, then require work identity in _parse_results.
+        alias = _clean_query(title.split(":", 1)[0]).strip()
+        query = f"{alias} analysis discussion implementation".strip()
         search_days = max(
             [
                 config.SOURCING_LOOKBACK_DAYS,
@@ -97,7 +96,7 @@ class SocialWebSearchClient:
             "include_answer": False,
             "include_raw_content": False,
             "auto_parameters": False,
-            "exact_match": True,
+            "exact_match": False,
             "include_usage": True,
         }
         domains = config.TAVILY_DISCOVERY_DOMAINS
@@ -147,7 +146,17 @@ class SocialWebSearchClient:
         if not isinstance(payload, dict) or payload.get("error") or not isinstance(payload.get("results"), list):
             raise ValueError("Invalid Tavily search response")
         results = _parse_results(payload, candidate, title)
-        record_search(candidate, "tavily_social_web", "completed", count=len(results))
+        diagnostics = {
+            "raw_result_count": len(payload["results"]),
+            "retained_result_count": len(results),
+            "filtered_result_count": len(payload["results"]) - len(results),
+            "request_id": str(payload.get("request_id") or "")[:200],
+            "query_kind": "work_identity_broad",
+        }
+        usage = payload.get("usage")
+        if isinstance(usage, dict) and type(usage.get("credits")) is int and usage["credits"] >= 0:
+            diagnostics["confirmed_credits"] = usage["credits"]
+        record_search(candidate, "tavily_social_web", "completed", count=len(results), diagnostics=diagnostics)
         return results
 
     async def _reserve_request(self, client):

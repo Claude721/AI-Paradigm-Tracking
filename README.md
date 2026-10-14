@@ -41,13 +41,13 @@ MAIN：路线综合、人物轨迹、中文起草与总编
 
 ## 2. 什么结果可以交付
 
-默认普通窗口为 7 天，高信号回补为 14 天；按发布者/来源轮转选定最多 48 个原点、深挖最多 8 条路线、刷新最多 4 条历史路线。选择和预算只控制本期工作量，不是技术淘汰，也不是全网覆盖声明。
+默认普通窗口为 7 天，高信号回补为 14 天；按发布者/来源轮转选定最多 48 个原点、刷新最多 4 条历史路线。先完成本期原点初筛，去重后所有通过技术门槛的候选必须全部深挖，不设深挖 Top-K，也不由模型选择做几条。取材有界，不是全网覆盖声明；未选原始材料不等于进入深挖的候选。
 
 | 本轮结果 | 处理 |
 |---|---|
-| 有自身核验完成、通过质量门槛的路线 | 交付这些完整结论；其他来源/对象的故障留在审计 |
+| 本期原点、全部深挖、选定历史刷新判断闭合，且有通过质量门槛的路线 | 交付完整结论；物理入口/未选原始材料/其他历史积压的缺口留在审计 |
 | 无合格路线，且本期选定判断全部完成 | 空雷达：只说明已研究材料中没有合格路线，不断言全网没有创新 |
-| 有效一手输入不足，或判断未完成且没有合格路线 | 明确失败并保存检查点，不发阶段性 memo |
+| 有效一手输入不足，或本期选定判断有未完成项（即使已有合格路线） | 明确失败并保存健康检查点，不截取部分结果、不发阶段性 memo |
 | 报告质量或必需邮件投递失败 | 明确失败，已完成研究不回滚，不提前登记已交付 |
 
 至少 2 类一手发现通道可用才具备交付基础；这不是“两个网站都谈论过”的趋势认证。技术去留由[版本化 Rubric](rubrics/paradigm_rubric.json)、发布者和外部承接共同决定。报告按共享问题与能力边界组织路线，不逐篇填表；每条路线给出可核验的讨论势能判断。
@@ -97,11 +97,10 @@ MAIN：路线综合、人物轨迹、中文起草与总编
 | `PARADIGM_RECALL_OVERLAP_DAYS` | 14 | 高信号材料重叠回补；有效值不小于普通窗口 |
 | `PARADIGM_BOOTSTRAP_LOOKBACK_DAYS` | 14 | 冷启动高信号回补；有效值不小于重叠窗口 |
 | `PARADIGM_RESEARCH_ORIGIN_LIMIT` | 48 | 本期跨来源选定的研究原点数 |
-| `PARADIGM_RESEARCH_DEEP_LIMIT` | 8 | 本期安排深挖的路线数 |
 | `PARADIGM_RESEARCH_REFRESH_LIMIT` | 4 | 本期检查的历史路线数；0 关闭刷新 |
 | `PARADIGM_MIN_PRIMARY_SOURCES` | 2 | 至少可用的一手发现通道类别数 |
 | `PARADIGM_SOURCE_QUERY_LIMIT` | 100 | arXiv 每个查询的最大召回量 |
-| `PARADIGM_SOURCE_PAGE_LIMIT` | 2 | 已支持目录每查询的分页上限 |
+| `PARADIGM_SOURCE_PAGE_LIMIT` | 2 | OpenAlex/OpenReview/已支持目录每查询分页上限；未穷尽保留覆盖缺口 |
 | `PARADIGM_OFFICIAL_DETAIL_LIMIT` | 6 | 每个官方入口本轮新增详情尝试数 |
 | `PARADIGM_ALLOW_UPDATES` | true | 旧路线有本期新增实质证据时允许进展更新 |
 | `PARADIGM_RUN_BUDGET_SECONDS` | 3600 | 研究软时间预算，不是人民币费用上限 |
@@ -113,7 +112,11 @@ MAIN：路线综合、人物轨迹、中文起草与总编
 
 普通窗口由手动 `lookback_days` 输入控制，定时默认 7 天；不是仓库 Variable `SOURCING_LOOKBACK_DAYS`。本地 CLI 才直接读该环境变量。冷启动和重叠窗口是不同阶段，不要为了减小配置表随意合并。
 
+旧 `PARADIGM_RESEARCH_DEEP_LIMIT` / `PARADIGM_DEEP_SAFETY_LIMIT` 不再映射到正式 Workflow，也不能截断 v3 深挖队列；仓库中若仍有同名 Variables 可删除，无须填写替代项。时间/额度异常仍如实保留 pending 并阻断交付，不允许为“全量完成”伪造结论。
+
 `TAVILY_SOCIAL_SEARCH_ENABLED=false` 关闭 Tavily；`TAVILY_DISCOVERY_DOMAINS` 限制正式搜索域名，留空不限制。`TAVILY_SOCIAL_SEARCH_DOMAINS` 只供 Smoke 样本，两者不是重复字段。未知用量不搜索/不退款，账本不能限制同账户其他客户端，也不能替代供应商 PAYG/账户硬限额。
+
+Tavily 使用工作名的宽召回再核验关联；逐候选回执区分 API 原始返回数、过滤后保留数、已确认 credits 与 request_id。过滤后 0 条不等于没有调用，也不等于全网没有讨论。无关仓库不能给当前路线借用 stars、发布者身份或实现证据。
 
 并发、批次、额外安全熔断、Rubric 路径及名单追加属于高级配置，通常无需调整。`LLM_ENABLE_THINKING` 是 DashScope 协议的默认模式，不按模型 ID 或 URL 判定；不是对所有厂商的通用开关，角色请求选项可独立覆盖。默认值与作用范围详见[配置清单](docs/CONFIGURATION_CHECKLIST.md)。
 

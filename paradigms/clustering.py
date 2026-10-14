@@ -30,11 +30,7 @@ def initial_gate_reason(item: ParadigmExtraction) -> str:
     if not assessment:
         return "缺少版本化 Rubric 结果，不能据模型主观分数进入深挖"
     decision = assessment.get("decision")
-    priority_review = (
-        decision == "observe"
-        and _has_review_priority(item)
-    )
-    if decision != "deep_dive" and not priority_review:
+    if decision != "deep_dive":
         return str(
             assessment.get("decision_reason")
             or item.rejection_reason
@@ -50,23 +46,22 @@ def initial_gate_reason(item: ParadigmExtraction) -> str:
 
 
 def is_priority_review(item: ParadigmExtraction) -> bool:
-    """高势能但初筛边界不确定的材料进入复核，不代表自动通过最终门槛。"""
+    """Priority orders qualified work; it cannot promote an observe result."""
     return (
-        item.rubric_assessment.get("decision") == "observe"
+        item.rubric_assessment.get("decision") == "deep_dive"
         and _has_review_priority(item)
         and not initial_gate_reason(item)
     )
 
 
 def _has_review_priority(item: ParadigmExtraction) -> bool:
-    """Return whether an ``observe`` item deserves one editorial re-review.
+    """Return priority metadata only for already-qualified deep work.
 
     Discovery ordering and editorial eligibility are deliberately separate:
 
     - ``origin_priority`` controls queue order and document hydration cost;
     - ``explicit_seed`` only guarantees that a manually supplied record is seen;
-    - this gate is reserved for a verified priority researcher, or an official
-      system-level release from an established publisher.
+    - publisher/researcher priority never promotes an ``observe`` verdict.
 
     Keeping this rule semantic prevents a historical canary/backfill ID from
     silently becoming an admission override.

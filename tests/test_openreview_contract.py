@@ -47,7 +47,7 @@ class OpenReviewContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def fetch(self, handler, *, limit=1):
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        source = OpenReviewSource(venues=[VENUE], searches=["world model"], limit=limit)
+        source = OpenReviewSource(venues=[VENUE], searches=["world model"], limit=limit, max_pages_per_query=10)
         with (
             research_window(NOW),
             patch("sources.openreview_source.httpx.AsyncClient", return_value=client),

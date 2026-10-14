@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import config
+from .evidence_association import countable_evidence
 
 from .models import (
     ORIGIN_EVIDENCE_TYPES,
@@ -24,6 +25,54 @@ from .models import (
 
 MODEL_SOURCE = "model"
 OBJECTIVE_SOURCE = "objective"
+
+
+class RubricContractError(ValueError):
+    """A repairable response-schema failure, never a technical rejection."""
+
+
+def validate_model_answers(stage, innovation_types, answers):
+    """Validate every required model question before scoring a response.
+
+    ``evaluate_rubric`` remains usable for audit/legacy partial assessments.
+    Live model responses cannot use its unknown defaults to hide omitted rows.
+    Diagnostics contain public schema identifiers only, not response prose.
+    """
+    rubric = load_rubric()
+    criteria = _applicable_criteria(
+        rubric, stage, normalize_innovation_types(innovation_types, rubric)
+    )
+    expected = {item["id"]: item for item in criteria}
+    supplied = {}
+    errors = []
+    if not isinstance(answers, list):
+        errors.append("rubric_answers 必须为数组")
+        answers = []
+    for row in answers:
+        if not isinstance(row, dict):
+            errors.append("答案必须为对象")
+            continue
+        key = row.get("criterion_id")
+        if not isinstance(key, str) or key not in expected:
+            errors.append("存在非本阶段/所选类型的 criterion_id")
+            continue
+        if key in supplied:
+            errors.append(f"重复题：{key}")
+        supplied[key] = row
+        answer = row.get("answer")
+        if not isinstance(answer, str) or answer not in expected[key]["options"]:
+            errors.append(f"{key} 的 answer 只能为 " + "/".join(expected[key]["options"]))
+        evidence = row.get("evidence")
+        if not isinstance(evidence, str) or (
+            answer not in {"unknown", "none", "none_or_unsearched"}
+            and not evidence.strip()
+        ):
+            errors.append(f"{key} 必须给中文 evidence；证据未知使用 unknown")
+    missing = sorted(set(expected) - supplied.keys())
+    if missing:
+        errors.append("缺少题：" + ", ".join(missing))
+    if errors:
+        raise RubricContractError("Rubric 结构未闭合：" + "；".join(dict.fromkeys(errors)))
 
 
 @lru_cache(maxsize=8)
@@ -235,9 +284,10 @@ def finalize_candidate_rubric(candidate: ParadigmCandidate) -> dict[str, Any]:
 
 
 def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
+    evidence = [item for item in candidate.evidence if countable_evidence(candidate, item)]
     origins = [
         item
-        for item in candidate.evidence
+        for item in evidence
         if item.evidence_type in ORIGIN_EVIDENCE_TYPES
     ]
     origin_organizations = {
@@ -249,7 +299,7 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
         item.evidence_type == EvidenceType.IMPLEMENTATION
         and item.raw.get("independence")
         in {"independent", "official", "publisher"}
-        for item in candidate.evidence
+        for item in evidence
     )
 
     if candidate.is_formal_technical_report and candidate.publisher_tier == "established":
@@ -265,7 +315,7 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
         item.evidence_type
         in {EvidenceType.IMPLEMENTATION, EvidenceType.ORIGINAL_IMPLEMENTATION}
         and item.raw.get("independence") == "independent"
-        for item in candidate.evidence
+        for item in evidence
     )
     official_implementation_uptake = any(
         item.evidence_type == EvidenceType.IMPLEMENTATION
@@ -280,13 +330,13 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
             nonnegative_number(item.metrics.get("forks", 0)) >= 3
             or nonnegative_number(item.metrics.get("stars", 0)) >= 50
         )
-        for item in candidate.evidence
+        for item in evidence
     )
     if any(
         item.evidence_type
         in {EvidenceType.INDEPENDENT_REPLICATION, EvidenceType.PRODUCT_ADOPTION}
         and item.raw.get("independence") == "independent"
-        for item in candidate.evidence
+        for item in evidence
     ):
         validation = "independent_replication_or_adoption"
     elif independent_implementation:
@@ -352,7 +402,7 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
         _objective(
             "independent_validation",
             validation,
-            [item.url for item in candidate.evidence if item.evidence_type != EvidenceType.COMMUNITY_DISCUSSION],
+            [item.url for item in evidence if item.evidence_type != EvidenceType.COMMUNITY_DISCUSSION],
         ),
         _objective(
             "secondary_discussion",
@@ -387,6 +437,8 @@ def substantive_secondary(
     sources: set[str] = set()
     independent = False
     for item in candidate.evidence:
+        if not countable_evidence(candidate, item):
+            continue
         qualifies = False
         if item.evidence_type in {
             EvidenceType.INDEPENDENT_REPLICATION,
