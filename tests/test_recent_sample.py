@@ -133,5 +133,45 @@ class SampleReviewTests(unittest.TestCase):
             self.assertEqual(list(Path(temporary).iterdir()), [])
 
 
+class OfficialBylineTests(unittest.TestCase):
+    def parse(self, body, *, url=ARTICLE):
+        from sources.priority_research_source import _ArticleParser
+        parser = _ArticleParser(url)
+        parser.feed('<html><body><main><div class="ArticleDetail-module-scss-module__hash__body-container">' + body + '</div></main></body></html>')
+        return parser
+
+    def test_registered_first_italic_signature_is_preserved(self):
+        parser = self.parse('<p class="post-footnote"><em>William Zhou, Daniel Freeman</em></p><p>Research body.</p>')
+        self.assertEqual(parser.authors, ["William Zhou", "Daniel Freeman"])
+
+    def test_later_notes_plain_prose_and_unregistered_layout_not_authors(self):
+        for body, url in (
+            ('<p>Introduction</p><p class="post-footnote"><em>William Zhou, Daniel Freeman</em></p>', ARTICLE),
+            ('<p class="post-footnote"><em>See our appendix for details.</em></p>', ARTICLE),
+            ('<p class="post-footnote"><em>Read Appendix</em></p>', ARTICLE),
+            ('<p class="post-footnote"><em>William Zhou, Daniel Freeman</em></p>', "https://unknown.example/research/paper"),
+        ):
+            with self.subTest(body=body, url=url):
+                self.assertEqual(self.parse(body, url=url).authors, [])
+
+    def test_article_signature_does_not_infer_employment_or_paper_roles(self):
+        from paradigms.models import EvidenceType, TechnicalEvidence
+        from sources.researcher_profile_source import _seed_profiles
+        origin = TechnicalEvidence(source="priority-research-page", evidence_type=EvidenceType.TECHNICAL_BLOG,
+            title="Official article", url=ARTICLE, authors=["William Zhou", "Daniel Freeman"], organization="Anthropic")
+        profiles = _seed_profiles(origin, [], 3)
+        self.assertEqual(len(profiles), 2)
+        self.assertTrue(all(person.role == "公开署名作者/贡献角色未披露" for person in profiles))
+        self.assertTrue(all(person.current_affiliation == "" for person in profiles))
+
+    def test_explicit_author_affiliation_is_still_preserved(self):
+        from paradigms.models import EvidenceType, TechnicalEvidence
+        from sources.researcher_profile_source import _seed_profiles
+        origin = TechnicalEvidence(source="priority-research-page", evidence_type=EvidenceType.TECHNICAL_BLOG,
+            title="Official article", url=ARTICLE, authors=["William Zhou"], organization="Publisher",
+            raw={"author_affiliations": {"William Zhou": ["Verified employer"]}})
+        self.assertEqual(_seed_profiles(origin, [], 3)[0].current_affiliation, "Verified employer")
+
+
 if __name__ == "__main__":
     unittest.main()

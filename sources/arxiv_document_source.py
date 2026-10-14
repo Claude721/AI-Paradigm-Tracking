@@ -24,7 +24,7 @@ class ArxivDocumentClient:
         if evidence.raw.get("document_excerpt"):
             return {
                 "primary_document": (
-                    "已在高优先级初筛前读取 arXiv HTML/项目页，本阶段复用"
+                    "已读取一手正文/项目页，本阶段复用；实际来源见 document_source_url"
                 )
             }
         arxiv_id = str(evidence.identifiers.get("arxiv", "")).strip()

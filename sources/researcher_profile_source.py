@@ -14,6 +14,7 @@ import httpx
 
 import config
 from paradigms.models import (
+    EvidenceType,
     ResearcherProfile,
     TechnicalEvidence,
     plausible_researcher_name,
@@ -493,7 +494,9 @@ def _seed_profiles(
         )
         role = roles.get(name, "")
         if not role:
-            if individual_index == 0 and index == 0:
+            if evidence.evidence_type != EvidenceType.PRIMARY_PAPER:
+                role = "公开署名作者/贡献角色未披露"
+            elif individual_index == 0 and index == 0:
                 role = "第一作者"
             elif individual_index == 0:
                 role = "第一位具名作者/贡献角色待核验"
@@ -516,7 +519,7 @@ def _seed_profiles(
             ResearcherProfile(
                 name=name,
                 role=role,
-                current_affiliation=evidence.organization,
+                current_affiliation=evidence.organization if evidence.evidence_type == EvidenceType.PRIMARY_PAPER else "",
             ),
         )
         if role and not profile.role:
@@ -593,7 +596,8 @@ def _seed_profiles(
                 (evidence.raw.get("project_urls") or [evidence.url])[0]
             )
             _note(profile, "已从论文官方项目页获得公开职业邮箱")
-        _note(profile, "已从当前论文作者列表建立身份种子")
+        _note(profile, "已从当前论文作者列表建立身份种子" if evidence.evidence_type == EvidenceType.PRIMARY_PAPER
+              else "已从当前原创材料的公开署名建立身份种子；发布方不等于任职机构")
     current = list(by_name.values())
     historical = [
         profile for profile in existing

@@ -117,7 +117,7 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
                 raise ValueError("返回了非本次授权材料")
         _require_recent_primary(origin, now, lookback_days)
         result["primary"] = {"title": origin.title, "url": origin.url,
-                             "published_at": origin.published_at}
+                             "published_at": origin.published_at, "authors": origin.authors}
         if origin.raw.get("origin_kind") == "technical_report":
             raise ValueError("单路线样本拒绝多机制 Technical Report；不能截断为一条冒充完成")
         await ArxivDocumentClient().hydrate(origin)
@@ -169,6 +169,12 @@ async def run_sample(arxiv_id: str, guarded, directory: Path, result: dict, *, r
         result["explanation"] = candidate.technical_explanation
         result["discussion_judgment"] = candidate.trend_interpretation
         result["people_count"] = len(candidate.researchers)
+        result["people"] = [{"name": person.name, "role": person.role,
+                             "background": person.background_summary,
+                             "trajectory": person.research_trajectory,
+                             "contacts": person.public_contacts,
+                             "contact_lookup_completed": person.contact_lookup_completed,
+                             "search_notes": person.contact_search_notes} for person in candidate.researchers]
         # Persist facts about the test boundary, not temporary community bodies
         # or a claim that absent/disabled platform coverage means no discussion.
         result["verification_summary"] = _verification_summary(candidate)
@@ -285,6 +291,10 @@ def _write_sample_review(result, directory):
         f"对这份材料的判断是：{label}。\n\n{text}\n\n"
         "本结论仅覆盖这一份已完成判断的材料，不推断整个窗口没有重要技术，也不声称所有平台已经覆盖。"
         "这是独立研究测试，不是已发送的正式周报。\n")
+    coverage = result.get("verification_summary", {}).get("community_coverage", {})
+    blind = [value for key, value in coverage.items() if key in {"tavily_social_web", "reddit_official", "x_official"}]
+    if blind:
+        content += "\n本次传播检索边界：" + "；".join(blind) + "。不能据此断言未覆盖平台没有讨论。\n"
     (directory / "sample_review.md").write_text(content, encoding="utf-8")
 
 

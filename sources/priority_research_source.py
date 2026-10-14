@@ -18,7 +18,7 @@ from urllib.parse import urljoin, urlparse, parse_qsl
 import httpx
 
 import config
-from paradigms.models import EvidenceType, TechnicalEvidence
+from paradigms.models import EvidenceType, TechnicalEvidence, plausible_researcher_name
 from paradigms.publication import (
     classify_publication,
     looks_like_linked_research_document,
@@ -772,6 +772,11 @@ class _ArticleParser(HTMLParser):
         self._in_title = False
         self._href = ""
         self._link_label: list[str] = []
+        self._byline_root_depth = 0
+        self._byline_paragraph_seen = False
+        self._byline_depth = 0
+        self._byline_parts: list[str] = []
+        self._byline_em = False
 
     @property
     def text(self) -> str:
@@ -818,6 +823,21 @@ class _ArticleParser(HTMLParser):
         if lowered not in {"area", "base", "br", "col", "embed", "hr", "img",
                            "input", "link", "meta", "param", "source", "track", "wbr"}:
             self._elements.append((lowered, excluded, in_body))
+        # This registered layout has an italic signature in the FIRST body
+        # paragraph, not author meta tags. Prose/other footnotes are not authors.
+        if (not excluded and lowered == "div"
+                and urlparse(self.base_url).hostname in {"anthropic.com", "www.anthropic.com"}
+                and urlparse(self.base_url).path.startswith("/research/")
+                and any(name.startswith("articledetail-") and name.endswith("__body-container")
+                        for name in container_names)):
+            self._byline_root_depth = len(self._elements)
+        if (not excluded and lowered == "p" and self._byline_root_depth
+                and not self._byline_paragraph_seen):
+            self._byline_paragraph_seen = True
+            if "post-footnote" in container_names:
+                self._byline_depth = len(self._elements)
+        if lowered == "em" and self._byline_depth:
+            self._byline_em = True
         if lowered == "title":
             self._in_title = True
         if not excluded and lowered == "time" and attributes.get("datetime"):
@@ -892,6 +912,14 @@ class _ArticleParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.casefold()
+        if lowered == "p" and self._byline_depth == len(self._elements):
+            names = [value.strip() for value in re.split(r",\s*|\s+and\s+", _compact_text(" ".join(self._byline_parts)))]
+            pattern = r"(?:[A-ZÀ-ÖØ-Þ][\w.'’\-]*(?:\s+[A-ZÀ-ÖØ-Þ][\w.'’\-]*){1,5}|[\u4e00-\u9fff]{2,10})"
+            if (self._byline_em and 1 <= len(names) <= 12
+                    and all(plausible_researcher_name(name) and re.fullmatch(pattern, name)
+                            and not name.startswith(("Read ", "See ", "Note ", "Source ")) for name in names)):
+                self.authors.extend(name for name in names if name not in self.authors)
+            self._byline_depth = 0
         if lowered == "title":
             self._in_title = False
             self.title = self.title or _compact_text(
@@ -906,10 +934,14 @@ class _ArticleParser(HTMLParser):
             self._link_label = []
         for index in range(len(self._elements) - 1, -1, -1):
             if self._elements[index][0] == lowered:
+                if self._byline_root_depth > index:
+                    self._byline_root_depth = 0
                 del self._elements[index:]
                 break
 
     def handle_data(self, data: str) -> None:
+        if self._byline_depth and not self._excluded():
+            self._byline_parts.append(data)
         if self._in_title:
             self._title_parts.append(data)
         if self._href:
