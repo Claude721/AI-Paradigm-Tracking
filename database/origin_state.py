@@ -79,6 +79,12 @@ def merge_checkpoint(previous, incoming):
             raise ValueError("同一来源版本的机制索引不一致；拒绝覆盖检查点")
     completed_key = "technical_report_completed_mechanisms"
     completed = {**incoming.get(completed_key, {}), **previous.get(completed_key, {})}
+    # A legacy malformed judgment must not win forever over its validated
+    # repair. Healthy previous judgments still win over stale callbacks.
+    from paradigms.rubric import valid_saved_screening
+    for key, payload in incoming.get(completed_key, {}).items():
+        if key in completed and not valid_saved_screening(completed[key]) and valid_saved_screening(payload):
+            completed[key] = payload
     if completed_key in previous or completed_key in incoming:
         # A stale snapshot may contain fewer completed mechanisms. Never subtract.
         result[completed_key] = completed

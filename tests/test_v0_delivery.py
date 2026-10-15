@@ -403,6 +403,47 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["delivery_scope"]["deep_completed"], 1)
         require_completed_research(result, candidates=[])
 
+    async def test_no_named_authors_is_observation_after_full_research_not_permanent_pending(self):
+        item = origin()
+        item.authors = []
+        process = self.process(batch([item]), accepted=True)
+        base = process.enricher.run
+        async def no_person(items, supporting):
+            values = await base(items, supporting)
+            for value in values:
+                value.researchers = []
+            return values
+        process.enricher.run = no_person
+        result = await process.run(reference_time=NOW)
+        self.assertEqual(result["delivery_profile_observed_count"], 1)
+        self.assertEqual(result["delivery_profile_deferred_count"], 0)
+        self.assertEqual(result["delivery_scope"]["deep_completed"], 1)
+        require_completed_research(result, candidates=[])
+
+    async def test_missing_profile_for_named_author_remains_execution_pending(self):
+        process = self.process(accepted=True)
+        base = process.enricher.run
+        async def lost_profile(items, supporting):
+            values = await base(items, supporting)
+            for value in values:
+                value.researchers = []
+            return values
+        process.enricher.run = lost_profile
+        result = await process.run(reference_time=NOW)
+        self.assertEqual(result["delivery_profile_observed_count"], 0)
+        self.assertEqual(result["delivery_profile_deferred_count"], 1)
+        with self.assertRaises(ResearchNotCompleteError):
+            require_completed_research(result, candidates=[])
+
+    async def test_final_gate_matches_partial_provider_policy_but_blocks_total_outage(self):
+        process = self.process(accepted=True)
+        result = await process.run(reference_time=NOW)
+        self.assertEqual(len(process.pending_delivery), 1)
+        require_completed_research(result, candidates=process.pending_delivery)
+        record_search(process.pending_delivery[0], "hackernews", "failed", reason="http_503")
+        with self.assertRaisesRegex(ResearchNotCompleteError, "未闭合的社区查询"):
+            require_completed_research(result, candidates=process.pending_delivery)
+
     async def test_manifest_reconciliation_cannot_drop_a_completed_qualified_candidate(self):
         process = self.process(accepted=True)
         result = await process.run(reference_time=NOW)

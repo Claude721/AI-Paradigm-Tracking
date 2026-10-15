@@ -235,6 +235,28 @@ def report_query_terms() -> tuple[str, ...]:
     return _EXPLICIT_REPORT_MARKERS
 
 
+def is_nonresearch_page(url: str, body: str = "") -> bool:
+    """Reject account/policy/challenge pages, not research about those topics.
+
+    An HTTP 200 and an official parent domain do not establish a technical
+    origin. Check both the requested URL and final redirect URL at fetch time.
+    """
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").casefold().removeprefix("www.")
+        path = unquote(parsed.path).casefold()
+    except ValueError:
+        return True
+    if host.split(".")[0] in {"dashboard", "console", "accounts", "account", "auth", "login"}:
+        return True
+    if re.search(r"(?:^|/)(?:login|log-in|signin|sign-in|signup|sign-up|register|api[-_]?keys?|billing|settings|legal|licenses?|privacy|terms|trademarks?|code-of-conduct|support)(?:/|$)", path):
+        return True
+    title = re.search(r"<title[^>]*>(.*?)</title>", body[:16000], re.I | re.S)
+    return bool(title and re.fullmatch(
+        r"\s*(?:log\s*in|sign\s*in|sign\s*up|access denied|attention required!?|just a moment(?:\.\.\.)?)(?:\s*[|·—–-].*)?\s*",
+        title[1], re.I | re.S))
+
+
 def looks_like_linked_research_document(label: str, url: str) -> bool:
     """识别官方文章中链接的完整报告/论文，不依赖文章标题本身。"""
 

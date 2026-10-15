@@ -81,11 +81,22 @@ class ParadigmOrchestrator:
         )
         self.enricher = EvidenceEnricher(budget_store=self.store.provider_budgets)
         self.enricher.allow_partial_sources = True
-        self.synthesizer = ParadigmSynthesizer()
+        self.synthesizer = ParadigmSynthesizer(allow_partial_sources=True)
         self.trajectory = ResearcherTrajectoryAnalyzer(stage_cache=self.store.campaigns)
         self.deep_concurrency = config.PARADIGM_DEEP_CONCURRENCY
         # 由统一入口在邮件成功后再登记交付，避免“数据库显示已交付但邮件失败”。
         self.pending_delivery: list = []
+
+    def _sync_community_policy(self):
+        """One campaign policy for enrichment, scheduling and synthesis.
+
+        Also called on resume/direct batch entry; constructors alone cannot
+        guarantee agreement for restored or injected stage instances.
+        """
+        allow_partial = getattr(self, "delivery_contract_version", None) in {2, 3}
+        for stage in (getattr(self, "enricher", None), getattr(self, "synthesizer", None)):
+            if isinstance(stage, (EvidenceEnricher, ParadigmSynthesizer)):
+                stage.allow_partial_sources = allow_partial
 
     async def run(self, *, reference_time: datetime | None = None, resume_only: bool = False) -> dict:
         active = self.store.campaigns.active()
@@ -868,15 +879,25 @@ class ParadigmOrchestrator:
             for candidate in reportable
             if not _delivery_profile_ready(candidate)
         ]
-        profile_observed = [candidate for candidate in profile_unready
-            if key_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT) and all(
-                profile.identity_search_status == "completed"
-                and profile.contact_search_status == "completed"
-                for profile in key_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT)
-            )]
-        for candidate in profile_observed:
+        profile_observed = []
+        for candidate in profile_unready:
+            people = key_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT)
+            if people and all(profile.identity_search_status == "completed"
+                              and profile.contact_search_status == "completed" for profile in people):
+                reason = "已完成公开人物检索，但尚无足够可核验身份/职业背景，不具备本期交付资格，保留观察"
+            elif (candidate.deep_checkpoint_stage == "research_complete"
+                  and not candidate.researchers
+                  and any(item.evidence_type in ORIGIN_EVIDENCE_TYPES for item in candidate.evidence)
+                  and not any(item.authors for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES)):
+                # No person identity exists to query. This is an attribution
+                # limitation, not a failed/unexecuted API request. Do not invent
+                # a person or leave the same no-author object pending forever.
+                reason = "本轮一手材料未披露具名作者，完成研究后仍无法可靠归因关键人物；不猜测负责人，保留观察"
+            else:
+                continue
+            profile_observed.append(candidate)
             candidate.status = "observe"
-            candidate.rejection_reason = "已完成公开人物检索，但尚无足够可核验身份/职业背景，不具备本期交付资格，保留观察"
+            candidate.rejection_reason = reason
             candidate.rubric_assessment = {**candidate.rubric_assessment,
                 "decision": "observe", "decision_reason": candidate.rejection_reason}
         observed_keys = {candidate.key for candidate in profile_observed}
@@ -1822,6 +1843,12 @@ class ParadigmOrchestrator:
         supporting: list,
         deadline: float,
     ) -> tuple[list, list, list]:
+        self._sync_community_policy()
+        cap = config.TAVILY_REQUEST_SAFETY_LIMIT
+        if config.TAVILY_SOCIAL_SEARCH_ENABLED and cap > 0 and len(candidates) > cap:
+            run_audit.event("community_search_capacity", "warning",
+                f"本期深挖 {len(candidates)} 条，Tavily 单轮请求保护 {cap} 次；"
+                "保留费用保护与渠道缺口，不据此截断候选；使用其他健康通道继续全部判断")
         completed: list = []
         budget_deferred: list = []
         execution_deferred: list = []
@@ -2042,6 +2069,7 @@ class ParadigmOrchestrator:
         supporting: list,
         deadline: float,
     ) -> tuple[list, list, list, list, int]:
+        self._sync_community_policy()
         refreshed: list = []
         unchanged: list = []
         budget_deferred: list = []

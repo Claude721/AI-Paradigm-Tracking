@@ -21,6 +21,7 @@ from paradigms.models import EvidenceType, TechnicalEvidence, nonnegative_number
 from paradigms.publication import (
     classify_publication,
     looks_like_linked_research_document,
+    is_nonresearch_page,
 )
 from research_watchlist import (
     OFFICIAL_GITHUB_ORGANIZATIONS,
@@ -259,6 +260,8 @@ class OfficialRepositoryReleaseSource:
                             },
                         )
                     response.raise_for_status()
+                    if is_nonresearch_page(str(response.url), response.text):
+                        raise ValueError("External primary target is an account or challenge page")
                     return (
                         url,
                         True,
@@ -601,8 +604,7 @@ def _linked_primary_material(owner_id: str, readme: str, homepage: str) -> str:
     def allowed(value: str) -> bool:
         parsed = urlparse(value)
         host = (parsed.hostname or "").casefold().removeprefix("www.")
-        path = parsed.path.casefold()
-        if re.search(r"(?:^|/)(?:legal|license|licenses|privacy|terms|trademarks?|code-of-conduct|support)(?:/|$)", path):
+        if is_nonresearch_page(value):
             return False  # Corporate policy/docs are never technical origins.
         return bool(
             host

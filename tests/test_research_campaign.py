@@ -413,6 +413,7 @@ class StageReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({item.key for item in values}, {first.mechanism_id, sibling.mechanism_id})
 
     async def test_report_mechanisms_checkpoint_before_slow_peer_finishes(self):
+        from tests.test_paradigm_pipeline import rubric_assessment
         report = origin(1)
         report.raw["origin_kind"] = "technical_report"
         report = self.store.observe_origins([report])[0][0]
@@ -426,7 +427,8 @@ class StageReceiptTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.Event().wait()
             value = ParadigmExtraction(evidence=item, is_candidate=True, canonical_name=seed["canonical_name"],
                 thesis="新的机制假说", problem_shift=seed["problem_shift"], mechanism=seed["mechanism"],
-                rubric_assessment={"decision": "deep_dive", "score": 80, "answer_coverage": 1.0})
+                innovation_types=["architecture"],
+                rubric_assessment=rubric_assessment(stage="screening"))
             return value, ""
         analyzer._assess_report_mechanism = assess
         process = orchestrator(self.store, AsyncMock(), AsyncMock())
@@ -452,6 +454,9 @@ class StageReceiptTests(unittest.IsolatedAsyncioTestCase):
         async def finish(item, seed, *, index):
             value = rejection(item)
             value.canonical_name, value.mechanism = seed["canonical_name"], seed["mechanism"]
+            value.innovation_types = ["architecture"]
+            value.rubric_assessment = rubric_assessment(stage="screening", weak_ids={
+                row["criterion_id"] for row in rubric_assessment(stage="screening")["answers"]})
             return value, ""
         analyzer._assess_report_mechanism = AsyncMock(side_effect=finish)
         await process._analyze_origins_in_batches([pending], float("inf"))
@@ -461,6 +466,7 @@ class StageReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.load_pending_deep_candidates()), 1)
 
     async def test_long_report_requeues_progress_in_same_run_and_counts_origin_once(self):
+        from tests.test_paradigm_pipeline import rubric_assessment
         report = origin(1)
         report.raw["origin_kind"] = "technical_report"
         report.raw["arxiv_comment"] = "Technical report"
@@ -471,6 +477,9 @@ class StageReceiptTests(unittest.IsolatedAsyncioTestCase):
         async def assess(item, seed, *, index):
             value = rejection(item)
             value.canonical_name, value.mechanism = seed["canonical_name"], seed["mechanism"]
+            value.innovation_types = ["architecture"]
+            value.rubric_assessment = rubric_assessment(stage="screening", weak_ids={
+                row["criterion_id"] for row in rubric_assessment(stage="screening")["answers"]})
             return value, ""
         analyzer._assess_report_mechanism = AsyncMock(side_effect=assess)
         process = orchestrator(self.store, discover, AsyncMock())

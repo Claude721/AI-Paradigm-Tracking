@@ -23,6 +23,8 @@ description: 从大型 Technical Report 正文中建立紧凑、互不重复的�
 
 如果材料虽然叫 Technical Report、System Card、Model Card 或 Whitepaper，但正文只是安全评测、产品说明、营销叙事或旧机制汇总，没有独立技术 intervention，必须明确返回 `report_disposition=no_independent_mechanism` 和可复核理由，`mechanisms` 留空。它是有效研究结论，不是抽取失败，也不能为了填满数组而发明机制。
 
+`innovation_types` 必须是非空的一维字符串数组，只能选择 architecture、algorithm、data、learning_paradigm、inference、agent_action_loop、embodiment、world_model、scientific_discovery、evaluation、systems、other。不得输出嵌套数组、type/detail 对象或自行创造 training_methodology 等类别；训练信号和学习方法按实际 intervention 使用已有枚举。类型不确定时保留证据缺口，不用增加新类型解决格式问题。每个机制必须完整返回，不能省略难以归类的机制。
+
 只返回合法 JSON，不输出 Markdown：
 
 {{

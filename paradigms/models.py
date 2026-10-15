@@ -158,6 +158,9 @@ def primary_material_url(evidence: "TechnicalEvidence") -> str:
     ) or _canonical_material_url(evidence.url)
     if not value:
         return ""
+    from .publication import is_nonresearch_page
+    if is_nonresearch_page(value):
+        return ""
     parsed = urlsplit(value)
     hostname = (parsed.hostname or "").casefold().removeprefix("www.")
     if hostname in {"openalex.org", "api.openalex.org"}:

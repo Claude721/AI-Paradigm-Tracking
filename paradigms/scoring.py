@@ -220,6 +220,10 @@ def _matches_established_organization(value: str) -> bool:
 
 
 def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
+    from .publication import is_nonresearch_page
+    primary = [item for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES]
+    if primary and all(is_nonresearch_page(item.url) or is_nonresearch_page(str(item.raw.get("canonical_source_url", ""))) for item in primary):
+        return False, "原点链接均为账户、登录或政策页面，不能作为技术事实来源，保留观察"
     signal_count, engagement, sources, independent = substantive_secondary(candidate)
     origins = [
         item for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES

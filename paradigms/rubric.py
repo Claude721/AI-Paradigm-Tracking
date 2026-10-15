@@ -31,6 +31,31 @@ class RubricContractError(ValueError):
     """A repairable response-schema failure, never a technical rejection."""
 
 
+def validate_innovation_types(values, *, legacy_shapes=False):
+    """Validate model types without silently turning malformed data into other.
+
+    Historical indexes sometimes wrapped enum strings in arrays or {type,
+    detail} objects. Those representations are losslessly readable, but unknown
+    labels still require a model judgment; they must not select the other rubric.
+    ``normalize_innovation_types`` remains permissive for legacy audit views.
+    """
+    allowed = set(load_rubric()["type_criteria"])
+    if not isinstance(values, list) or not values:
+        raise RubricContractError("innovation_types 必须为非空字符串数组；允许值：" + ", ".join(sorted(allowed)))
+    result = []
+    for value in values:
+        if legacy_shapes:
+            if isinstance(value, list) and len(value) == 1:
+                value = value[0]
+            if isinstance(value, dict) and set(value) <= {"type", "detail"}:
+                value = value.get("type")
+        if not isinstance(value, str) or value not in allowed:
+            raise RubricContractError("innovation_types 存在非枚举值；允许值：" + ", ".join(sorted(allowed)))
+        if value not in result:
+            result.append(value)
+    return result
+
+
 def validate_model_answers(stage, innovation_types, answers):
     """Validate every required model question before scoring a response.
 
@@ -73,6 +98,24 @@ def validate_model_answers(stage, innovation_types, answers):
         errors.append("缺少题：" + ", ".join(missing))
     if errors:
         raise RubricContractError("Rubric 结构未闭合：" + "；".join(dict.fromkeys(errors)))
+
+
+def valid_saved_screening(payload):
+    """A cached success is reusable only with its original complete judgment."""
+    if not isinstance(payload, dict):
+        return False
+    try:
+        types = validate_innovation_types(payload.get("innovation_types"))
+        assessment = payload.get("rubric_assessment")
+        if not isinstance(assessment, dict) or assessment.get("version") != load_rubric()["version"]:
+            return False
+        validate_model_answers("screening", types, assessment.get("answers"))
+        current = evaluate_rubric(stage="screening", innovation_types=types, answers=assessment["answers"])
+        return (assessment.get("innovation_types") == types
+                and current["decision"] == assessment.get("decision")
+                and payload.get("is_candidate") is (current["decision"] == "deep_dive"))
+    except (TypeError, ValueError, KeyError):
+        return False
 
 
 @lru_cache(maxsize=8)

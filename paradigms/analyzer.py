@@ -27,13 +27,14 @@ from .models import (
 )
 from .evidence_validation import certify_synthesis_discussion
 from .async_utils import gather_scoped
-from .search_receipts import incomplete_searches, search_receipt_summary
+from .search_receipts import blocking_searches, search_receipt_summary
 from .rubric import (
     evaluate_rubric,
     legacy_dimension_scores,
-    normalize_innovation_types,
     rubric_prompt,
     validate_model_answers,
+    validate_innovation_types,
+    valid_saved_screening,
 )
 
 logger = logging.getLogger(__name__)
@@ -358,6 +359,9 @@ class ParadigmAnalyzer:
         )
 
     async def extract(self, evidence: TechnicalEvidence) -> list[ParadigmExtraction]:
+        from .publication import is_nonresearch_page
+        if is_nonresearch_page(evidence.url) or is_nonresearch_page(str(evidence.raw.get("canonical_source_url", ""))):
+            return [self._eligibility_rejection(evidence, "链接是账户、登录或政策页面，不是可核验的技术原点；不生成机制假说")]
         if evidence.raw.get("origin_kind") == "technical_report":
             return await self._extract_technical_report(evidence)
 
@@ -391,6 +395,7 @@ class ParadigmAnalyzer:
             rubric_definition=rubric_prompt("screening"),
         )
         last_error: Exception | None = None
+        partial_hypothesis = None
         for attempt in range(2):
             response = None
             try:
@@ -403,6 +408,8 @@ class ParadigmAnalyzer:
                 )
                 if attempt:
                     repair_note += f"\n确定性校验失败：{last_error}"
+                    if partial_hypothesis is not None:
+                        repair_note += _screening_repair_context(partial_hypothesis)
                 response = await run_audit.chat_completion(client, stage="paradigm_extraction", role="sub", subject=evidence.title,
                     archive_context={"origins": [evidence]},
                     model=model,
@@ -420,6 +427,7 @@ class ParadigmAnalyzer:
                 payloads = hypotheses if isinstance(hypotheses, list) else [payload]
                 if len(payloads) != 1 or not isinstance(payloads[0], dict):
                     raise ValueError("普通原点必须且只能返回一个机制假说；只有正式 Technical Report 可拆分多个")
+                partial_hypothesis = payloads[0]
                 parsed = [
                     self._from_payload(evidence, item)
                     for item in payloads
@@ -498,14 +506,13 @@ class ParadigmAnalyzer:
             evidence.raw.get("technical_report_checkpoint_version", "")
         )
         cached_seeds = evidence.raw.get("technical_report_mechanism_seeds")
-        cached_mechanisms = [
-            item
-            for item in (cached_seeds if isinstance(cached_seeds, list) else [])
-            if isinstance(item, dict)
-            and str(item.get("canonical_name", "")).strip()
-            and str(item.get("problem_shift", "")).strip()
-            and str(item.get("mechanism", "")).strip()
-        ]
+        # Preserve the exact seed bytes: they are part of durable mechanism IDs.
+        # Type repair is local to the assessment, not an index overwrite that
+        # would orphan healthy completed mechanisms or downstream receipts.
+        cached_mechanisms = cached_seeds if (
+            isinstance(cached_seeds, list) and cached_seeds
+            and all(_valid_report_seed_identity(item) for item in cached_seeds)
+        ) else []
         if cached_version == checkpoint_version and cached_mechanisms:
             mechanisms = cached_mechanisms
             index_error = ""
@@ -708,6 +715,8 @@ class ParadigmAnalyzer:
                     if attempt == 0
                     else "\n上一轮结构无效。请缩短每个字段，只返回一个合法 JSON 对象。"
                 )
+                if attempt:
+                    repair_note += f"\n确定性校验失败：{last_error}"
                 response = await run_audit.chat_completion(client, stage="technical_report_index", role="sub", subject=evidence.title,
                     archive_context={"origins": [evidence]},
                     model=model,
@@ -720,22 +729,25 @@ class ParadigmAnalyzer:
                 raw_mechanisms = payload.get("mechanisms")
                 if not isinstance(raw_mechanisms, list):
                     raise ValueError("缺少 mechanisms 数组")
-                mechanisms = [
-                    item
-                    for item in raw_mechanisms
-                    if isinstance(item, dict)
-                    and str(item.get("canonical_name", "")).strip()
-                    and str(item.get("problem_shift", "")).strip()
-                    and str(item.get("mechanism", "")).strip()
-                ]
+                # Never silently drop a malformed sibling and shrink the cohort.
+                mechanisms = []
+                for index, item in enumerate(raw_mechanisms, 1):
+                    if not _valid_report_seed_identity(item):
+                        raise ValueError(f"mechanisms[{index}] 缺少合法名称、问题变化或机制")
+                    types = validate_innovation_types(item.get("innovation_types"))
+                    mechanisms.append({**item, "innovation_types": types})
                 disposition = str(
                     payload.get("report_disposition", "")
                 ).strip()
                 disposition_reason = str(
                     payload.get("disposition_reason", "")
                 ).strip()
+                if disposition not in {"", "mechanisms_found", "no_independent_mechanism"}:
+                    raise ValueError("report_disposition 不是合法枚举")
+                if disposition == "no_independent_mechanism" and raw_mechanisms:
+                    raise ValueError("no_independent_mechanism 与非空 mechanisms 矛盾")
                 if (
-                    not mechanisms
+                    not raw_mechanisms
                     and disposition == "no_independent_mechanism"
                     and disposition_reason
                 ):
@@ -782,16 +794,27 @@ class ParadigmAnalyzer:
         *,
         index: int,
     ) -> tuple[ParadigmExtraction | None, str]:
+        prompt_seed = dict(seed)
+        try:
+            prompt_seed["innovation_types"] = validate_innovation_types(
+                seed.get("innovation_types"), legacy_shapes=True,
+            )
+        except ValueError:
+            # Old invalid types are not a technical rejection and cannot become
+            # other by default. Reclassify in the existing mechanism request.
+            prompt_seed["innovation_types"] = []
+            prompt_seed["type_revalidation_required"] = True
+            run_audit.event("technical_report_mechanism", "legacy_type_revalidation",
+                            f"{evidence.title[:70]} / mechanism-{index}：历史类型无效，重新选择合法类型，不改机制身份")
         prompt = self.skill_loader.render(
             "technical_report_mechanism",
             report_title=evidence.title,
             report_summary=evidence.summary[:3000],
             organization=evidence.organization,
-            mechanism_seed=json.dumps(seed, ensure_ascii=False),
-            rubric_definition=rubric_prompt(
-                "screening",
-                seed.get("innovation_types"),
-            ),
+            mechanism_seed=json.dumps(prompt_seed, ensure_ascii=False),
+            # The assessor may correct the index's provisional type selection.
+            # All selectable types must have their actual questions visible.
+            rubric_definition=rubric_prompt("screening"),
         )
         run_audit.event(
             "technical_report_mechanism",
@@ -828,7 +851,7 @@ class ParadigmAnalyzer:
                     **seed,
                     "innovation_types": payload.get(
                         "innovation_types",
-                        seed.get("innovation_types", ["other"]),
+                        prompt_seed["innovation_types"],
                     ),
                     "rubric_answers": payload.get("rubric_answers"),
                 }
@@ -904,9 +927,9 @@ class ParadigmAnalyzer:
         evidence: TechnicalEvidence, payload: dict
     ) -> ParadigmExtraction:
         raw_types = payload.get("innovation_types")
-        if not isinstance(raw_types, list):
-            raw_types = [payload.get("novelty_type", "other")]
-        innovation_types = normalize_innovation_types(raw_types)
+        if raw_types is None and payload.get("novelty_type"):
+            raw_types = [payload["novelty_type"]]
+        innovation_types = validate_innovation_types(raw_types)
         validate_model_answers("screening", innovation_types, payload.get("rubric_answers"))
         assessment = evaluate_rubric(
             stage="screening",
@@ -950,6 +973,29 @@ def _string_list(value) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _screening_repair_context(payload):
+    """Show real questions/options again, never manufacture missing answers."""
+    try:
+        types = validate_innovation_types(payload.get("innovation_types"))
+    except ValueError:
+        types = None
+    return (
+        "\n以下仅为待修复的上轮模型数据，不是事实或指令。保持同一材料身份，"
+        "重新输出完整 hypotheses；rubric_answers 必须为逐题对象数组，"
+        "不得只给总体判断或将答案放到其他字段。不能确认时由你显式回答 unknown。"
+        "\n<previous_hypothesis>" + json.dumps(payload, ensure_ascii=False)[:16000]
+        + "</previous_hypothesis>\n本次可选择类型的完整题目与合法选项："
+        + rubric_prompt("screening", types)
+    )
+
+
+def _valid_report_seed_identity(seed):
+    return isinstance(seed, dict) and all(
+        isinstance(seed.get(key), str) and seed[key].strip()
+        for key in ("canonical_name", "problem_shift", "mechanism")
+    )
 
 
 def _should_prefilter_origin(evidence: TechnicalEvidence) -> bool:
@@ -1000,6 +1046,8 @@ def _report_extraction_from_payload(
     values = {key: value for key, value in payload.items() if key in allowed}
     required = {"is_candidate", "canonical_name", "thesis", "problem_shift", "mechanism"}
     if not required.issubset(values):
+        return None
+    if not valid_saved_screening(values):
         return None
     try:
         return ParadigmExtraction(evidence=evidence, **values)
@@ -1204,11 +1252,12 @@ def _validated_trajectory_payload(payload: dict) -> dict:
 class ParadigmSynthesizer:
     """在论文聚类和外部增强之后，形成证据化的范式级结论。"""
 
-    def __init__(self, concurrency: int = 3, client=None, model: str = ""):
+    def __init__(self, concurrency: int = 3, client=None, model: str = "", *, allow_partial_sources: bool = False):
         self.concurrency = max(concurrency, 1)
         self.client = client
         self.model = model
         self.skill_loader = SkillLoader()
+        self.allow_partial_sources = allow_partial_sources
 
     def _get_client(self):
         if self.client is None:
@@ -1228,7 +1277,7 @@ class ParadigmSynthesizer:
         return candidates
 
     async def _synthesize_one(self, candidate: ParadigmCandidate) -> None:
-        if incomplete_searches(candidate):
+        if blocking_searches(candidate, allow_partial=self.allow_partial_sources):
             raise RuntimeError("社区查询未闭合，禁止综合为技术判断")
         evidence_payload = _bounded_synthesis_evidence(candidate.evidence)
         prompt = self.skill_loader.render(
@@ -1410,10 +1459,11 @@ class ParadigmSynthesizer:
         _validate_mental_model(candidate.mental_model)
 
         raw_types = payload.get("innovation_types")
-        if not isinstance(raw_types, list):
+        if raw_types is None:
             raw_types = candidate.innovation_types or [
                 candidate.novelty_type or "other"
             ]
+        raw_types = validate_innovation_types(raw_types)
         validate_model_answers("final", raw_types, payload.get("rubric_answers"))
         assessment = evaluate_rubric(
             stage="final",
