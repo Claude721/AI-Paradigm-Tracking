@@ -56,9 +56,9 @@ Settings → Secrets and variables → Actions：
 
 社区渠道执行统一判定，不允许调度层放行后综合层再以任一失败渠道拒绝。Tavily 次数保护不足会给出容量提醒而不截断深挖；2026-10-15 线上 `TAVILY_REQUEST_SAFETY_LIMIT` 已从 12 改为 0，其余月度费用保护、平台开关及自动续跑默认不变。
 
-非空与空报告均要求本期选定原点、全部合格深挖候选及选定刷新全部完成判断。缺失输出、结构/接口/预算待办阻断正式报告，即使已有其他合格路线；健康检查点仍保存且其他候选继续执行。无路线且有效取材时才能给出空报告结论；核心判断失败不能说“没有重要技术”。不发送阶段性 memo 或待续研清单，主题使用“新路线”而非断言范式已经形成。
+v4 要求本期原点、全部合格深挖候选及选定刷新均有真实尝试，不要求全部成功。单条结构/接口/检查点失败保存原快照与失败回执，其他合格路线正常交付；不得标成技术淘汰。未尝试、纯预算/依赖中断仍阻断流程完成；全部核心判断失败不能变成成功空报告。无入选时给出有边界的本轮结果与数量，不发送阶段性 memo 或待续研清单。
 
-研究诊断可以仍有未选原始材料、历史积压与 coverage_incomplete；v3 正式交付由 delivery_scope、封存的全部深挖身份清单与真实 SQLite 核对，本期 pending 必须为 0。pipeline_result 的 fresh_research_completed 依据交付完成契约，不要求全局积压/物理入口缺口清零。旧 v2 待投递凭据也不得隐瞒本期待办；已交付记录不删除或重写。范围完成不表示全网覆盖或成熟范式认证。
+研究诊断可以仍有单条失败、历史积压及 coverage_incomplete。delivery_scope 从 SQLite 核对 planned/attempted/completed/failed/unattempted 及逐对象版本回执；入选路线必须有自己的成功研究记录。fresh_research_completed 依据执行交付契约，不要求 pending 清零。未建 outbox 的 v3 活动计划原地升级，窗口/名单/用量不变；已有 v2/v3 outbox 和已交付记录不重写。无需调整 Variables、Key 或 reset_state。
 
 报告的每条路线及全文每个 URL 必须可追溯；人物不得同名误配或猜邮箱，正文中文、无评分表。编辑质量失败明确失败。EMAIL_PUSH_REQUIRED=true 后 SMTP 失败也明确失败，不能提前登记 last_reported_signature。
 

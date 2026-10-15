@@ -1279,6 +1279,10 @@ class ParadigmSynthesizer:
     async def _synthesize_one(self, candidate: ParadigmCandidate) -> None:
         if blocking_searches(candidate, allow_partial=self.allow_partial_sources):
             raise RuntimeError("社区查询未闭合，禁止综合为技术判断")
+        # A fresh assessment can reconsider earlier exclusions. Cached closed
+        # assessments bypass this method and retain their exact judgment.
+        candidate.evidence = candidate.input_evidence
+        candidate.excluded_evidence = []
         evidence_payload = _bounded_synthesis_evidence(candidate.evidence)
         prompt = self.skill_loader.render(
             "paradigm_synthesis",
@@ -1513,6 +1517,11 @@ class ParadigmSynthesizer:
             if str(value).isdigit()
         }
         if excluded:
+            if not excluded <= visible_evidence_indices:
+                raise ValueError("证据剔除引用了未展开或不存在的对象")
+            candidate.excluded_evidence.extend(
+                item for index, item in enumerate(candidate.evidence) if index in excluded
+            )
             candidate.evidence = [
                 item
                 for index, item in enumerate(candidate.evidence)

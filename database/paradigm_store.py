@@ -657,9 +657,9 @@ class ParadigmStore:
             if campaign_id:
                 self.campaigns.require_ready(campaign_id, candidates)
                 ledger = self.campaigns.reconcile(campaign_id)
-                if ledger["pending_total_count"]:
+                if ledger["pending_total_count"] and stats.get("delivery_contract_version") != 4:
                     raise ResearchNotCompleteError(["研究批次任务清单未闭合"])
-            elif stats.get("delivery_contract_version") in {2, 3}:
+            elif stats.get("delivery_contract_version") in {2, 3, 4}:
                 raise ResearchNotCompleteError(["V0 交付缺少持久化本期研究批次"])
             job = self._enqueue_completed_report(candidates, stats, report_date=report_date)
             if campaign_id:
@@ -1327,7 +1327,7 @@ class ParadigmStore:
                 candidate = candidate_from_dict(json.loads(row[1]))
                 revised = []
                 changed = False
-                for item in candidate.evidence:
+                for item in candidate.input_evidence:
                     state = origin_state.read(conn, item.fingerprint) if (
                         item.evidence_type in ORIGIN_EVIDENCE_TYPES
                     ) else None
@@ -1948,7 +1948,7 @@ def _deep_checkpoint_input_signature(candidate: ParadigmCandidate) -> str:
         "key": candidate.key,
         "origins": sorted(
             (item.fingerprint, item.source_revision)
-            for item in candidate.evidence
+            for item in candidate.input_evidence
             if item.evidence_type in ORIGIN_EVIDENCE_TYPES
         ),
         "screening_rubric": candidate.screening_rubric,
@@ -1982,7 +1982,7 @@ def _trajectory_checkpoint_policy_signature() -> str:
 
 def _persistable_candidate(candidate: ParadigmCandidate) -> ParadigmCandidate:
     result = candidate_from_dict(candidate.to_dict())
-    for evidence in result.evidence:
+    for evidence in result.input_evidence:
         scrub_ephemeral_evidence(evidence)
     return result
 
@@ -1999,7 +1999,7 @@ def _deep_checkpoint_is_recent(created_at: str) -> bool:
 
 
 def _deep_origin_revisions_current(conn: sqlite3.Connection, candidate: ParadigmCandidate) -> bool:
-    for item in candidate.evidence:
+    for item in candidate.input_evidence:
         if item.evidence_type not in ORIGIN_EVIDENCE_TYPES:
             continue
         row = origin_state.read(conn, item.fingerprint)

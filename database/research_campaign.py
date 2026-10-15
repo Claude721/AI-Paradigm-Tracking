@@ -195,9 +195,27 @@ class CampaignStore:
         with self.store._connect() as conn:
             conn.execute("UPDATE research_campaigns SET status='superseded', updated_at=? WHERE campaign_id=? AND status IN ('discovering','researching','ready')", (_now(), key))
 
+    def upgrade_execution_contract(self, key):
+        """Migrate an undelivered v3 plan without changing its clock or work.
+
+        Already-created outboxes keep their original delivery contract. Only
+        the caller's explicit new execution policy can upgrade a research plan.
+        """
+        with self.store.transaction():
+            campaign = self.get(key, load_discovery=False)
+            if (campaign.stats.get("delivery_contract_version") == 3
+                    and campaign.status in {"discovering", "researching", "ready"}
+                    and not campaign.delivery_key):
+                stats = {**campaign.stats, "delivery_contract_version": 4}
+                stats.pop("delivery_scope", None)
+                with self.store._connect() as conn:
+                    conn.execute("UPDATE research_campaigns SET stats_json=?, status=?, updated_at=? WHERE campaign_id=?",
+                                 (_encode(stats), "discovering" if campaign.status == "discovering" else "researching", _now(), key))
+        return self.get(key)
+
     def set_origin_scope(self, key, origins, *, input_diagnostics=None):
         campaign = self.get(key, load_discovery=False)
-        if campaign.stats.get("delivery_contract_version") not in {2, 3}:
+        if campaign.stats.get("delivery_contract_version") not in {2, 3, 4}:
             return
         if "origin_scope" in campaign.stats:
             return
@@ -306,7 +324,7 @@ class CampaignStore:
         from database.paradigm_store import _deep_checkpoint_input_signature, _persistable_candidate
         with self.store.transaction():
             campaign = self.get(key, load_discovery=False)
-            bounded = campaign.stats.get("delivery_contract_version") in {2, 3}
+            bounded = campaign.stats.get("delivery_contract_version") in {2, 3, 4}
             scope = set(campaign.stats.get("origin_scope", []))
             with self.store._connect() as conn:
                 origins = conn.execute("""SELECT e.fingerprint, o.source_signature, e.last_analyzed_at
@@ -341,7 +359,7 @@ class CampaignStore:
                     # mandatory. No model, score ordering or configured cap may
                     # remove it from the persistent completion denominator.
                     pool = [item for item in candidates.values() if
-                            item.key not in member_keys and any(e.fingerprint in scope and e.evidence_type in ORIGIN_EVIDENCE_TYPES for e in item.evidence)
+                            item.key not in member_keys and any(e.fingerprint in scope and e.evidence_type in ORIGIN_EVIDENCE_TYPES for e in item.input_evidence)
                             and (item.status == "pending_deep" or item.screening_rubric.get("decision") in {"deep_dive", "observe"} or item.deep_checkpoint_stage)]
                     for item in pool:
                         if item.status != "pending_deep" and (
@@ -379,13 +397,35 @@ class CampaignStore:
             result[f"{kind}_completed"] = sum(count for lane, status, count in counts if lane == kind and status == "completed")
             result[f"{kind}_pending"] = result[f"{kind}_planned"] - result[f"{kind}_completed"]
         result["pending_total_count"] = sum(result[f"{kind}_pending"] for kind in ("origin", "deep", "refresh"))
-        if campaign.stats.get("delivery_contract_version") == 3:
+        if campaign.stats.get("delivery_contract_version") in {3, 4}:
             with self.store._connect() as conn:
                 result["deep_scope_keys"] = sorted(row[0] for row in conn.execute(
                     "SELECT object_key FROM campaign_work WHERE campaign_id=? AND kind='deep'", (key,)))
             # Origin closure seals the cohort deterministically. Reconciliation
             # reopens this proof if a parent revision becomes pending again.
             result["deep_scope_sealed"] = result["origin_pending"] == 0
+        if campaign.stats.get("delivery_contract_version") == 4:
+            with self.store._connect() as conn:
+                attempts = {}
+                for kind, identity, revision, outcome, attempt in conn.execute(
+                    "SELECT kind, object_key, input_revision, outcome, attempt_id FROM research_attempts WHERE campaign_id=? ORDER BY attempt_id DESC", (key,)
+                ):
+                    attempts.setdefault((kind, identity, revision), (outcome, attempt))
+                receipts = []
+                for kind, identity, revision, status in conn.execute(
+                    "SELECT kind, object_key, input_revision, status FROM campaign_work WHERE campaign_id=? ORDER BY kind, object_key", (key,)
+                ):
+                    outcome, attempt = attempts.get((kind, identity, revision), ("", 0))
+                    result_kind = ("completed" if status == "completed" else "failed"
+                                   if outcome in {"execution_failed", "returned", "completed"} else "unattempted")
+                    receipts.append({"kind": kind, "key": identity, "revision": revision,
+                                     "outcome": result_kind, "attempt_id": attempt})
+            result["execution_receipts"] = receipts
+            for kind in ("origin", "deep", "refresh"):
+                result[f"{kind}_failed"] = sum(row["kind"] == kind and row["outcome"] == "failed" for row in receipts)
+                result[f"{kind}_attempted"] = result[f"{kind}_completed"] + result[f"{kind}_failed"]
+                result[f"{kind}_unattempted"] = result[f"{kind}_planned"] - result[f"{kind}_attempted"]
+            result["deep_scope_sealed"] = result["origin_unattempted"] == 0
         return result
 
     def save_stats(self, key, stats, *, ready=False):
@@ -404,7 +444,7 @@ class CampaignStore:
     def bind_delivery(self, key, delivery_key, *, delivered=False):
         self.require_ready(key)
         snapshot = self.reconcile(key)
-        if snapshot["pending_total_count"]:
+        if snapshot["pending_total_count"] and self.get(key, load_discovery=False).stats.get("delivery_contract_version") != 4:
             raise ResearchNotCompleteError(["持久化研究批次仍有未闭合任务"])
         with self.store._connect() as conn:
             conn.execute("UPDATE research_campaigns SET delivery_key=?, status=?, updated_at=? WHERE campaign_id=?", (delivery_key, "delivered" if delivered else "waiting_delivery", _now(), key))
@@ -414,7 +454,7 @@ class CampaignStore:
         if campaign is None or campaign.status not in {"ready", "waiting_delivery"} or campaign.discovery is None or not campaign.stats.get("refresh_scope_sealed"):
             raise ResearchNotCompleteError(["持久化研究批次没有有效的完整研究凭据"])
         require_completed_research(campaign.stats)
-        if campaign.stats.get("delivery_contract_version") in {2, 3}:
+        if campaign.stats.get("delivery_contract_version") in {2, 3, 4}:
             from paradigms.delivery_policy import delivery_proof
             expected = campaign.stats["delivery_scope"]["routes"]
             saved = self.store.load_candidate_snapshots([row["key"] for row in expected])

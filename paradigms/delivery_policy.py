@@ -11,7 +11,7 @@ import json
 
 from .models import ORIGIN_EVIDENCE_TYPES, _evidence_datetime, nonnegative_number, technical_evidence_from_dict
 
-VERSION = 3
+VERSION = 4
 PRIMARY_ADAPTERS = frozenset({
     "arxiv", "huggingface-papers", "openalex", "openreview", "research-blog",
     "priority-research-page", "curated-kol-feeds", "high-signal-forums",
@@ -108,7 +108,12 @@ def delivery_proof(stats, candidates, ledger, *, minimum_sources):
         "scoped_pending_count": ledger["pending_total_count"],
         **({"deep_scope_keys": ledger["deep_scope_keys"],
             "deep_scope_sealed": ledger["deep_scope_sealed"]}
-           if stats.get("delivery_contract_version") == VERSION else {}),
+           if stats.get("delivery_contract_version") in {3, 4} else {}),
+        **({"execution_receipts": ledger["execution_receipts"],
+            **{f"{kind}_{field}": ledger[f"{kind}_{field}"]
+               for kind in ("origin", "deep", "refresh")
+               for field in ("attempted", "failed", "unattempted")}}
+           if stats.get("delivery_contract_version") == 4 else {}),
         "routes": sorted([
             {"key": item.key, "signature": item.report_signature}
             for item in candidates
@@ -149,13 +154,15 @@ def violations(stats):
         issues.append("完成深挖数超过研究计划")
     if proof["refresh_completed"] > proof["refresh_planned"]:
         issues.append("完成刷新数超过研究计划")
+    if stats.get("delivery_contract_version") == 4:
+        return [*issues, *_execution_violations(stats, proof, ledger, routes)]
     # A route entering the cohort is a research obligation, never a top-N
     # editorial sample. Nonempty output cannot hide unfinished peer judgments.
     if proof["scoped_pending_count"] or proof["origin_completed"] != proof["origin_planned"] or proof["origin_selected"] != proof["origin_planned"]:
         issues.append("本期选定原点未全部完成，禁止交付部分研究结果")
     if proof["deep_completed"] != proof["deep_planned"] or proof["refresh_completed"] != proof["refresh_planned"]:
         issues.append("本期深挖/刷新候选未全部闭合，禁止截取部分路线交付")
-    if stats.get("delivery_contract_version") == VERSION:
+    if stats.get("delivery_contract_version") == 3:
         keys = proof.get("deep_scope_keys")
         if (proof.get("deep_scope_sealed") is not True or
                 not isinstance(keys, list) or any(not isinstance(key, str) or not key for key in keys) or
@@ -178,4 +185,63 @@ def violations(stats):
             issues.append("空报告没有完成判断凭据")
         if proof["rejected_origin_count"]:
             issues.append("一手输入仍有结构故障，不能形成成功空报告")
+    return issues
+
+
+def execution_result_kind(ledger, candidates):
+    if any(ledger.get(f"{kind}_unattempted", 1) for kind in ("origin", "deep", "refresh")):
+        return "research_blocked"
+    return "complete_memo" if candidates else "complete_no_selection"
+
+
+def _execution_violations(stats, proof, ledger, routes):
+    """All tasks must be visited; only selected routes must succeed."""
+    issues = []
+    receipts = proof.get("execution_receipts")
+    if not isinstance(receipts, list) or receipts != ledger.get("execution_receipts"):
+        return ["执行回执与持久化任务账本不一致"]
+    identities = set()
+    counts = defaultdict(lambda: defaultdict(int))
+    for row in receipts:
+        if (not isinstance(row, dict) or row.get("kind") not in {"origin", "deep", "refresh"}
+                or not isinstance(row.get("key"), str) or not row["key"]
+                or not isinstance(row.get("revision"), str) or not row["revision"]
+                or row.get("outcome") not in {"completed", "failed", "unattempted"}
+                or type(row.get("attempt_id")) is not int or row["attempt_id"] < 0
+                or row["outcome"] == "failed" and not row["attempt_id"]
+                or (row["kind"], row["key"]) in identities):
+            return ["逐对象执行回执身份、版本或结果无效"]
+        identities.add((row["kind"], row["key"]))
+        counts[row["kind"]][row["outcome"]] += 1
+    for kind in ("origin", "deep", "refresh"):
+        expected = {"completed": counts[kind]["completed"], "failed": counts[kind]["failed"],
+                    "unattempted": counts[kind]["unattempted"]}
+        derived = {"planned": sum(expected.values()), "completed": expected["completed"],
+                   "attempted": expected["completed"] + expected["failed"],
+                   "failed": expected["failed"], "unattempted": expected["unattempted"]}
+        if any(type(proof.get(f"{kind}_{field}")) is not int
+               or proof[f"{kind}_{field}"] != value or ledger.get(f"{kind}_{field}") != value
+               for field, value in derived.items()):
+            issues.append(f"{kind} 执行计数与逐对象回执不一致")
+        if expected["unattempted"]:
+            issues.append(f"{kind} 仍有未尝试或预算/依赖中断的任务")
+    keys = sorted(row["key"] for row in receipts if row["kind"] == "deep")
+    if (proof.get("deep_scope_keys") != keys or ledger.get("deep_scope_keys") != keys
+            or proof.get("deep_scope_sealed") is not True or ledger.get("deep_scope_sealed") is not True):
+        issues.append("全部深挖候选身份清单未封存")
+    if proof["origin_selected"] != proof["origin_planned"]:
+        issues.append("选定原点与执行计划不一致")
+    closed = {row["key"] for row in receipts if row["kind"] in {"deep", "refresh"} and row["outcome"] == "completed"}
+    if any(row["key"] not in closed for row in routes):
+        issues.append("入选路线没有自身成功的研究回执")
+    judgments = proof["deep_completed"] + proof["refresh_completed"]
+    if not routes and ((proof["deep_planned"] + proof["refresh_planned"] > 0 and not judgments)
+                       or proof["origin_planned"] > 0 and not proof["origin_completed"] and not judgments):
+        issues.append("没有成功的研究判断，不能把系统性失败写成空结论")
+    if not routes and proof["rejected_origin_count"]:
+        issues.append("一手输入存在未归因结构故障，不能形成空结论")
+    if stats.get("result_kind") != ("complete_memo" if routes else "complete_no_selection"):
+        issues.append("交付结果类型与已核验路线不一致")
+    if stats.get("report_safety_deferred_count", 0):
+        issues.append("显式报告熔断仍截断合格路线，不能隐瞒已核验的交付对象")
     return issues

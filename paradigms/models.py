@@ -939,6 +939,9 @@ class ParadigmCandidate:
     lineage_path: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
     evidence: list[TechnicalEvidence] = field(default_factory=list)
+    # Relevance judgments never erase the frozen research inputs. These
+    # materials remain auditable, but cannot supply report facts or momentum.
+    excluded_evidence: list[TechnicalEvidence] = field(default_factory=list)
     researchers: list[ResearcherProfile] = field(default_factory=list)
     novelty_score: float = 0.0
     solidity_score: float = 0.0
@@ -970,6 +973,10 @@ class ParadigmCandidate:
     deep_checkpoint_created_at: str = ""
     deep_checkpoint_trajectory_signature: str = ""
     deep_checkpoint_synthesis_rubric: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def input_evidence(self) -> list[TechnicalEvidence]:
+        return [*self.evidence, *self.excluded_evidence]
 
     @property
     def evidence_sources(self) -> set[str]:
@@ -1012,9 +1019,11 @@ class ParadigmCandidate:
             **{
                 key: value
                 for key, value in asdict(self).items()
-                if key not in {"evidence", "researchers"}
+                if key not in {"evidence", "excluded_evidence", "researchers"}
             },
             "evidence": [item.to_dict() for item in self.evidence],
+            **({"excluded_evidence": [item.to_dict() for item in self.excluded_evidence]}
+               if self.excluded_evidence else {}),
             "researchers": [asdict(item) for item in self.researchers],
         }
 
@@ -1093,6 +1102,7 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
         },
     )
     raw_evidence = payload.get("evidence", [])
+    raw_excluded = payload.get("excluded_evidence", [])
     raw_researchers = payload.get("researchers", [])
     from .search_receipts import SEARCH_STATUSES
     for provider, receipt in payload.get("community_search_receipts", {}).items():
@@ -1118,9 +1128,10 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
             for item in history
         ):
             raise ValueError("社区查询失败账本无效")
-    if not isinstance(raw_evidence, list) or not isinstance(raw_researchers, list):
+    if not isinstance(raw_evidence, list) or not isinstance(raw_excluded, list) or not isinstance(raw_researchers, list):
         raise ValueError("候选状态中的 evidence/researchers 必须是数组")
     evidence = [technical_evidence_from_dict(item) for item in raw_evidence]
+    excluded = [technical_evidence_from_dict(item) for item in raw_excluded]
     researchers = [
         _researcher_profile_from_dict(item)
         for item in raw_researchers
@@ -1129,11 +1140,12 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
     payload_fields = {
         key: value
         for key, value in payload.items()
-        if key in known and key not in {"evidence", "researchers"}
+        if key in known and key not in {"evidence", "excluded_evidence", "researchers"}
     }
     return ParadigmCandidate(
         **payload_fields,
         evidence=evidence,
+        excluded_evidence=excluded,
         researchers=researchers,
     )
 

@@ -70,7 +70,7 @@ def research_completion_violations(stats: dict) -> list[str]:
     """
     if not isinstance(stats, dict):
         return ["缺少可核验的研究完成记录"]
-    if type(stats.get("delivery_contract_version")) is int and stats["delivery_contract_version"] in {2, 3}:
+    if type(stats.get("delivery_contract_version")) is int and stats["delivery_contract_version"] in {2, 3, 4}:
         from .delivery_policy import violations
         return violations(stats)
     if "delivery_contract_version" in stats:
@@ -239,7 +239,7 @@ def require_completed_research(stats: dict, *, content: str = "", candidates=Non
         violations.append("报告候选仍有 pending_deep 研究检查点")
     if candidates is not None:
         from .search_receipts import blocking_searches
-        if stats.get("delivery_contract_version") in {2, 3}:
+        if stats.get("delivery_contract_version") in {2, 3, 4}:
             expected = (stats.get("delivery_scope") or {}).get("routes", [])
             actual = sorted([{"key": item.key, "signature": item.report_signature}
                              for item in candidates], key=lambda item: item["key"])
@@ -248,7 +248,7 @@ def require_completed_research(stats: dict, *, content: str = "", candidates=Non
             from .scoring import is_reportable
             if any(not is_reportable(item) for item in candidates):
                 violations.append("交付路线未通过最终技术与承接门槛")
-        if any(blocking_searches(item, allow_partial=stats.get("delivery_contract_version") in {2, 3}) for item in candidates):
+        if any(blocking_searches(item, allow_partial=stats.get("delivery_contract_version") in {2, 3, 4}) for item in candidates):
             violations.append("报告候选仍有未闭合的社区查询")
     if violations:
         raise ResearchNotCompleteError(violations)

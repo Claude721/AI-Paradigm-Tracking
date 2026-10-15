@@ -258,7 +258,7 @@ class EvidenceEnricher:
     def finalize(candidates: list[ParadigmCandidate]) -> list[ParadigmCandidate]:
         """分析完成后不持久化社区用户正文，只保留可复核链接和聚合指标。"""
         for candidate in candidates:
-            for evidence in candidate.evidence:
+            for evidence in candidate.input_evidence:
                 scrub_ephemeral_evidence(evidence)
         return candidates
 
@@ -290,7 +290,9 @@ class EvidenceEnricher:
         if not supporting:
             return hashlib.sha256(json.dumps([ASSOCIATION_VERSION, []], ensure_ascii=False).encode()).hexdigest()
         probe = copy.copy(candidate)
-        probe.evidence = list(candidate.evidence)
+        # Cache identity follows frozen inputs, not a later relevance verdict.
+        probe.evidence = list(candidate.input_evidence)
+        probe.excluded_evidence = []
         original_count = len(probe.evidence)
         EvidenceEnricher._attach_support(probe, supporting)
         relevant = []

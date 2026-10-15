@@ -93,14 +93,16 @@ class ParadigmOrchestrator:
         Also called on resume/direct batch entry; constructors alone cannot
         guarantee agreement for restored or injected stage instances.
         """
-        allow_partial = getattr(self, "delivery_contract_version", None) in {2, 3}
+        allow_partial = getattr(self, "delivery_contract_version", None) in {2, 3, 4}
         for stage in (getattr(self, "enricher", None), getattr(self, "synthesizer", None)):
             if isinstance(stage, (EvidenceEnricher, ParadigmSynthesizer)):
                 stage.allow_partial_sources = allow_partial
 
     async def run(self, *, reference_time: datetime | None = None, resume_only: bool = False) -> dict:
         active = self.store.campaigns.active()
-        bounded = getattr(self, "delivery_contract_version", None) in {2, 3}
+        if active and getattr(self, "delivery_contract_version", None) == 4:
+            active = self.store.campaigns.upgrade_execution_contract(active.campaign_id)
+        bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4}
         now = reference_time or datetime.now(timezone.utc)
         if bounded and active and not resume_only and active.status != "waiting_delivery" and (
             active.stats.get("delivery_contract_version") != self.delivery_contract_version or
@@ -152,7 +154,7 @@ class ParadigmOrchestrator:
         }
         reopener = getattr(self.store, "reopen_failed_community_judgments", None)
         stats["community_failed_judgments_reopened"] = (
-            reopener(allow_partial_sources=True) if callable(reopener) and getattr(self, "delivery_contract_version", None) in {2, 3}
+            reopener(allow_partial_sources=True) if callable(reopener) and getattr(self, "delivery_contract_version", None) in {2, 3, 4}
             else reopener() if callable(reopener) else 0
         )
         queue_before = self.store.work_queue_snapshot(reference_time=research_now())
@@ -161,7 +163,7 @@ class ParadigmOrchestrator:
         if self.campaign.discovery is None:
             batch = await self.discovery.run()
             stats["discovery_resumed"] = False
-        elif getattr(self, "delivery_contract_version", None) in {2, 3}:
+        elif getattr(self, "delivery_contract_version", None) in {2, 3, 4}:
             batch = self.campaign.discovery
             stats["discovery_resumed"] = True
             stats["discovery_retry_sources"] = []
@@ -173,7 +175,7 @@ class ParadigmOrchestrator:
             stats["discovery_resumed"] = True
             stats["discovery_retry_sources"] = sorted(retry_sources)
             batch = await self.discovery.retry(self.campaign.discovery) if retry_sources else self.campaign.discovery
-        if getattr(self, "delivery_contract_version", None) in {2, 3}:
+        if getattr(self, "delivery_contract_version", None) in {2, 3, 4}:
             from paradigms.delivery_policy import validated_discovery
             batch, rejected = validated_discovery(batch)
             for key, count in rejected.items():
@@ -374,7 +376,7 @@ class ParadigmOrchestrator:
                 recall_lanes=recall_lanes,
             )
         )
-        bounded = getattr(self, "delivery_contract_version", None) in {2, 3}
+        bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4}
         if bounded:
             from paradigms.delivery_policy import bounded_origins
             selected = bounded_origins(batch.origins, limit=config.PARADIGM_RESEARCH_ORIGIN_LIMIT,
@@ -1124,8 +1126,15 @@ class ParadigmOrchestrator:
             # result is independent of unrelated acquisition/backlog failures.
             stats["result_kind"] = ("research_blocked" if ledger["pending_total_count"] else
                 "complete_memo" if reportable else "complete_no_signal")
+            if self.delivery_contract_version == 4:
+                from paradigms.delivery_policy import execution_result_kind
+                stats["result_kind"] = execution_result_kind(ledger, reportable)
+                stats["execution_complete"] = not any(ledger[f"{kind}_unattempted"] for kind in ("origin", "deep", "refresh"))
+                stats["local_execution_failure_count"] = sum(ledger[f"{kind}_failed"] for kind in ("origin", "deep", "refresh"))
         from paradigms.completion import research_completion_violations
         ready = not research_completion_violations(stats)
+        if getattr(self, "delivery_contract_version", None) == 4 and not ready:
+            stats["result_kind"] = "research_blocked"
         self.store.campaigns.save_stats(self.campaign.campaign_id, stats, ready=ready)
         stats["research_campaign"] = self.store.campaigns.snapshot(self.campaign.campaign_id)
         run_audit.checkpoint(stats)
@@ -1171,7 +1180,7 @@ class ParadigmOrchestrator:
             ) else "backfill"
             origin_queues[lane].append(item)
         initial_deep = self.store.load_pending_deep_candidates()
-        bounded = getattr(self, "delivery_contract_version", None) in {2, 3}
+        bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4}
         if bounded:
             member_keys = self.store.campaigns.candidate_keys(self.campaign.campaign_id)
             initial_deep = [item for item in initial_deep if item.key in member_keys]
@@ -1881,6 +1890,8 @@ class ParadigmOrchestrator:
                 fresh = copy.deepcopy(fresh_originals)
                 originals = {item.key: item for item in fresh_originals}
                 for item in fresh:
+                    item.evidence = item.input_evidence
+                    item.excluded_evidence = []
                     item.deep_checkpoint_stage = ""
                     item.deep_checkpoint_input_signature = ""
                     item.deep_checkpoint_support_signature = ""
@@ -1911,7 +1922,7 @@ class ParadigmOrchestrator:
                         fresh, values, "external_enrichment"
                     )
                     from paradigms.search_receipts import blocking_searches
-                    blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3})
+                    blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3, 4})
                     search_failed = [item for item in values if blocked(item)]
                     values = [item for item in values if not blocked(item)]
                     fresh = [item for item in fresh if not blocked(item)]
@@ -2006,7 +2017,17 @@ class ParadigmOrchestrator:
                     process_batch(), timeout=remaining
                 )
             except asyncio.TimeoutError:
-                budget_deferred.extend(deferred_snapshot(item) for item in group)
+                if getattr(self, "delivery_contract_version", None) == 4:
+                    # The flow actually started. Its timeout is a local failed
+                    # attempt, unlike the untouched tail or no-budget branch.
+                    for item in group:
+                        failed = deferred_snapshot(item)
+                        failed.execution_failure_count += 1
+                        failed.last_execution_failure_at = datetime.now(timezone.utc).isoformat()
+                        _record_deferred_candidate(failed, "深挖流程已执行后超时；单条失败留档，不作技术判断")
+                        execution_deferred.append(failed)
+                else:
+                    budget_deferred.extend(deferred_snapshot(item) for item in group)
                 return
             except (sqlite3.DatabaseError, OSError):
                 raise
@@ -2095,7 +2116,7 @@ class ParadigmOrchestrator:
                     allow_subset=True,
                 )
                 from paradigms.search_receipts import blocking_searches
-                blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3})
+                blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3, 4})
                 search_failed = [item for item in candidate_batch if blocked(item)]
                 values = [item for item in values if not blocked(item)]
                 if values:
@@ -2119,8 +2140,15 @@ class ParadigmOrchestrator:
             except asyncio.TimeoutError:
                 attempted += len(group)
                 _mark_refresh_attempted(self, group)
-                budget_deferred.extend(_community_progress_snapshot(original, progress)
-                                       for original, progress in zip(group, candidate_batch))
+                snapshots = [_community_progress_snapshot(original, progress)
+                             for original, progress in zip(group, candidate_batch)]
+                if getattr(self, "delivery_contract_version", None) == 4:
+                    for failed in snapshots:
+                        failed.execution_failure_count += 1
+                        failed.last_execution_failure_at = datetime.now(timezone.utc).isoformat()
+                    execution_deferred.extend(snapshots)
+                else:
+                    budget_deferred.extend(snapshots)
                 return
             except (sqlite3.DatabaseError, OSError):
                 raise

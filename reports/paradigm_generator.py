@@ -95,7 +95,7 @@ class ParadigmReportGenerator:
         ordered = sorted(candidates, key=lambda item: item.total_score, reverse=True)
         if not ordered:
             content = self._empty_report(date, stats)
-            if stats.get("delivery_contract_version") in {2, 3}:
+            if stats.get("delivery_contract_version") in {2, 3, 4}:
                 content = _attach_coverage_boundary(content, stats)
         else:
             preflight = _report_input_violations(ordered)
@@ -416,8 +416,18 @@ class ParadigmReportGenerator:
             f"本期获取 {stats.get('origin_count', 0)} 份一手材料，按来源广度选定并完成 "
             f"{stats['delivery_scope']['origin_completed']} 份材料的原点初筛，以及 "
             f"{stats['delivery_scope']['deep_completed']} 条选定机制的深挖核验。"
-            if stats.get("delivery_contract_version") in {2, 3} else
+            if stats.get("delivery_contract_version") in {2, 3, 4} else
             f"本期共扫描 {stats.get('origin_count', 0)} 份一手机制材料，已完成配置信源的召回与全部计划研究判断。"
+        )
+        if stats.get("delivery_contract_version") == 4:
+            proof = stats["delivery_scope"]
+            scope_note = (f"本轮选定 {proof['origin_planned']} 份材料进行初筛，"
+                          f"对 {proof['deep_attempted']} 条合格候选均执行了深挖流程，"
+                          f"其中 {proof['deep_completed']} 条完成判断、{proof['deep_failed']} 条执行失败。")
+        conclusion = (
+            "本轮没有入选路线：已完成判断的对象未同时满足技术、承接、人物归因与本期时效等交付条件。执行失败的对象未形成判断，不计为技术淘汰。"
+            if stats.get("delivery_contract_version") == 4 else
+            "在这些已经完成判断的研究对象中，没有路线同时跨过**技术外延、发布者可信度和外部承接**三道门槛，因此本期没有可交付的新路线或进展更新。"
         )
         return f"""# AI 技术范式雷达
 
@@ -426,7 +436,7 @@ class ParadigmReportGenerator:
 ## 本期研究 Memo
 
 {scope_note}
-在这些已经完成判断的研究对象中，没有路线同时跨过**技术外延、发布者可信度和外部承接**三道门槛，因此本期没有可交付的新路线或进展更新。
+{conclusion}
 这一结论适用于本期约定的信源、窗口和研究规则，不是对所有 AI 研究的全局否定。
 技术范式不会按周出现，本期不以局部 benchmark 改进或作者的宏大叙事填充报告。
 
@@ -861,16 +871,20 @@ def _researcher_dossier(profile: ResearcherProfile) -> dict:
 
 
 def _public_stats(stats: dict) -> dict:
-    if stats.get("delivery_contract_version") in {2, 3}:
+    if stats.get("delivery_contract_version") in {2, 3, 4}:
         scope = stats["delivery_scope"]
         return {key: stats[key] for key in (
             "origin_count", "ordinary_discovery_lookback_days", "high_signal_discovery_lookback_days",
             "source_counts", "new_paradigms", "updated_paradigms", "result_kind"
         ) if key in stats} | {
-            "research_scope": "本期有界取材和已核验路线，不是全网穷尽普查；执行待办只在运行审计中记录",
+            "research_scope": "本期有界取材和已核验路线，不是全网穷尽普查；失败详情只在运行审计中记录，失败对象不作技术判断",
             "evaluated_origin_count": scope["origin_completed"],
             "usable_primary_source_count": len(scope["usable_primary_sources"]),
             "source_issue_count": len(scope["source_issue_names"]),
+            **({"execution_counts": {
+                kind: {field: scope[f"{kind}_{field}"] for field in ("planned", "attempted", "completed", "failed")}
+                for kind in ("origin", "deep", "refresh")
+            }} if stats.get("delivery_contract_version") == 4 else {}),
         }
     keys = {
         "origin_count",
@@ -1439,7 +1453,7 @@ def _attach_research_scope_boundary(content: str, stats: dict) -> str:
 def _attach_coverage_boundary(content: str, stats: dict) -> str:
     """Coverage defects belong in failure audit, not a formal research memo."""
     require_completed_research(stats, content=content)
-    if stats.get("delivery_contract_version") in {2, 3}:
+    if stats.get("delivery_contract_version") in {2, 3, 4}:
         content = re.sub(r"(?m)^> 本期取材范围：.*(?:\n|$)", "", content).rstrip()
         proof = stats["delivery_scope"]
         note = ("本期取材范围：从 " + str(len(proof["usable_primary_sources"])) +
@@ -1448,6 +1462,12 @@ def _attach_coverage_boundary(content: str, stats: dict) -> str:
                 " 条选定机制深挖、" + str(proof["refresh_completed"]) +
                 " 条历史路线刷新。结论仅针对经核验的材料与路线，不代表全网穷尽；" +
                 str(len(proof["source_issue_names"])) + " 个发现通道存在访问或执行缺口，详见运行审计。")
+        if stats.get("delivery_contract_version") == 4:
+            note = (f"本期取材范围：{len(proof['usable_primary_sources'])} 个可用一手发现通道。"
+                    + "；".join(f"{label}已尝试 {proof[kind + '_attempted']}/{proof[kind + '_planned']}，"
+                                 f"完成 {proof[kind + '_completed']}，失败 {proof[kind + '_failed']}"
+                                 for kind, label in (("origin", "原点初筛"), ("deep", "候选深挖"), ("refresh", "历史刷新")))
+                    + f"。仅交付已通过逐路线核验的结论；失败对象不作判断。{len(proof['source_issue_names'])} 个发现通道存在访问或执行缺口，不代表全网穷尽。")
         return content.rstrip() + "\n\n> " + note + "\n"
     return content
 

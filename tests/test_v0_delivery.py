@@ -58,7 +58,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
     def process(self, discovered=None, *, accepted=False, omit=()):
         with patch("agents.paradigm_orchestrator.ParadigmStore", return_value=self.store):
             value = ParadigmOrchestrator()
-        self.assertEqual(value.delivery_contract_version, 3)
+        self.assertEqual(value.delivery_contract_version, 4)
         self.assertTrue(value.discovery.bounded)
         self.assertEqual(value.discovery.arxiv.query_result_limit, config.PARADIGM_SOURCE_QUERY_LIMIT)
         self.assertEqual(value.discovery.priority_pages.per_page, config.PARADIGM_OFFICIAL_DETAIL_LIMIT)
@@ -105,7 +105,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["coverage_incomplete"])
         self.assertTrue(result["research_incomplete"])
         require_completed_research(result, candidates=[])
-        self.assertEqual(result["result_kind"], "complete_no_signal")
+        self.assertEqual(result["result_kind"], "complete_no_selection")
         self.assertEqual(result["research_campaign"]["origin_planned"], 1)
         job = self.store.enqueue_report([], result, report_date=result["report_date"])
         generator = ParadigmReportGenerator(self.path, client=False)
@@ -116,19 +116,19 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.status, "pending_render")
         self.assertEqual(self.store.load_pending_origins()[0].fingerprint, old.fingerprint)
 
-    async def test_healthy_route_preserved_but_bad_selected_peer_blocks_delivery(self):
+    async def test_healthy_route_delivers_after_bad_selected_peer_was_attempted(self):
         bad = origin(2)
         process = self.process(batch([origin(), bad]), accepted=True, omit={bad.fingerprint})
         result = await process.run(reference_time=NOW)
         self.assertEqual(len(process.pending_delivery), 1, result)
         self.assertEqual(result["research_campaign"]["origin_pending"], 1)
         self.assertEqual(process.pending_delivery[0].community_search_receipts["tavily_social_web"]["status"], "failed")
-        with self.assertRaises(ResearchNotCompleteError):
-            require_completed_research(result, candidates=process.pending_delivery)
-        with self.assertRaises(ResearchNotCompleteError):
-            self.store.enqueue_report(process.pending_delivery, result, report_date=result["report_date"])
-        self.assertIsNone(self.store.load_pending_report_job())
-        self.assertEqual(result["result_kind"], "research_blocked")
+        require_completed_research(result, candidates=process.pending_delivery)
+        job = self.store.enqueue_report(process.pending_delivery, result, report_date=result["report_date"])
+        self.assertEqual(job.status, "pending_render")
+        self.assertEqual(result["delivery_scope"]["origin_failed"], 1)
+        self.assertEqual(result["delivery_scope"]["origin_unattempted"], 0)
+        self.assertEqual(result["result_kind"], "complete_memo")
         self.assertEqual(len(self.store.load_pending_origins()), 1)
 
     async def test_no_usable_inputs_cannot_be_successful_empty(self):
@@ -155,7 +155,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
             _send_sync(report, result)
         message = smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
         body = message.get_body(preferencelist=("plain",)).get_content()
-        self.assertIn("完成原点初筛：1", body)
+        self.assertIn("候选深挖已尝试：1/1", body)
         self.assertNotIn("全部闭合", body)
         self.assertNotIn("待续", body)
         self.assertNotIn("阶段性", message["Subject"] + body)
@@ -365,7 +365,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(result["delivery_scope"]["deep_scope_keys"]), deep_seen)
         self.assertEqual(self.store.load_pending_deep_candidates(), [])
 
-    async def test_missing_deep_output_blocks_whole_delivery_but_keeps_peers(self):
+    async def test_missing_deep_output_is_local_failure_and_healthy_peers_deliver(self):
         process = self.process(batch([origin(index) for index in range(1, 4)]), accepted=True)
         async def extract(items):
             return [ParadigmExtraction(evidence=item, is_candidate=True, canonical_name=item.title,
@@ -381,8 +381,10 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["delivery_scope"]["deep_planned"], 3)
         self.assertEqual(result["delivery_scope"]["deep_completed"], 2)
         self.assertEqual(len(self.store.load_pending_deep_candidates()), 1)
-        with self.assertRaises(ResearchNotCompleteError):
-            self.store.enqueue_report(process.pending_delivery, result, report_date=result["report_date"])
+        self.assertEqual(result["delivery_scope"]["deep_attempted"], 3)
+        self.assertEqual(result["delivery_scope"]["deep_failed"], 1)
+        self.assertEqual(len(process.pending_delivery), 2)
+        self.store.enqueue_report(process.pending_delivery, result, report_date=result["report_date"])
 
     async def test_completed_identity_search_without_match_is_observation_not_execution_pending(self):
         process = self.process(accepted=True)
