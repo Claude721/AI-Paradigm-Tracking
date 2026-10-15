@@ -356,8 +356,9 @@ class StageReceiptTests(unittest.IsolatedAsyncioTestCase):
         for index in range(2):
             analyzer = ResearcherTrajectoryAnalyzer(concurrency=1, client=client, model="offline", stage_cache=self.store.campaigns)
             if index == 0:
-                with self.assertRaises(RuntimeError):
-                    await analyzer.run([copy.deepcopy(candidate)])
+                current = copy.deepcopy(candidate)
+                await analyzer.run([current])
+                self.assertEqual([p.attribution_analysis_status for p in current.researchers], ["completed", "failed"])
             else:
                 await analyzer.run([copy.deepcopy(candidate)])
         self.assertEqual(calls, ["Alice", "Bob", "Bob"])
@@ -379,8 +380,8 @@ class StageReceiptTests(unittest.IsolatedAsyncioTestCase):
         analyzer = ResearcherTrajectoryAnalyzer(client=client, model="offline", stage_cache=self.store.campaigns)
         candidate = ParadigmCandidate(key="route", name="研究路线", thesis="", problem_shift="", mechanism="机制",
             researchers=[ResearcherProfile(name="Person Researcher", representative_works=[{"title": "Work"}])])
-        with self.assertRaises(RuntimeError):
-            await analyzer.run([candidate])
+        await analyzer.run([candidate])
+        self.assertEqual(candidate.researchers[0].attribution_analysis_status, "failed")
         with self.store._connect() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM research_stage_cache").fetchone()[0], 0)
 

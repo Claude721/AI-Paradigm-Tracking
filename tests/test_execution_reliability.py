@@ -1059,7 +1059,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 problem_shift="从旧问题转向新问题",
                 mechanism="新的训练接口",
                 status="new",
-                evidence=[_origin("2608.00031")],
+                evidence=[],  # Missing attribution is now soft; missing primary is not.
             )
             store.save_candidates([candidate])
             job = store.enqueue_report(
@@ -1078,7 +1078,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
             self.assertEqual(
                 quarantined.failure_kind, "state_contract_migration"
             )
-            self.assertIn("缺少可核验关键人物", quarantined.last_error)
+            self.assertIn("一手材料 URL", quarantined.last_error)
             pending = store.load_pending_deep_candidates()
             self.assertEqual([value.key for value in pending], [candidate.key])
             snapshot = store.delivery_queue_snapshot()
@@ -1350,6 +1350,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
 
                 os.chdir(directory)
                 marker = app_main._write_pipeline_result({
+                    "discovery_resumed": False,
                     "research_incomplete": True,
                     "coverage_incomplete": True,
                     "pending_work_count": 12,
@@ -1522,6 +1523,8 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 )
             ],
         )
+        item.evidence = [_origin("2608.00041")]
+        item.evidence[0].authors = ["A. Researcher"]
         self.assertFalse(_delivery_profile_ready(item))
         item.researchers[0].contact_search_notes.append(
             "当前论文题目与 OpenAlex 作者实体交叉核验通过"
@@ -1582,6 +1585,8 @@ class ExecutionReliabilityTests(unittest.TestCase):
                 ),
             ],
         )
+        item.evidence = [_origin("2608.00042")]
+        item.evidence[0].authors = ["Lead Researcher", "Contributing Researcher", "Senior Researcher"]
         self.assertTrue(_delivery_profile_ready(item))
 
     def test_verified_team_report_can_use_organization_attribution(self) -> None:

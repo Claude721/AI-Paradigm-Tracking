@@ -667,6 +667,8 @@ class ResearcherProfile:
     contact_search_notes: list[str] = field(default_factory=list)
     identity_search_status: str = ""
     contact_search_status: str = ""
+    # Optional enrichment outcome, never a technical admission requirement.
+    attribution_analysis_status: str = ""
 
     @property
     def public_contacts(self) -> dict[str, str]:
@@ -942,6 +944,8 @@ class ParadigmCandidate:
     # Relevance judgments never erase the frozen research inputs. These
     # materials remain auditable, but cannot supply report facts or momentum.
     excluded_evidence: list[TechnicalEvidence] = field(default_factory=list)
+    # Positive, route-scoped mechanism association; never source metadata.
+    mechanism_origin_support: dict[str, Any] = field(default_factory=dict)
     researchers: list[ResearcherProfile] = field(default_factory=list)
     novelty_score: float = 0.0
     solidity_score: float = 0.0
@@ -1033,8 +1037,8 @@ def verified_organization_attribution(
 ) -> dict[str, str]:
     """为未披露自然人贡献结构的正式组织发布保留可核验归因。
 
-    不把组织虚构成人物。仅已建立机构的正式技术报告可以在未披露可靠
-    自然人角色时用组织归因；普通官方博客不能绕过人物核验。
+    不把组织虚构成人物。此函数只提供正式报告的组织归因事实；其他材料
+    即使没有人物或组织归因，也可交付独立合格的技术结论。
     """
 
     if candidate.publisher_tier != "established" or not candidate.is_formal_technical_report:
@@ -1093,7 +1097,7 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
         mappings={
             "mental_model", "community_coverage", "community_search_receipts", "screening_rubric",
             "rubric_assessment", "freshness_assessment",
-            "deep_checkpoint_synthesis_rubric",
+            "deep_checkpoint_synthesis_rubric", "mechanism_origin_support",
         },
         numbers={
             "novelty_score", "solidity_score", "scope_score", "momentum_score",
@@ -1104,6 +1108,13 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
     raw_evidence = payload.get("evidence", [])
     raw_excluded = payload.get("excluded_evidence", [])
     raw_researchers = payload.get("researchers", [])
+    support = payload.get("mechanism_origin_support", {})
+    if support and (support.get("route_key") != payload.get("key")
+            or not isinstance(support.get("mechanism_digest"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", support["mechanism_digest"])
+            or not isinstance(support.get("origins"), dict)
+            or any(not isinstance(k, str) or not k or not isinstance(v, str) or not v for k, v in support["origins"].items())):
+        raise ValueError("候选原点机制关联回执无效")
     from .search_receipts import SEARCH_STATUSES
     for provider, receipt in payload.get("community_search_receipts", {}).items():
         if (not isinstance(provider, str) or not provider or not isinstance(receipt, dict)
@@ -1178,7 +1189,7 @@ def _researcher_profile_from_dict(payload: dict[str, Any]) -> ResearcherProfile:
             "name", "role", "current_affiliation", "research_trajectory",
             "public_email", "public_email_source", "background_summary",
             "public_bio_excerpt", "key_person_reason",
-            "identity_search_status", "contact_search_status",
+            "identity_search_status", "contact_search_status", "attribution_analysis_status",
         },
         lists={
             "prior_affiliations", "representative_works", "contact_search_notes",
@@ -1189,6 +1200,8 @@ def _researcher_profile_from_dict(payload: dict[str, Any]) -> ResearcherProfile:
     for field_name in ("identity_search_status", "contact_search_status"):
         if payload.get(field_name, "") not in {"", "completed", "failed", "not_configured"}:
             raise ValueError("人物检索状态无效")
+    if payload.get("attribution_analysis_status", "") not in {"", "completed", "failed", "insufficient_material", "not_executed"}:
+        raise ValueError("人物辅助归因状态无效")
     return ResearcherProfile(
         **_known_dataclass_fields(ResearcherProfile, payload)
     )

@@ -11,10 +11,11 @@ from .models import (
     ParadigmCandidate,
     is_verified_substantive_discussion,
     nonnegative_number,
+    delivery_researcher_profiles,
 )
 from .reputation import resolve_organization, verified_priority_researcher
 from .rubric import finalize_candidate_rubric, substantive_secondary
-from .evidence_association import countable_evidence
+from .evidence_association import countable_evidence, supported_origins, has_independent_origins, profile_references_origin
 
 
 def score_candidate(candidate: ParadigmCandidate) -> ParadigmCandidate:
@@ -163,10 +164,10 @@ def _assess_publisher(candidate: ParadigmCandidate) -> None:
     candidate.is_formal_technical_report = any(
         item.raw.get("origin_kind") == "technical_report"
         for item in candidate.evidence
-        if item.evidence_type in ORIGIN_EVIDENCE_TYPES
+        if item.evidence_type in ORIGIN_EVIDENCE_TYPES and countable_evidence(candidate, item)
     )
     for item in candidate.evidence:
-        if item.evidence_type not in ORIGIN_EVIDENCE_TYPES:
+        if item.evidence_type not in ORIGIN_EVIDENCE_TYPES or not countable_evidence(candidate, item):
             continue  # A commentator/implementer is not the origin publisher.
         if item.raw.get("publisher_tier") == "established":
             established.append(
@@ -182,19 +183,21 @@ def _assess_publisher(candidate: ParadigmCandidate) -> None:
         elif organization:
             verified.append(f"{organization['name']}：监测组织，尚不自动背书")
         # A free-text affiliation alone is not a verified publisher anchor.
+    ready_profiles = delivery_researcher_profiles(candidate.researchers)
     for profile in candidate.researchers:
+        if not profile_references_origin(candidate, profile):
+            continue
+        priority_researcher = verified_priority_researcher(profile)
+        if priority_researcher:
+            verified.append(f"{profile.name}：重点研究者身份已由公开 ID/主页核验；长期方向为{priority_researcher['focus']}")
+        if profile not in ready_profiles:
+            continue  # A model-supplied affiliation cannot certify a publisher.
         organization = resolve_organization(profile.current_affiliation)
         if organization and organization["tier"] == "established":
             established.append(str(organization["name"]))
         elif organization:
             verified.append(f"{organization['name']}：监测组织，研究者身份待联合核验")
-        priority_researcher = verified_priority_researcher(profile)
-        if priority_researcher:
-            verified.append(
-                f"{profile.name}：重点研究者身份已由公开 ID/主页核验；"
-                f"长期方向为{priority_researcher['focus']}"
-            )
-        elif (
+        if not priority_researcher and (
             profile.current_affiliation
             and profile.trajectory_consistency >= 7
             and len(profile.representative_works) >= 3
@@ -225,14 +228,7 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
     if primary and all(is_nonresearch_page(item.url) or is_nonresearch_page(str(item.raw.get("canonical_source_url", ""))) for item in primary):
         return False, "原点链接均为账户、登录或政策页面，不能作为技术事实来源，保留观察"
     signal_count, engagement, sources, independent = substantive_secondary(candidate)
-    origins = [
-        item for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES
-    ]
-    origin_publishers = {
-        (item.organization or "").casefold().strip()
-        for item in origins
-        if (item.organization or "").strip()
-    }
+    origins = supported_origins(candidate)
     official_uptake = any(
         item.evidence_type
         in {EvidenceType.IMPLEMENTATION, EvidenceType.ORIGINAL_IMPLEMENTATION}
@@ -253,7 +249,7 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
         item.raw.get("publisher_tier") == "established"
         and item.raw.get("origin_kind")
         in {"technical_report", "official_research", "official_model_release"}
-        for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES
+        for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES and countable_evidence(candidate, item)
     )
     if candidate.is_formal_technical_report and candidate.publisher_tier == "established":
         return True, "已核验的前沿组织发布正式 Technical Report，进入优先解读"
@@ -269,6 +265,7 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
     verified_people = sum(
         verified_priority_researcher(profile) is not None
         for profile in candidate.researchers
+        if profile_references_origin(candidate, profile)
     )
     if candidate.publisher_tier == "verified" and official_uptake:
         if verified_people >= 1:
@@ -278,8 +275,7 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
             )
     if (
         candidate.publisher_tier == "verified"
-        and len(origins) >= 2
-        and len(origin_publishers) >= 2
+        and has_independent_origins(origins)
     ):
         return (
             True,

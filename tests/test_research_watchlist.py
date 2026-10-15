@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 import config
-from paradigms.models import ParadigmCandidate, ResearcherProfile
+from paradigms.models import ParadigmCandidate, ResearcherProfile, TechnicalEvidence, EvidenceType
 from paradigms.reputation import (
     resolve_organization,
     source_identity,
@@ -92,6 +92,8 @@ class ResearchWatchlistTest(unittest.TestCase):
             thesis="预测抽象状态",
             problem_shift="从像素生成转向表征预测",
             mechanism="联合嵌入预测",
+            evidence=[TechnicalEvidence(source="official", evidence_type=EvidenceType.PRIMARY_PAPER,
+                title="Joint embedding prediction", url="https://example.org/jepa", authors=["Yann LeCun"])],
             researchers=[
                 ResearcherProfile(
                     name="Yann LeCun",

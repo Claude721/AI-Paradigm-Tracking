@@ -15,6 +15,7 @@ from itertools import islice
 from datetime import datetime, timedelta, timezone
 
 import config
+from agents.sample_budget import SampleBudgetError
 from database.paradigm_store import EvidenceCheckpointResult, ParadigmStore
 from paradigms.analyzer import (
     ParadigmAnalyzer,
@@ -161,9 +162,11 @@ class ParadigmOrchestrator:
         stats["work_queue_before"] = queue_before
 
         if self.campaign.discovery is None:
+            stats["discovery_executed"] = True
             batch = await self.discovery.run()
             stats["discovery_resumed"] = False
         elif getattr(self, "delivery_contract_version", None) in {2, 3, 4}:
+            stats["discovery_executed"] = False
             batch = self.campaign.discovery
             stats["discovery_resumed"] = True
             stats["discovery_retry_sources"] = []
@@ -174,6 +177,7 @@ class ParadigmOrchestrator:
                              else discovery_retry_sources(self.campaign.discovery.coverage))
             stats["discovery_resumed"] = True
             stats["discovery_retry_sources"] = sorted(retry_sources)
+            stats["discovery_executed"] = bool(retry_sources)
             batch = await self.discovery.retry(self.campaign.discovery) if retry_sources else self.campaign.discovery
         if getattr(self, "delivery_contract_version", None) in {2, 3, 4}:
             from paradigms.delivery_policy import validated_discovery
@@ -881,49 +885,15 @@ class ParadigmOrchestrator:
             for candidate in reportable
             if not _delivery_profile_ready(candidate)
         ]
-        profile_observed = []
-        for candidate in profile_unready:
-            people = key_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT)
-            if people and all(profile.identity_search_status == "completed"
-                              and profile.contact_search_status == "completed" for profile in people):
-                reason = "已完成公开人物检索，但尚无足够可核验身份/职业背景，不具备本期交付资格，保留观察"
-            elif (candidate.deep_checkpoint_stage == "research_complete"
-                  and not candidate.researchers
-                  and any(item.evidence_type in ORIGIN_EVIDENCE_TYPES for item in candidate.evidence)
-                  and not any(item.authors for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES)):
-                # No person identity exists to query. This is an attribution
-                # limitation, not a failed/unexecuted API request. Do not invent
-                # a person or leave the same no-author object pending forever.
-                reason = "本轮一手材料未披露具名作者，完成研究后仍无法可靠归因关键人物；不猜测负责人，保留观察"
-            else:
-                continue
-            profile_observed.append(candidate)
-            candidate.status = "observe"
-            candidate.rejection_reason = reason
-            candidate.rubric_assessment = {**candidate.rubric_assessment,
-                "decision": "observe", "decision_reason": candidate.rejection_reason}
-        observed_keys = {candidate.key for candidate in profile_observed}
-        reportable = [candidate for candidate in reportable if candidate.key not in observed_keys]
-        stats["delivery_profile_observed_count"] = len(profile_observed)
-        delivery_profile_deferred = [candidate for candidate in profile_unready if candidate.key not in observed_keys]
-        if delivery_profile_deferred:
-            deferred_keys = {
-                candidate.key for candidate in delivery_profile_deferred
-            }
-            reportable = [
-                candidate
-                for candidate in reportable
-                if candidate.key not in deferred_keys
-            ]
-            for candidate in delivery_profile_deferred:
-                candidate.status = "pending_deep"
-            run_audit.event(
-                "delivery_profile_readiness",
-                "warning",
-                f"{len(delivery_profile_deferred)} 条已通过研究准入的路线缺少"
-                "可交付人物背景/联系方式检索记录；保留 pending_deep，"
-                "不降低 Rubric 结论，也不发送残缺报告",
-            )
+        # Attribution is useful context, not a veto on a sound technical result.
+        # Keep the actual lookup outcomes and never reclassify them as rejection.
+        stats["delivery_profile_unresolved_count"] = len(profile_unready)
+        stats["delivery_profile_observed_count"] = 0
+        delivery_profile_deferred = []
+        if profile_unready:
+            run_audit.event("researcher_attribution", "unresolved",
+                f"{len(profile_unready)} 条路线尚未可靠归因关键人物；"
+                "保留检索边界与技术判断，不阻断交付、不猜测身份")
         delivery_source_deferred = [
             candidate
             for candidate in reportable
@@ -1145,13 +1115,20 @@ class ParadigmOrchestrator:
             len(reportable),
         )
         logger.info(
-            "研究闭合账本：原点完成=%s/%s，深挖返回=%s/%s，"
-            "待办=%s，持久化待办=%s，研究未闭合=%s，覆盖未闭合=%s",
+            "本次新增工作：原点完成=%s/%s，深挖返回=%s/%s；"
+            "全库积压诊断=%s，持久化全库积压=%s，全库研究未闭合=%s，信源覆盖有缺口=%s（不是本期交付判定）",
             stats["analysis_completed_count"], stats["planned_analysis_count"],
             stats["deep_candidate_count"], stats["planned_deep_candidate_count"],
             stats["pending_work_count"], queue_after["pending_total_count"],
             stats["research_incomplete"], stats["coverage_incomplete"],
         )
+        from paradigms.run_summary import execution_summary
+        stats["execution_summary"] = execution_summary(stats)
+        summary = stats["execution_summary"]
+        logger.info("执行方式=%s，发现快照复用=%s，本期累计完成：初筛=%s，深挖=%s，刷新=%s，本期待办=%s",
+                    summary["run_kind"], summary["discovery_snapshot_reused"],
+                    ledger["origin_completed"], ledger["deep_completed"], ledger["refresh_completed"],
+                    summary["campaign_pending_count"])
         return stats
 
     async def _service_research_lanes(
@@ -1892,6 +1869,7 @@ class ParadigmOrchestrator:
                 for item in fresh:
                     item.evidence = item.input_evidence
                     item.excluded_evidence = []
+                    item.mechanism_origin_support = {}
                     item.deep_checkpoint_stage = ""
                     item.deep_checkpoint_input_signature = ""
                     item.deep_checkpoint_support_signature = ""
@@ -1974,10 +1952,39 @@ class ParadigmOrchestrator:
                     if item.deep_checkpoint_stage == "synthesized"
                 }
                 if trajectory_inputs:
-                    trajectory_values = await self.trajectory.run(trajectory_inputs)
-                    _validate_candidate_stage_output(
-                        trajectory_inputs, trajectory_values, "researcher_trajectory"
-                    )
+                    try:
+                        # Leave time to commit the technical result even if
+                        # optional person enrichment consumes its time slice.
+                        person_seconds = _remaining_seconds(deadline) - 0.5
+                        if person_seconds <= 0:
+                            for candidate in trajectory_inputs:
+                                for person in key_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT):
+                                    person.attribution_analysis_status = "not_executed"
+                                    person.contact_search_notes.append("本次剩余时间不足，未启动人物模型补充；不改变技术判断")
+                            trajectory_values = trajectory_inputs
+                        else:
+                            async def enrich_and_analyze_people():
+                                identity = getattr(self.enricher, "enrich_people", None)
+                                if callable(identity):
+                                    await identity(trajectory_inputs)
+                                return await self.trajectory.run(trajectory_inputs)
+                            trajectory_values = await asyncio.wait_for(
+                                enrich_and_analyze_people(), timeout=min(person_seconds, 60.0),
+                            )
+                        _validate_candidate_stage_output(
+                            trajectory_inputs, trajectory_values, "researcher_trajectory"
+                        )
+                    except (sqlite3.DatabaseError, SampleBudgetError):
+                        raise  # Persistence integrity is not optional.
+                    except Exception as exc:
+                        for candidate in trajectory_inputs:
+                            for person in key_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT):
+                                if person.attribution_analysis_status != "completed":
+                                    person.attribution_analysis_status = "failed"
+                                    person.contact_search_notes.append("人物辅助归因未取得可靠结果：" + type(exc).__name__)
+                        run_audit.event("researcher_attribution", "unresolved",
+                            "人物补充阶段未取得完整结果，保留已完成技术判断：" + type(exc).__name__)
+                        trajectory_values = trajectory_inputs
                 else:
                     trajectory_values = []
                 completed_saver = getattr(
@@ -2029,7 +2036,7 @@ class ParadigmOrchestrator:
                 else:
                     budget_deferred.extend(deferred_snapshot(item) for item in group)
                 return
-            except (sqlite3.DatabaseError, OSError):
+            except (sqlite3.DatabaseError, OSError, SampleBudgetError):
                 raise
             except Exception as exc:
                 if len(group) > 1:
@@ -2748,20 +2755,24 @@ def _record_deferred_candidate(candidate, reason: str) -> None:
 
 
 def _delivery_profile_ready(candidate) -> bool:
-    """Operational completeness gate; it never changes the research Rubric."""
+    """Attribution diagnostic only; never a technical/delivery veto."""
+    from paradigms.evidence_association import profile_references_origin
 
     key_people = delivery_researcher_profiles(
         candidate.researchers,
         config.PARADIGM_KEY_RESEARCHER_LIMIT,
     )
+    key_people = [p for p in key_people if profile_references_origin(candidate, p)]
     if not key_people:
         return bool(verified_organization_attribution(candidate))
     return True
 
 
 def _delivery_primary_source_ready(candidate) -> bool:
+    from paradigms.evidence_association import countable_evidence
     return any(
         evidence.evidence_type in ORIGIN_EVIDENCE_TYPES
+        and countable_evidence(candidate, evidence)
         and primary_material_url(evidence)
         for evidence in candidate.evidence
     )

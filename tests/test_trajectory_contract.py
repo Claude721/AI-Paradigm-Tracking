@@ -50,8 +50,8 @@ class TrajectoryContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_still_invalid_after_one_repair_remains_execution_failure(self):
         analyzer,candidate,profile,call=await self.analyze([payload(None),payload(None)])
-        with self.assertRaises(RuntimeError):
-            await analyzer.run([candidate])
+        await analyzer.run([candidate])
+        self.assertEqual(profile.attribution_analysis_status, 'failed')
         self.assertEqual(call.await_count,2)
         self.assertEqual(profile.background_summary,'')
         self.assertEqual(run_audit.token_totals()['llm_call_count'],2)

@@ -231,6 +231,9 @@ class ScholarlyClosureTests(unittest.IsolatedAsyncioTestCase):
             enricher.researchers.enrich = AsyncMock(return_value=[])
             await enricher.run([item], [])
             self.assertEqual(incomplete_searches(item), ["semantic_scholar"] if error else [])
+            enricher.researchers.enrich.assert_not_awaited()
+            if not error:
+                await enricher.enrich_people([item])
             self.assertEqual(enricher.researchers.enrich.await_count, 0 if error else 1)
             self.assertNotIn("private detail", json.dumps(item.to_dict()))
 

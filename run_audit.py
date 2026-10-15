@@ -216,6 +216,8 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     llm = payload["llm_summary"]
     source_counts = stats.get("source_counts") or {}
     runtime = payload.get("runtime") or {}
+    from paradigms.run_summary import execution_summary
+    execution = execution_summary(stats)
     lines = [
         "# AI 技术范式雷达｜运行审计",
         "",
@@ -225,9 +227,17 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"> 代码：{runtime.get('commit_sha', '')}  ",
         f"> 源码指纹：{runtime.get('source_fingerprint', '')}",
         "",
-        "## 本轮漏斗",
+        "## 执行方式与本期累计",
         "",
-        f"- 原始材料：{stats.get('origin_count', 0)}",
+        f"- 执行方式：{execution['run_kind']}；本期第 {execution['campaign_attempt']} 次运行",
+        f"- 本次执行信息发现：{execution['discovery_executed']}；复用发现快照：{execution['discovery_snapshot_reused']}",
+        f"- 本次新增完成：{execution['current_run']}",
+        f"- 本期累计（包括此前续跑）：{execution['campaign_cumulative']}",
+        f"- 本期待办：{execution['campaign_pending_count']}；全库积压诊断：{execution['global_backlog_count']}（不等于本期待办）",
+        "",
+        "## 本次运行漏斗（不含前次已完成判断）",
+        "",
+        f"- 发现快照中的原始材料：{stats.get('origin_count', 0)}（复用时不是本次新增抓取量）",
         f"- 计划机制抽取：{stats.get('planned_analysis_count', 0)}",
         f"- 恢复待抽取积压：{stats.get('pending_origin_backlog_loaded', 0)}",
         f"- 实际机制抽取：{stats.get('analysis_count', 0)}",
@@ -252,16 +262,16 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- 用户 safety limit 延后刷新：{stats.get('refresh_safety_deferred_count', 0)}",
         f"- 软时间预算延后刷新：{stats.get('refresh_budget_deferred_count', 0)}",
         f"- 执行异常延后刷新：{stats.get('refresh_execution_deferred_count', 0)}",
-        f"- 已准入但人物交付信息待补全：{stats.get('delivery_profile_deferred_count', 0)}",
+        f"- 合格路线人物归因不足（软约束、不阻断）：{stats.get('delivery_profile_unresolved_count', 0)}",
         f"- 已准入但一手链接待补全：{stats.get('delivery_source_deferred_count', 0)}",
         f"- 技术通过但时效证据不足、留在观察池：{stats.get('freshness_deferred_count', 0)}",
         f"- 最终可报告：{stats.get('high_value_count', 0)}",
         f"- 报告 safety limit 延后：{stats.get('report_safety_deferred_count', 0)}",
-        f"- 本期原点完成/计划：{stats.get('current_window_origin_completed_count', 0)}/{stats.get('current_window_origin_planned_count', 0)}",
-        f"- 本期路线最终判断闭合/计划：{stats.get('current_window_deep_completed_count', 0)}/{stats.get('current_window_deep_planned_count', 0)}",
+        f"- 本次原点完成/计划：{stats.get('current_window_origin_completed_count', 0)}/{stats.get('current_window_origin_planned_count', 0)}",
+        f"- 本次路线最终判断闭合/计划：{stats.get('current_window_deep_completed_count', 0)}/{stats.get('current_window_deep_planned_count', 0)}",
         f"- 三类工作耗时（秒）：{(stats.get('research_service') or {}).get('seconds', {})}",
         "",
-        "## 信源返回量",
+        "## 信源返回量（取材快照；续跑不代表本次重新请求）",
         "",
     ]
     if source_counts:
@@ -312,7 +322,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     else:
         lines.append("- 本轮没有记录术语、人物、报告和精确补录车道状态。")
     academic_indexes = coverage.get("academic_indexes") or {}
-    lines.extend(["", "## 学术索引请求健康度", ""])
+    lines.extend(["", "## 学术索引请求健康度（取材快照）", ""])
     if academic_indexes:
         for name, value in academic_indexes.items():
             planned = value.get("planned_queries", value.get("queries", 0))

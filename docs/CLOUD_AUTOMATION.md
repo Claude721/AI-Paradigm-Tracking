@@ -62,6 +62,10 @@ v4 要求本期原点、全部合格深挖候选及选定刷新均有真实尝�
 
 报告的每条路线及全文每个 URL 必须可追溯；人物不得同名误配或猜邮箱，正文中文、无评分表。编辑质量失败明确失败。EMAIL_PUSH_REQUIRED=true 后 SMTP 失败也明确失败，不能提前登记 last_reported_signature。
 
+人物归因为软约束：已查未找到、未披露具名作者、接口异常或模型辅助归因不足分别记录，均不阻断已合格技术交付；报告不能因此虚构人物。技术/时效/原文/链接门和费用保护不放松。
+
+审计与 `pipeline_result.json` 的 `execution_summary` 明确执行方式（new_research/resumed_research/delivery_only/unknown）、本次新增、本期累计、本期待办和全库积压。`fresh_research_executed/completed` 仅指新发现批次；`research_executed` 另行表示进入研究路径。工作流排队条件仍使用 `recovered_delivery_only`，不因这些展示字段改变续投、调度或费用保护。短续跑不代表重新采集了全部信源。
+
 ## 信源诊断与独立测试
 
 source_check_only 采用 --v0-readiness：有至少 2 类可用一手输入样本时可通过输入能力检查，但每个 failed/not_executed/not_tested 仍保留，acceptance_complete 不会被改成 true。这不是正式研究或生产 V0 认证。

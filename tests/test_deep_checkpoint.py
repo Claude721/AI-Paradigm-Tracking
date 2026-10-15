@@ -89,7 +89,15 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
             candidates or [self.candidate], support or [], time.monotonic() + seconds,
         )
 
-    def stages(self, *, decision="report", trajectory=None):
+    def stages(self, *, decision="report", trajectory=None, pause_after_synthesis=False):
+        if pause_after_synthesis:
+            # Exercise resumability on a real completion-write boundary, not
+            # an optional person failure (which must no longer veto research).
+            original_save = self.store.save_completed_deep_checkpoint
+            def unavailable_once(*args, **kwargs):
+                self.store.save_completed_deep_checkpoint = original_save
+                raise ValueError("completion checkpoint temporarily unavailable")
+            self.store.save_completed_deep_checkpoint = unavailable_once
         async def enrich(values, _supporting):
             EvidenceEnricher._attach_support(values[0], _supporting)
             values[0].evidence.append(social())
@@ -106,8 +114,8 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
             run=trajectory or AsyncMock(side_effect=lambda values: values)
         )
 
-    async def test_trajectory_failure_resumes_without_enrichment_or_synthesis(self):
-        self.stages(trajectory=AsyncMock(side_effect=RuntimeError("profile service")))
+    async def test_completion_write_failure_resumes_without_enrichment_or_synthesis(self):
+        self.stages(pause_after_synthesis=True)
         completed, budget, failed = await self.run_deep()
         self.assertEqual((completed, budget), ([], []))
         self.assertEqual(len(failed), 1)
@@ -200,7 +208,7 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.orchestrator.trajectory.run.assert_awaited_once()
 
     async def test_complete_checkpoint_compare_and_swap_rejects_newer_route(self):
-        self.stages(trajectory=AsyncMock(side_effect=RuntimeError("profile service")))
+        self.stages(pause_after_synthesis=True)
         _, _, failed = await self.run_deep()
         self.store.save_candidates(failed)
         synthesized = self.store.load_synthesized_checkpoint(
@@ -243,26 +251,36 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         )
         candidate = copy.deepcopy(self.candidate)
         candidate.researchers = [profile]
-        with self.assertRaisesRegex(RuntimeError, "研究轨迹自动分析失败"):
-            await analyzer.run([candidate])
+        await analyzer.run([candidate])
+        self.assertEqual(profile.attribution_analysis_status, "failed")
         failed_call.assert_awaited_once()
         self.assertEqual(profile.research_trajectory, "")
 
-    async def test_timeout_after_synthesis_preserves_checkpoint(self):
+    async def test_optional_person_timeout_preserves_successful_technical_checkpoint(self):
         async def stalled(_values):
             await asyncio.Event().wait()
 
         self.stages(trajectory=AsyncMock(side_effect=stalled))
-        completed, budget, failed = await self.run_deep(seconds=0.05)
-        self.assertEqual((completed, failed), ([], []))
-        self.assertEqual(len(budget), 1)
-        self.assertEqual(budget[0].deep_checkpoint_stage, "synthesized")
-        self.store.save_candidates(budget)
+        with patch("agents.paradigm_orchestrator._remaining_seconds", return_value=0.55):
+            completed, budget, failed = await self.run_deep(seconds=2)
+        self.assertEqual((budget, failed), ([], []))
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].deep_checkpoint_stage, "research_complete")
         restored = ParadigmStore(self.path).load_pending_deep_candidates()[0]
         self.assertIsNotNone(self.store.load_synthesized_checkpoint(restored))
 
+    async def test_no_time_for_optional_person_model_does_not_start_a_paid_request(self):
+        self.stages()
+        self.candidate.researchers = [ResearcherProfile(name="Named Researcher")]
+        self.store.save_candidates([self.candidate])
+        with patch("agents.paradigm_orchestrator._remaining_seconds", side_effect=[2, 0.2]):
+            completed, budget, failed = await self.run_deep(seconds=2)
+        self.assertEqual((len(completed), budget, failed), (1, [], []))
+        self.orchestrator.trajectory.run.assert_not_awaited()
+        self.assertEqual(completed[0].researchers[0].attribution_analysis_status, "not_executed")
+
     async def test_new_relevant_support_restarts_synthesis_with_new_evidence(self):
-        self.stages(trajectory=AsyncMock(side_effect=RuntimeError("profile service")))
+        self.stages(pause_after_synthesis=True)
         _, _, failed = await self.run_deep()
         self.store.save_candidates(failed)
         restored = self.store.load_pending_deep_candidates()[0]
@@ -278,7 +296,7 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         ))
 
     async def test_unrelated_support_does_not_invalidate_route(self):
-        self.stages(trajectory=AsyncMock(side_effect=RuntimeError("profile service")))
+        self.stages(pause_after_synthesis=True)
         _, _, failed = await self.run_deep()
         self.store.save_candidates(failed)
         restored = self.store.load_pending_deep_candidates()[0]
@@ -298,7 +316,7 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.orchestrator.synthesizer.run.assert_not_awaited()
 
     async def test_budget_deferral_preserves_new_support_and_clears_stale_stage(self):
-        self.stages(trajectory=AsyncMock(side_effect=RuntimeError("profile service")))
+        self.stages(pause_after_synthesis=True)
         _, _, failed = await self.run_deep()
         self.store.save_candidates(failed)
         restored = self.store.load_pending_deep_candidates()[0]
@@ -348,7 +366,7 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         ))
 
     async def test_material_metric_change_restarts_synthesis(self):
-        self.stages(trajectory=AsyncMock(side_effect=RuntimeError("profile service")))
+        self.stages(pause_after_synthesis=True)
         _, _, failed = await self.run_deep(support=[supporting(score=1)])
         self.store.save_candidates(failed)
         restored = self.store.load_pending_deep_candidates()[0]
@@ -417,7 +435,7 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.store.load_synthesized_checkpoint(self.candidate))
 
     async def test_new_origin_clears_old_checkpoint(self):
-        self.stages(trajectory=AsyncMock(side_effect=RuntimeError("profile service")))
+        self.stages(pause_after_synthesis=True)
         _, _, failed = await self.run_deep()
         self.store.save_candidates(failed)
         old = self.store.load_pending_deep_candidates()[0]
@@ -433,7 +451,7 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.store.load_synthesized_checkpoint(old))
 
     async def test_policy_revision_invalidates_prior_synthesis(self):
-        self.stages(trajectory=AsyncMock(side_effect=RuntimeError("profile service")))
+        self.stages(pause_after_synthesis=True)
         _, _, failed = await self.run_deep()
         self.store.save_candidates(failed)
         restored = self.store.load_pending_deep_candidates()[0]
@@ -454,7 +472,7 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.store.load_synthesized_checkpoint(restored))
 
     async def test_week_old_checkpoint_refreshes_external_evidence(self):
-        self.stages(trajectory=AsyncMock(side_effect=RuntimeError("profile service")))
+        self.stages(pause_after_synthesis=True)
         _, _, failed = await self.run_deep()
         expired = failed[0]
         expired.deep_checkpoint_created_at = (
@@ -464,7 +482,7 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.store.load_synthesized_checkpoint(expired))
 
     async def test_downstream_incomplete_verdict_keeps_technical_synthesis(self):
-        self.stages(trajectory=AsyncMock(side_effect=RuntimeError("profile service")))
+        self.stages(pause_after_synthesis=True)
         _, _, failed = await self.run_deep()
         failed[0].rubric_assessment = {
             "decision": "incomplete", "failure_reason": "objective evidence missing"
@@ -492,7 +510,7 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
             "Newer name from another origin",
         )
 
-    async def test_batch_trajectory_failure_reuses_peer_synthesis_when_bisected(self):
+    async def test_batch_optional_trajectory_failure_preserves_both_technical_results(self):
         second = ParadigmCandidate(
             key="route-2", name="Route 2", thesis="test",
             problem_shift="test", mechanism="test", status="pending_deep",
@@ -521,8 +539,8 @@ class DeepCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.orchestrator.trajectory = SimpleNamespace(run=AsyncMock(side_effect=trajectory))
         with patch("config.PARADIGM_DEEP_BATCH_SIZE", 2):
             completed, budget, failed = await self.run_deep([self.candidate, second])
-        self.assertEqual((len(completed), len(budget), len(failed)), (1, 0, 1))
-        self.assertEqual(completed[0].key, "route-2")
+        self.assertEqual((len(completed), len(budget), len(failed)), (2, 0, 0))
+        self.assertEqual({item.key for item in completed}, {"route-1", "route-2"})
         self.assertEqual(self.orchestrator.enricher.run.await_count, 1)
         self.assertEqual(self.orchestrator.synthesizer.run.await_count, 1)
 

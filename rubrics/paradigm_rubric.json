@@ -1,5 +1,5 @@
 {
-  "version": "2026-08-15.1",
+  "version": "2026-10-15.1",
   "description": "技术范式雷达的可维护决策量表。模型只选择离散答案并提供证据，所有分数与去留均由程序按本文件确定性计算。",
   "decisions": {
     "deep_dive": {
@@ -735,7 +735,8 @@
       "id": "researcher_continuity",
       "dimension": "researcher",
       "stages": ["final"],
-      "weight": 1.0,
+      "weight": 0.0,
+      "advisory": true,
       "question": "关键研究者身份与长期研究轨迹的可核验程度。",
       "options": {
         "verified_continuous_trajectory": 1.0,

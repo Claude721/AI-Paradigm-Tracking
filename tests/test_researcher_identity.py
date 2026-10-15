@@ -145,7 +145,7 @@ class ResearcherIdentityTests(unittest.TestCase):
         route = ParadigmCandidate(
             key="route-a", name="Route A", route_family="Route A",
             thesis="", problem_shift="", mechanism="",
-            evidence=[origin("paper")], researchers=profiles,
+            evidence=[origin("paper", authors=["Alex Lee"])], researchers=profiles,
         )
         report = _attach_researcher_index("## 本期研究 Memo\n\n正文。", [route])
         self.assertEqual(report.count("**Alex Lee**"), 2)

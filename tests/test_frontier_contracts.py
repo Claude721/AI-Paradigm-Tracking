@@ -615,6 +615,7 @@ class FrontierContractTests(unittest.TestCase):
             mechanism="asynchronous tactile feedback",
             keywords=["tactile", "robot", "feedback"],
         )
+        item.evidence[0].authors = ["Fei-Fei Li", "Pieter Abbeel"]
         item.researchers = [
             ResearcherProfile(
                 name="Fei-Fei Li",

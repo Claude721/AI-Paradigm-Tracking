@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import config
-from .evidence_association import countable_evidence
+from .evidence_association import countable_evidence, supported_origins, has_independent_origins
 
 from .models import (
     ORIGIN_EVIDENCE_TYPES,
@@ -328,16 +328,7 @@ def finalize_candidate_rubric(candidate: ParadigmCandidate) -> dict[str, Any]:
 
 def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
     evidence = [item for item in candidate.evidence if countable_evidence(candidate, item)]
-    origins = [
-        item
-        for item in evidence
-        if item.evidence_type in ORIGIN_EVIDENCE_TYPES
-    ]
-    origin_organizations = {
-        item.organization.casefold().strip()
-        for item in origins
-        if item.organization.strip()
-    }
+    origins = supported_origins(candidate)
     verified_implementation = any(
         item.evidence_type == EvidenceType.IMPLEMENTATION
         and item.raw.get("independence")
@@ -386,7 +377,7 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
         validation = "independent_implementation"
     elif official_implementation_uptake:
         validation = "official_implementation_uptake"
-    elif len(origins) >= 2 and len(origin_organizations) >= 2:
+    elif has_independent_origins(origins):
         validation = "multiple_primary_works"
     elif verified_implementation:
         validation = "linked_implementation"
@@ -431,7 +422,7 @@ def objective_answers(candidate: ParadigmCandidate) -> list[dict[str, str]]:
     else:
         researcher = "unknown"
 
-    if len(origins) >= 2 and len(origin_organizations) >= 2:
+    if has_independent_origins(origins):
         convergence = "multiple_independent_origins"
     elif len(origins) >= 2:
         convergence = "multiple_related_origins"

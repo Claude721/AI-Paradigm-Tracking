@@ -222,6 +222,8 @@ class CommunityClosureTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await enricher.run([item], []), [item])
         self.assertEqual(incomplete_searches(item), [])
         self.assertNotIn("community_runtime", item.community_search_receipts)
+        enricher.researchers.enrich.assert_not_awaited()
+        await enricher.enrich_people([item])  # Optional stage, after technical synthesis.
         enricher.researchers.enrich.assert_awaited_once()
         item.status = "watchlist"  # A completed technical judgment, not enrichment alone.
         require_completed_research(COMPLETED_RESEARCH, candidates=[item])

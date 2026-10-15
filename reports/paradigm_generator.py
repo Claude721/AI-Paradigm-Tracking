@@ -29,6 +29,7 @@ from paradigms.models import (
     verified_organization_attribution,
 )
 from paradigms.researcher_identity import same_verified_researcher
+from paradigms.evidence_association import countable_evidence, profile_references_origin
 from paradigms.completion import require_completed_research, partial_report_violations
 from run_audit import run_audit
 from runtime_clock import scheduled_date
@@ -39,13 +40,18 @@ logger = logging.getLogger(__name__)
 MOMENTUM_BRIEF_LABEL = "讨论势能判断"
 
 
+def _report_researchers(candidate):
+    return [person for person in delivery_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT)
+            if profile_references_origin(candidate, person)]
+
+
 class ReportInputContractError(RuntimeError):
     """A frozen outbox snapshot cannot satisfy the current delivery contract."""
 
     def __init__(self, violations: list[str]):
         self.violations = list(violations)
         super().__init__(
-            "报告输入未满足人物/原文交付契约，候选应留在待补全状态："
+            "报告输入未满足原文交付契约，候选应留在待补全状态："
             + "；".join(self.violations)
         )
 
@@ -421,11 +427,11 @@ class ParadigmReportGenerator:
         )
         if stats.get("delivery_contract_version") == 4:
             proof = stats["delivery_scope"]
-            scope_note = (f"本轮选定 {proof['origin_planned']} 份材料进行初筛，"
+            scope_note = (f"本期累计选定 {proof['origin_planned']} 份材料进行初筛，"
                           f"对 {proof['deep_attempted']} 条合格候选均执行了深挖流程，"
                           f"其中 {proof['deep_completed']} 条完成判断、{proof['deep_failed']} 条执行失败。")
         conclusion = (
-            "本轮没有入选路线：已完成判断的对象未同时满足技术、承接、人物归因与本期时效等交付条件。执行失败的对象未形成判断，不计为技术淘汰。"
+            "本期没有入选路线：已完成判断的对象未同时满足技术、承接与本期时效等交付条件。人物归因仅作补充，不作为技术淘汰条件。执行失败的对象未形成判断，不计为技术淘汰。"
             if stats.get("delivery_contract_version") == 4 else
             "在这些已经完成判断的研究对象中，没有路线同时跨过**技术外延、发布者可信度和外部承接**三道门槛，因此本期没有可交付的新路线或进展更新。"
         )
@@ -503,11 +509,9 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         ][:20],
         "researchers": [
             _researcher_dossier(value)
-            for value in delivery_researcher_profiles(
-                item.researchers,
-                config.PARADIGM_KEY_RESEARCHER_LIMIT,
-            )
+            for value in _report_researchers(item)
         ],
+        "researcher_attribution": _attribution_boundary(item),
     }
 
 
@@ -596,11 +600,9 @@ def _compact_route_dossier(item: ParadigmCandidate) -> dict:
         },
         "researchers": [
             _researcher_dossier(value)
-            for value in delivery_researcher_profiles(
-                item.researchers,
-                config.PARADIGM_KEY_RESEARCHER_LIMIT,
-            )
+            for value in _report_researchers(item)
         ],
+        "researcher_attribution": _attribution_boundary(item),
     }
 
 
@@ -683,10 +685,7 @@ def _editorial_frame_payload(
             ],
             "key_people": [
                 profile.name
-                for profile in delivery_researcher_profiles(
-                    candidate.researchers,
-                    config.PARADIGM_KEY_RESEARCHER_LIMIT,
-                )
+                for profile in _report_researchers(candidate)
             ],
         }
         length = len(json.dumps(record, ensure_ascii=False))
@@ -809,10 +808,7 @@ def _route_draft_violations(
             )
     people = [
         profile.name
-        for profile in delivery_researcher_profiles(
-            candidate.researchers,
-            config.PARADIGM_KEY_RESEARCHER_LIMIT,
-        )
+        for profile in _report_researchers(candidate)
         if profile.name.strip()
     ]
     organization = verified_organization_attribution(candidate)
@@ -918,7 +914,7 @@ def _public_stats(stats: dict) -> dict:
 def _report_input_violations(
     candidates: list[ParadigmCandidate],
 ) -> list[str]:
-    violations = _researcher_profile_violations(candidates)
+    violations = []
     for candidate in candidates:
         if not _primary_sources(candidate):
             route = candidate.route_family or candidate.lineage_parent or candidate.name
@@ -984,7 +980,6 @@ def _editorial_violations(
     if _has_internal_evidence_labels(content):
         violations.append("暴露内部证据字段；必须用自然中文解释事实与未知边界")
     violations.extend(_momentum_brief_violations(content, candidates or []))
-    violations.extend(_researcher_profile_violations(candidates or []))
     if require_researcher_index and candidates:
         if "## 关键人物与公开联系入口" not in content:
             violations.append("缺少确定性的关键人物与公开联系入口")
@@ -1023,6 +1018,7 @@ def _primary_sources(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
         value
         for value in candidate.evidence
         if value.evidence_type in primary_types
+        and countable_evidence(candidate, value)
         and primary_material_url(value)
     ]
     current = [value for value in sources if not value.raw.get("historical")]
@@ -1252,59 +1248,26 @@ def _without_primary_source_index(content: str) -> str:
     )
 
 
-def _researcher_profile_violations(
-    candidates: list[ParadigmCandidate],
-) -> list[str]:
-    """Ensure each reported route has a verified person and a completed lookup."""
-
-    violations = []
-    grouped: OrderedDict[str, list[ResearcherProfile]] = OrderedDict()
-    organizations: dict[str, list[dict[str, str]]] = {}
-    for candidate in candidates:
-        route = candidate.route_family or candidate.lineage_parent or candidate.name
-        grouped.setdefault(route, []).extend(
-            delivery_researcher_profiles(
-                candidate.researchers,
-                config.PARADIGM_KEY_RESEARCHER_LIMIT,
-            )
-        )
-        organization = verified_organization_attribution(candidate)
-        if organization:
-            organizations.setdefault(route, []).append(organization)
-    for route, profiles in grouped.items():
-        named = [profile for profile in profiles if profile.name.strip()]
-        if not named:
-            if organizations.get(route):
-                continue
-            violations.append(f"路线「{route}」缺少可核验关键人物")
-            continue
-        missing_background = [
-            profile.name
-            for profile in named
-            if not (
-                profile.current_affiliation
-                or profile.background_summary
-                or profile.prior_affiliations
-                or profile.research_trajectory
-                or profile.key_person_reason
-            )
-        ]
-        if missing_background:
-            violations.append(
-                f"路线「{route}」关键人物缺少背景或机构信息："
-                + "、".join(missing_background)
-            )
-        missing_lookup = [
-            profile.name
-            for profile in named
-            if not profile.contact_lookup_completed
-        ]
-        if missing_lookup:
-            violations.append(
-                f"路线「{route}」未完成公开联系方式检索："
-                + "、".join(missing_lookup)
-            )
-    return violations
+def _attribution_boundary(candidate: ParadigmCandidate) -> str:
+    """Fixed wording from actual outcomes, not an inferred negative biography."""
+    from paradigms.models import key_researcher_profiles
+    people = key_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT)
+    ready = _report_researchers(candidate)
+    if people and len(ready) == len(people):
+        return "已核验关键人物的公开职业资料；不据此推断未公开贡献。"
+    if not people:
+        return "现有材料未能可靠归因到关键自然人，不猜测负责人；不影响技术判断。"
+    pending = [p for p in people if p not in ready]
+    outcomes = []
+    if any("failed" in {p.identity_search_status, p.contact_search_status, p.attribution_analysis_status} for p in pending):
+        outcomes.append("部分公开资料检索或模型辅助归因未成功，不能解释为没有相关人物")
+    if any(p.identity_search_status == "completed" for p in pending):
+        outcomes.append("已执行的身份检索未取得足够可交叉核验的职业资料")
+    if any(p.identity_search_status in {"", "not_configured", "not_executed"} for p in pending):
+        outcomes.append("部分补充身份检索未执行或未配置")
+    if any(p.attribution_analysis_status == "not_executed" for p in pending):
+        outcomes.append("本次剩余时间不足，人物模型补充未执行")
+    return "未能可靠归因全部关键人物；" + "；".join(outcomes) + "。保留未知，不影响技术判断。"
 
 
 def _attach_researcher_index(
@@ -1317,13 +1280,12 @@ def _attach_researcher_index(
     value = _without_researcher_index(content).strip()
     grouped: OrderedDict[str, list[ResearcherProfile]] = OrderedDict()
     organizations: dict[str, list[dict[str, str]]] = {}
+    boundaries: dict[str, list[str]] = {}
     for candidate in candidates:
         route = candidate.route_family or candidate.lineage_parent or candidate.name
+        boundaries.setdefault(route, []).append(_attribution_boundary(candidate))
         bucket = grouped.setdefault(route, [])
-        for profile in delivery_researcher_profiles(
-            candidate.researchers,
-            config.PARADIGM_KEY_RESEARCHER_LIMIT,
-        ):
+        for profile in _report_researchers(candidate):
             if profile.name and not any(
                 previous == profile
                 or same_verified_researcher(previous, profile)
@@ -1356,10 +1318,10 @@ def _attach_researcher_index(
                         f"- **{_markdown_label(organization['name'])}**（组织发布）："
                         "一手材料未披露可可靠归因的自然人贡献角色，因此不猜测"
                         "负责人；"
-                        f"[核验发布入口](<{organization['source_url']}>）。"
+                        f"[核验发布入口](<{organization['source_url']}>)。"
                     )
-            else:
-                lines.append("- 缺少可核验关键人物或发布组织。")
+            for boundary in dict.fromkeys(boundaries[route]):
+                lines.append("- " + boundary)
             lines.append("")
             continue
         for profile in profiles[: config.PARADIGM_KEY_RESEARCHER_LIMIT]:
@@ -1395,6 +1357,9 @@ def _attach_researcher_index(
                 f"{_markdown_label(background)}；公开联系：{contact_text}"
                 f"{lookup_text}。"
             )
+        for boundary in dict.fromkeys(boundaries[route]):
+            if boundary.startswith("未能"):
+                lines.append("- " + boundary)
         lines.append("")
 
     researcher_index = "\n".join(lines).rstrip()
@@ -1463,11 +1428,14 @@ def _attach_coverage_boundary(content: str, stats: dict) -> str:
                 " 条历史路线刷新。结论仅针对经核验的材料与路线，不代表全网穷尽；" +
                 str(len(proof["source_issue_names"])) + " 个发现通道存在访问或执行缺口，详见运行审计。")
         if stats.get("delivery_contract_version") == 4:
-            note = (f"本期取材范围：{len(proof['usable_primary_sources'])} 个可用一手发现通道。"
+            note = (f"本期取材范围：{len(proof['usable_primary_sources'])} 个可用一手发现通道。本期累计："
                     + "；".join(f"{label}已尝试 {proof[kind + '_attempted']}/{proof[kind + '_planned']}，"
                                  f"完成 {proof[kind + '_completed']}，失败 {proof[kind + '_failed']}"
                                  for kind, label in (("origin", "原点初筛"), ("deep", "候选深挖"), ("refresh", "历史刷新")))
                     + f"。仅交付已通过逐路线核验的结论；失败对象不作判断。{len(proof['source_issue_names'])} 个发现通道存在访问或执行缺口，不代表全网穷尽。")
+            if stats.get("discovery_resumed") is True:
+                note += (f"本次为同批次续跑，复用此前取材快照；本次新增完成原点初筛 {stats.get('analysis_completed_count', 0)} 条、"
+                         f"深挖判断 {stats.get('current_window_deep_completed_count', stats.get('deep_candidate_count', 0))} 条，以上处理总数为本期累计。")
         return content.rstrip() + "\n\n> " + note + "\n"
     return content
 
@@ -1546,10 +1514,7 @@ def _grounded_http_urls(candidates: list[ParadigmCandidate]) -> set[str]:
         )
         if source_url:
             urls.add(_normalized_url(source_url))
-        for profile in delivery_researcher_profiles(
-            candidate.researchers,
-            config.PARADIGM_KEY_RESEARCHER_LIMIT,
-        ):
+        for profile in _report_researchers(candidate):
             for label, target in profile.public_contacts.items():
                 safe = safe_public_contact_target(str(label), str(target))
                 if safe.startswith(("http://", "https://")):
@@ -1654,10 +1619,7 @@ def _covers_researchers(
         route = candidate.route_family or candidate.lineage_parent or candidate.name
         by_route.setdefault(route, set()).update(
             profile.name
-            for profile in delivery_researcher_profiles(
-                candidate.researchers,
-                config.PARADIGM_KEY_RESEARCHER_LIMIT,
-            )
+            for profile in _report_researchers(candidate)
             if profile.name
         )
         organization = verified_organization_attribution(candidate)
@@ -1669,11 +1631,10 @@ def _covers_researchers(
             by_route[route].add(organization["name"])
     if not candidates:
         return True
-    if not by_route or any(not names for names in by_route.values()):
-        return False
-    editorial_body = _editorial_body(content)
+    # No verified person is an explicit attribution boundary, not a missing
+    # technical route. The deterministic index also counts as actual coverage.
     return all(
-        any(name in editorial_body for name in names)
+        not names or any(name in content for name in names)
         for names in by_route.values()
     )
 

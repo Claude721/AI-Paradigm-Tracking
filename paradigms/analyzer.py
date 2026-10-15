@@ -13,11 +13,13 @@ from dataclasses import fields
 
 import config
 from agents.llm_utils import build_client, parse_json_object, resolve_model, request_policy, completed_content
+from agents.sample_budget import SampleBudgetError
 from run_audit import run_audit
 from research_archive import review_archive
 from skills.loader import SkillLoader
 
 from .models import (
+    ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
     ParadigmCandidate,
     ParadigmExtraction,
@@ -1130,8 +1132,12 @@ class ResearcherTrajectoryAnalyzer:
         self, candidate: ParadigmCandidate, profile: ResearcherProfile
     ) -> None:
         if not profile.representative_works and not profile.public_bio_excerpt:
-            profile.research_trajectory = "公开学术资料不足，暂不判断研究连续性。"
-            return
+            public_origins = [item for item in candidate.evidence
+                if item.evidence_type in ORIGIN_EVIDENCE_TYPES and (item.summary.strip() or item.authors)]
+            if not public_origins:
+                profile.attribution_analysis_status = "insufficient_material"
+                profile.research_trajectory = "公开资料不足，未能可靠归因研究连续性。"
+                return
         prompt = self.skill_loader.render(
             "researcher_trajectory",
             paradigm_name=candidate.name,
@@ -1144,6 +1150,10 @@ class ResearcherTrajectoryAnalyzer:
             search_notes=profile.contact_search_notes,
             public_bio=profile.public_bio_excerpt,
             prior_affiliations=profile.prior_affiliations,
+            current_work_context=[{"title": item.title, "url": item.url,
+                "authors": item.authors, "excerpt": str(item.raw.get("document_excerpt") or item.summary)[:6000],
+                "name_is_public_byline": any(name.casefold().strip() == profile.name.casefold().strip() for name in item.authors)}
+                for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES],
         )
         response = None
         response_recorded = False
@@ -1218,17 +1228,22 @@ class ResearcherTrajectoryAnalyzer:
             else:
                 run_audit.event("researcher_trajectory_cache", "reused", f"复用 {profile.name} 同身份、同材料与规则版本的人物研究")
                 review_archive.judgment("researcher_trajectory_cache", {"candidate": candidate}, payload, signature)
+            profile.attribution_analysis_status = "completed"
+        except (sqlite3.DatabaseError, SampleBudgetError):
+            raise  # Storage integrity and confirmed spend limits remain hard.
         except Exception as exc:
-            logger.warning("研究轨迹分析失败 [%s]: %s", profile.name, exc)
+            logger.warning("研究轨迹分析失败 [%s]: %s", profile.name, type(exc).__name__)
             if not response_recorded:
                 run_audit.record_llm(
                     stage="researcher_trajectory", role="main", model=self.model,
                     subject=f"{candidate.name} / {profile.name}", response=response, error=exc,
                 )
-            # A failed person lookup is an execution failure, not a completed
-            # profile. The orchestrator isolates this candidate and resumes
-            # from its synthesized checkpoint without redoing technical work.
-            raise RuntimeError("研究轨迹自动分析失败") from exc
+            profile.attribution_analysis_status = "failed"
+            note = "人物模型辅助归因未取得可靠结果：" + type(exc).__name__
+            if note not in profile.contact_search_notes:
+                profile.contact_search_notes.append(note)
+            # This optional model failure does not undo a successful technical
+            # judgment. Usage failures remain in the independent spend ledger.
 
 
 def _validated_trajectory_payload(payload: dict) -> dict:
@@ -1283,6 +1298,7 @@ class ParadigmSynthesizer:
         # assessments bypass this method and retain their exact judgment.
         candidate.evidence = candidate.input_evidence
         candidate.excluded_evidence = []
+        candidate.mechanism_origin_support = {}
         evidence_payload = _bounded_synthesis_evidence(candidate.evidence)
         prompt = self.skill_loader.render(
             "paradigm_synthesis",
@@ -1330,7 +1346,7 @@ class ParadigmSynthesizer:
                 client, model = self._get_client()
                 stage = "paradigm_synthesis"
                 request_prompt = prompt
-                if attempt and partial_payload:
+                if attempt and partial_payload and "原点机制关联" not in validation_error:
                     stage = "paradigm_synthesis_repair"
                     request_prompt = self.skill_loader.render(
                         "paradigm_synthesis_repair",
@@ -1353,10 +1369,11 @@ class ParadigmSynthesizer:
                     )
                 elif attempt:
                     request_prompt += (
-                        "\n上一轮不是合法 JSON。请重新输出完整 JSON，补齐所选"
+                        "\n上一轮输出未满足契约。请根据原材料重新输出完整 JSON，补齐所选"
                         " innovation_types 的全部 Rubric 题；心智模型必须先给主观察"
                         "坐标与低分辨率运行图，再用至少两个 resolution_ladder 节点"
-                        "逐层纠偏和提高分辨率。"
+                        "逐层纠偏和提高分辨率。原点机制关联必须显式给出 "
+                        "mechanism_support_evidence_indices：仅列已展开且确实支持当前机制的原点 index。"
                     )
                 response = await run_audit.chat_completion(client, stage=stage, role="main", subject=candidate.name,
                     archive_context={"candidate": candidate},
@@ -1425,6 +1442,22 @@ class ParadigmSynthesizer:
         visible_evidence_indices: set[int],
     ) -> None:
         previous_mechanism = candidate.mechanism.strip()
+        from .evidence_association import distinct_origins, mechanism_digest, support_revision
+        visible_origins = {i for i in visible_evidence_indices
+                           if 0 <= i < len(candidate.evidence)
+                           and candidate.evidence[i].evidence_type in ORIGIN_EVIDENCE_TYPES}
+        support = payload.get("mechanism_support_evidence_indices")
+        if support is None:
+            if len(distinct_origins(candidate.evidence[i] for i in visible_origins)) > 1:
+                raise ValueError("原点机制关联缺失：多原点必须显式确认 mechanism_support_evidence_indices")
+            support = sorted(visible_origins)
+        if (not isinstance(support, list) or any(type(i) is not int for i in support)
+                or len(set(support)) != len(support) or not set(support) <= visible_origins):
+            raise ValueError("原点机制关联无效：必须使用已展开的一手原点 index，不能引用折叠、外来或二次材料")
+        raw_excluded = payload.get("excluded_evidence_indices", [])
+        if (not isinstance(raw_excluded, list) or any(type(i) is not int for i in raw_excluded)
+                or not set(raw_excluded) <= visible_evidence_indices or set(raw_excluded) & set(support)):
+            raise ValueError("原点机制关联冲突：证据排除清单含未展开/不存在或同时被标为支持的 index")
         for field_name in (
             "name",
             "route_family",
@@ -1479,6 +1512,10 @@ class ParadigmSynthesizer:
         candidate.rubric_assessment = assessment
         if assessment["decision"] == "incomplete":
             raise ValueError(assessment["decision_reason"])
+        candidate.mechanism_origin_support = {
+            "route_key": candidate.key, "mechanism_digest": mechanism_digest(candidate),
+            "origins": {candidate.evidence[i].fingerprint: support_revision(candidate.evidence[i]) for i in support},
+        }
 
         # The synthesis model may certify only a fully expanded, independently
         # sourced discussion as directly substantive for this mechanism.  The
@@ -1511,11 +1548,7 @@ class ParadigmSynthesizer:
                 continue
             certify_synthesis_discussion(candidate, candidate.evidence[index])
 
-        excluded = {
-            int(value)
-            for value in payload.get("excluded_evidence_indices", [])
-            if str(value).isdigit()
-        }
+        excluded = set(raw_excluded) | (visible_origins - set(support))
         if excluded:
             if not excluded <= visible_evidence_indices:
                 raise ValueError("证据剔除引用了未展开或不存在的对象")

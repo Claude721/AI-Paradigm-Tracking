@@ -575,12 +575,18 @@ def _write_pipeline_result(result: dict) -> Path:
     )
     coverage_incomplete = bool(result.get("coverage_incomplete"))
     from paradigms.completion import research_completion_violations
+    from paradigms.run_summary import execution_summary
+    summary = execution_summary(result)
     payload = {
         "runtime": runtime_provenance(),
         "recovered_delivery_only": recovered_only,
-        "fresh_research_executed": research_executed,
+        "execution_summary": summary,
+        "research_executed": research_executed,
+        # Backwards-compatible names now mean a NEW discovery/research batch,
+        # not any invocation that happens to do one more research step.
+        "fresh_research_executed": summary["run_kind"] == "new_research",
         "fresh_research_completed": bool(
-            research_executed and not research_completion_violations(result)
+            summary["run_kind"] == "new_research" and not research_completion_violations(result)
             and not result.get("delivery_quarantined")
         ),
         "research_incomplete": research_incomplete,

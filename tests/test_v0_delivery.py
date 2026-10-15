@@ -93,6 +93,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         value.enricher.hydrate_priority_origins = AsyncMock(return_value={})
         value.enricher.refresh = AsyncMock(return_value=[])
         value.synthesizer.run = synthesize
+        value.enricher.enrich_people = AsyncMock(side_effect=lambda items: items)
         value.trajectory.run = AsyncMock(side_effect=lambda items: items)
         return value
 
@@ -386,7 +387,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(process.pending_delivery), 2)
         self.store.enqueue_report(process.pending_delivery, result, report_date=result["report_date"])
 
-    async def test_completed_identity_search_without_match_is_observation_not_execution_pending(self):
+    async def test_completed_identity_search_without_match_does_not_veto_technical_delivery(self):
         process = self.process(accepted=True)
         base = process.enricher.run
         async def no_match(items, supporting):
@@ -400,12 +401,14 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
             return result
         process.enricher.run = no_match
         result = await process.run(reference_time=NOW)
-        self.assertEqual(result["delivery_profile_observed_count"], 1)
+        self.assertEqual(result["delivery_profile_observed_count"], 0)
+        self.assertEqual(result["delivery_profile_unresolved_count"], 1)
         self.assertEqual(result["delivery_profile_deferred_count"], 0)
         self.assertEqual(result["delivery_scope"]["deep_completed"], 1)
-        require_completed_research(result, candidates=[])
+        self.assertEqual(len(process.pending_delivery), 1)
+        require_completed_research(result, candidates=process.pending_delivery)
 
-    async def test_no_named_authors_is_observation_after_full_research_not_permanent_pending(self):
+    async def test_no_named_authors_does_not_veto_technical_delivery(self):
         item = origin()
         item.authors = []
         process = self.process(batch([item]), accepted=True)
@@ -417,12 +420,14 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
             return values
         process.enricher.run = no_person
         result = await process.run(reference_time=NOW)
-        self.assertEqual(result["delivery_profile_observed_count"], 1)
+        self.assertEqual(result["delivery_profile_observed_count"], 0)
+        self.assertEqual(result["delivery_profile_unresolved_count"], 1)
         self.assertEqual(result["delivery_profile_deferred_count"], 0)
         self.assertEqual(result["delivery_scope"]["deep_completed"], 1)
-        require_completed_research(result, candidates=[])
+        self.assertEqual(len(process.pending_delivery), 1)
+        require_completed_research(result, candidates=process.pending_delivery)
 
-    async def test_missing_profile_for_named_author_remains_execution_pending(self):
+    async def test_missing_profile_for_named_author_is_reported_as_unknown(self):
         process = self.process(accepted=True)
         base = process.enricher.run
         async def lost_profile(items, supporting):
@@ -433,9 +438,10 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         process.enricher.run = lost_profile
         result = await process.run(reference_time=NOW)
         self.assertEqual(result["delivery_profile_observed_count"], 0)
-        self.assertEqual(result["delivery_profile_deferred_count"], 1)
-        with self.assertRaises(ResearchNotCompleteError):
-            require_completed_research(result, candidates=[])
+        self.assertEqual(result["delivery_profile_deferred_count"], 0)
+        self.assertEqual(result["delivery_profile_unresolved_count"], 1)
+        self.assertEqual(len(process.pending_delivery), 1)
+        require_completed_research(result, candidates=process.pending_delivery)
 
     async def test_final_gate_matches_partial_provider_policy_but_blocks_total_outage(self):
         process = self.process(accepted=True)

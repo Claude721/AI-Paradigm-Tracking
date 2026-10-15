@@ -108,7 +108,7 @@ class ExecutionDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.store.enqueue_report([], stats, report_date=stats["report_date"])
         path = await ParadigmReportGenerator(self.path, client=False).generate([], stats)
         content = path.read_text()
-        self.assertIn("本轮没有入选路线", content)
+        self.assertIn("本期没有入选路线", content)
         self.assertIn("执行失败", content)
         self.assertNotIn("阶段性", content)
         self.assertNotIn("本周没有重要技术", content)
@@ -215,6 +215,7 @@ class EvidenceJudgmentTests(unittest.TestCase):
             ParadigmSynthesizer._apply_synthesis_payload(reviewed, {
                 "mental_model": candidate().mental_model, "innovation_types": ["architecture"],
                 "rubric_answers": rubric_answers(["architecture"]), "excluded_evidence_indices": [1],
+                "mechanism_support_evidence_indices": [0],
             }, visible_evidence_indices={0, 1})
             self.assertEqual(len(reviewed.evidence), 1)
             self.assertEqual(reviewed.excluded_evidence[0].fingerprint, origins[1].fingerprint)

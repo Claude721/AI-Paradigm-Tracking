@@ -17,6 +17,7 @@ from sources.arxiv_document_source import ArxivDocumentClient
 from runtime_clock import observation_now
 
 from .models import (
+    ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
     ParadigmCandidate,
     TechnicalEvidence,
@@ -100,6 +101,7 @@ class EvidenceEnricher:
 
         async def refresh_one(candidate: ParadigmCandidate) -> ParadigmCandidate | None:
             async with semaphore:
+                candidate.excluded_evidence.extend(item for item in candidate.evidence if not countable_evidence(candidate, item))
                 candidate.evidence = [item for item in candidate.evidence if countable_evidence(candidate, item)]
                 previous = {
                     item.fingerprint: copy.deepcopy(item)
@@ -179,6 +181,7 @@ class EvidenceEnricher:
         return [item for item in refreshed if item is not None]
 
     async def _external_enrichment(self, candidate: ParadigmCandidate) -> None:
+        candidate.excluded_evidence.extend(item for item in candidate.evidence if not countable_evidence(candidate, item))
         candidate.evidence = [item for item in candidate.evidence if countable_evidence(candidate, item)]
         candidate.community_search_receipts.pop("community_runtime", None)
         candidate.community_coverage.pop("community_runtime", None)
@@ -247,12 +250,28 @@ class EvidenceEnricher:
         )
         if blocking_searches(candidate, allow_partial=getattr(self, "allow_partial_sources", False)):
             return  # Never pay for downstream judgments on incomplete inputs.
-        # Semantic Scholar 只有在显式启用且配置获批 Key 时才调用。无论其是否
-        # 启用，都用当前论文作者建立人物种子，并通过 OpenAlex/ORCID 补齐身份。
-        candidate.researchers = await self.researchers.enrich(
-            lead, candidate.researchers
-        )
         _attach_social_profiles(candidate)
+
+    async def enrich_people(self, candidates):
+        """Optional identity I/O runs AFTER the technical checkpoint is saved."""
+        async def enrich_one(candidate):
+            primary = next((item for item in candidate.evidence
+                            if item.evidence_type in ORIGIN_EVIDENCE_TYPES
+                            and countable_evidence(candidate, item)), None)
+            if primary is None:
+                return
+            try:
+                candidate.researchers = await self.researchers.enrich(primary, candidate.researchers)
+            except Exception as exc:
+                for profile in candidate.researchers:
+                    profile.identity_search_status = "failed"
+                    profile.contact_search_status = "failed"
+                    profile.contact_search_notes.append("人物检索未取得可靠结果：" + type(exc).__name__)
+                candidate.community_coverage["researcher_attribution"] = "人物补充检索未成功：" + type(exc).__name__
+                logger.warning("人物补充未完成 [%s]: %s", candidate.name, type(exc).__name__)
+            _attach_social_profiles(candidate)
+        await gather_scoped(*(enrich_one(candidate) for candidate in candidates))
+        return candidates
 
     @staticmethod
     def finalize(candidates: list[ParadigmCandidate]) -> list[ParadigmCandidate]:

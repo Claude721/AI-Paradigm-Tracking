@@ -193,7 +193,7 @@ class SampleDeliveryGateTests(unittest.TestCase):
         candidate = self.candidate()
         self.assertEqual(verified_organization_attribution(candidate), {})
         self.assertFalse(_delivery_profile_ready(candidate))
-        self.assertTrue(_report_input_violations([candidate]))
+        self.assertEqual(_report_input_violations([candidate]), [])
 
     def test_even_formal_report_cannot_drop_named_unready_person(self):
         from paradigms.models import verified_organization_attribution
