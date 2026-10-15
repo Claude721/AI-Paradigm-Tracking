@@ -69,6 +69,9 @@ jobs:
       LLM_ENABLE_THINKING: ${{ vars.LLM_ENABLE_THINKING || 'false' }}
       SMOKE_CHECK_TIMEOUT_SECONDS: ${{ vars.SMOKE_CHECK_TIMEOUT_SECONDS || '30' }}
       LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+      # JSON 只在 Runner 本地收集，以现有 SMTP 寄出 ZIP，不上传审阅数据制品。
+      RESEARCH_ARCHIVE_ENABLED: ${{ vars.RESEARCH_ARCHIVE_ENABLED || 'true' }}
+      RESEARCH_ARCHIVE_DIR: .private/research_archive
       SUB_AGENT_PROVIDER: ${{ vars.SUB_AGENT_PROVIDER }}
       SUB_AGENT_MODEL: ${{ vars.SUB_AGENT_MODEL }}
       SUB_AGENT_BASE_URL: ${{ vars.SUB_AGENT_BASE_URL }}
@@ -366,6 +369,12 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+      # 独立数据邮件，不是阶段性研究报告，不改正式报告/outbox；不上传 ZIP。
+      - name: 本轮审阅 JSON 打包并寄送附件
+        id: mail_reviews
+        if: ${{ always() && steps.pipeline.outcome != 'skipped' && steps.pipeline.outcome != '' && !inputs.source_check_only && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
+        run: python scripts/review_archive.py mail --output .private/mail/research-reviews-${{ github.run_id }}-${{ github.run_attempt }}.zip
+
       - name: 续投完成后排队本周新研究
         id: continuation
         if: ${{ success() && steps.pipeline.outputs.recovered_delivery_only == 'true' && steps.upload_state.outcome == 'success' }}
@@ -386,7 +395,7 @@ jobs:
 
       - name: 预算续跑控制（默认关闭）
         id: research_continuation
-        if: ${{ always() && steps.pipeline.outcome == 'failure' && steps.upload_state.outcome == 'success' }}
+        if: ${{ always() && steps.pipeline.outcome == 'failure' && steps.upload_state.outcome == 'success' && steps.mail_reviews.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -449,6 +458,7 @@ jobs:
           PREPARE_STATE_STEP_OUTCOME: ${{ steps.prepare_state.outcome || 'not-run' }}
           UPLOAD_STATE_STEP_OUTCOME: ${{ steps.upload_state.outcome || 'not-run' }}
           UPLOAD_REPORT_STEP_OUTCOME: ${{ steps.upload_report.outcome || 'not-run' }}
+          MAIL_REVIEWS_STEP_OUTCOME: ${{ steps.mail_reviews.outcome || 'not-run' }}
           UPLOAD_AUDIT_STEP_OUTCOME: ${{ steps.upload_audit.outcome || 'not-run' }}
           CONTINUATION_STEP_OUTCOME: ${{ steps.continuation.outcome || 'not-run' }}
           RESEARCH_CONTINUATION_STEP_OUTCOME: ${{ steps.research_continuation.outcome || 'not-run' }}

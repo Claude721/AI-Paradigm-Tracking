@@ -80,6 +80,9 @@ one-route-acceptance.yml 默认 3 天，两层合计最多 20 元、无邮件/�
 - paradigm-radar-audit-<run_id>：去敏审计、current_run.log、离线门、Doctor、状态恢复/准备诊断。
 - 本期报告制品：合规 Markdown，报告/邮件失败不丢研究检查点。
 - 独立接口/单路线制品使用各自 namespace，不污染生产状态。
+- 新增审阅数据不再上传 GitHub Artifact：默认 Runner 本地保存 JSON，`mail_reviews` 在研究后独立用现有 SMTP/SMTP_TO 寄送 `research-reviews-<run_id>-<attempt>.zip`。邮件只是数据副本，不是阶段性研究报告；ZIP 未加密，须私人保存。无需归档 Secret 或初始化输入；历史累计和人工反馈由用户电脑上离线 merge 保留，不回传云端。详见 [JSON 留存](RESEARCH_ARCHIVE.md)。
+
+研究/报告/SMTP 普通失败后仍尝试寄出已捕获样本，再检查留存错误。数据邮件失败不回滚研究或投递，不把已发正式报告标记成未发，也不为归档追加模型调用；如已启用预算自动续跑，还需 mail_reviews 成功。附件超出 EMAIL_MAX_ATTACHMENT_BYTES 或任一 SMTP_TO 拒收时明确失败，不截断或转为云端上传。Runner 销毁后未寄出数据无法找回，邮件/本地档案是该审阅数据的保存通道；请及时下载并备份。原有三类业务制品及自动续跑的默认关闭状态不变。
 
 contents: read；actions: write 只用于已有 outbox 恢复后的新研究或显式授权预算续跑，不推送仓库。checkout 不持久化凭据、不下载无关子模块。各步骤有稳定 id，故障通知区分依赖、配置、状态、研究、SMTP 和上传失败；平台硬取消/Runner 故障不保证后置步骤执行。
 

@@ -9,3 +9,5 @@ logs/
 reports/output/*.md
 /output/
 .DS_Store
+/.private/
+*.fernet

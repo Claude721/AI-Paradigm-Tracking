@@ -83,6 +83,9 @@ BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "database" / "deal_sourcing.db"
 PARADIGM_DB_PATH = BASE_DIR / "database" / "paradigm_radar.db"
 REPORTS_DIR = BASE_DIR / "reports" / "output"
+# Retention only. Neither human feedback nor these flags affect research gates.
+RESEARCH_ARCHIVE_ENABLED: bool = _env_bool("RESEARCH_ARCHIVE_ENABLED", True)
+RESEARCH_ARCHIVE_DIR: Path = Path(os.getenv("RESEARCH_ARCHIVE_DIR", str(BASE_DIR / ".private" / "research_archive")))
 _landscape_value = os.getenv("FRONTIER_LANDSCAPE_PATH", "").strip()
 _landscape_path = Path(_landscape_value).expanduser() if _landscape_value else None
 FRONTIER_LANDSCAPE_PATH = (

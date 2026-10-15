@@ -2,6 +2,15 @@
 
 生产密钥仅放本地 .env 或 GitHub Actions Secrets，不写进聊天、Variables、日志或 Git。模板为 [.env.example](../.env.example)。
 
+## 可选私有研究留存（不改变研究逻辑）
+
+| 配置 | 含义 |
+|---|---|
+| `RESEARCH_ARCHIVE_ENABLED`（可选 Variable） | 默认 true；本地收集 JSON，正式 Workflow 用已有 SMTP 寄数据 ZIP。显式 false 暂停，不删除旧数据 |
+| `RESEARCH_ARCHIVE_DIR`（本地） | 专用私人目录，默认 `.private/research_archive`；云端固定映射该路径，不读取同名 Variable |
+
+无需新增 Secret/SMTP 设置；旧 RESEARCH_ARCHIVE_KEY、archive_initialize、archive_feedback 已移除。数据 ZIP 发给现有 SMTP_TO 全部收件人，不上传新增的审阅数据 GitHub 制品。业务 reset_state 不涉及你电脑的本地 master，历史累计/人工标签通过离线 merge 保存，不需回传 GitHub。Smoke/信源检查不寄数据附件；人工偏好不参与生产筛选，不新增模型/付费 API。ZIP 未加密，沿用 EMAIL_MAX_ATTACHMENT_BYTES 大小上限。下载、合并、隐私及失败风险见 [RESEARCH_ARCHIVE.md](RESEARCH_ARCHIVE.md)。
+
 本清单描述默认 paradigm/V0 路径，不要求把全部默认参数复制到 GitHub Variables。模型六项字段及云端投递所需 Secrets 配好即可；其余只有需要覆盖默认行为时才显式设置。`config.py` 中 legacy 的 Product Hunt、WeChat、QuantFilter、自建 Feed 参数仍有代码消费者，但不属于 V0 配置，不能把“当前路径不用”误写为全项目死代码。
 
 ## 配置放在哪里、怎样才生效

@@ -1,4 +1,7 @@
-"""结构化运行审计：记录可复核决策和用量，不保存 prompt、响应正文或私有推理。"""
+"""内容脱敏审计；可选的私有 research_archive 独立保存可见研究输入/回答。
+
+本审计文件仍不保存 prompt、响应正文或模型私有推理。
+"""
 
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ from typing import Any
 
 import config
 from runtime_provenance import runtime_provenance
+from research_archive import review_archive
 
 
 class RunAudit:
@@ -20,6 +24,7 @@ class RunAudit:
         self.reset()
 
     def reset(self) -> None:
+        review_archive.reset()
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.llm_calls: list[dict[str, Any]] = []
         self.origin_decisions: list[dict[str, Any]] = []
@@ -29,7 +34,7 @@ class RunAudit:
         self._request_timings: dict[int, float] = {}
         self._error_timings: dict[int, float] = {}
 
-    async def chat_completion(self, client, *, stage: str, role: str, subject: str, **kwargs):
+    async def chat_completion(self, client, *, stage: str, role: str, subject: str, archive_context=None, **kwargs):
         """Preserve SDK semantics; cancellation is unknown usage, never measured zero.
 
         Successful/ordinary failed calls are still recorded by their validator,
@@ -37,17 +42,21 @@ class RunAudit:
         Only numeric timing is retained here, not requests or response bodies.
         """
         started = time.monotonic()
+        capture = review_archive.begin(stage, role, subject, kwargs, archive_context)
         try:
             response = await client.chat.completions.create(**kwargs)
         except asyncio.CancelledError:
+            review_archive.finish(capture, cancelled=True)
             self.record_llm(stage=stage, role=role, model=str(kwargs.get("model", "")),
                             subject=subject, error="request_cancelled_usage_unknown",
                             elapsed_seconds=time.monotonic() - started)
             raise
         except Exception as exc:
+            review_archive.finish(capture, error=exc)
             self._error_timings[id(exc)] = time.monotonic() - started
             raise
         self._request_timings[id(response)] = time.monotonic() - started
+        review_archive.finish(capture, response=response)
         return response
 
     def record_llm(
@@ -61,6 +70,7 @@ class RunAudit:
         error: Exception | str | None = None,
         elapsed_seconds: float | None = None,
     ) -> None:
+        review_archive.validate(stage, role, response, error)
         timing = self._request_timings.pop(id(response), None) if response is not None else None
         if timing is None and isinstance(error, Exception):
             timing = self._error_timings.pop(id(error), None)
@@ -132,6 +142,7 @@ class RunAudit:
             else os.getenv("AI_RADAR_AUDIT_DIR", "logs")
         )
         directory.mkdir(parents=True, exist_ok=True)
+        review_archive.checkpoint()
         totals = self.token_totals()
         self.last_stats = _safe_payload(stats or {})
         payload = {

@@ -14,6 +14,7 @@ from dataclasses import fields
 import config
 from agents.llm_utils import build_client, parse_json_object, resolve_model, request_policy, completed_content
 from run_audit import run_audit
+from research_archive import review_archive
 from skills.loader import SkillLoader
 
 from .models import (
@@ -188,9 +189,11 @@ class ParadigmAnalyzer:
             result = cache.cache_get("origin_eligibility", signature)
             if result is not None and result.get("decision") in {"full_review", "screen_out"} and isinstance(result.get("reason"), str) and (result["decision"] != "screen_out" or result["reason"]):
                 decisions[item.fingerprint] = (result["decision"], result["reason"])
+                review_archive.judgment("origin_eligibility_cache", {"origins": [item]}, result, signature)
             else:
                 missing.append(item)
-        fresh = await self._screen_uncached_origin_batch(missing)
+        with review_archive.bind_cache(signatures):
+            fresh = await self._screen_uncached_origin_batch(missing)
         for fingerprint, (decision, reason) in fresh.items():
             cache.cache_save("origin_eligibility", signatures[fingerprint], {"decision": decision, "reason": reason})
         if decisions:
@@ -251,6 +254,7 @@ class ParadigmAnalyzer:
                     else "\n上一轮身份或 JSON 契约无效。逐条原样返回全部 fingerprint。"
                 )
                 response = await run_audit.chat_completion(client, stage="origin_eligibility", role="sub", subject=f"{len(evidence)} origins",
+                    archive_context={"origins": evidence},
                     model=model,
                     messages=[{"role": "user", "content": prompt + repair_note}],
                     temperature=0.0,
@@ -304,6 +308,7 @@ class ParadigmAnalyzer:
                     subject=f"{len(evidence)} origins",
                     response=response,
                 )
+                review_archive.eligibility(evidence, decisions)
                 return decisions
             except Exception as exc:
                 last_error = exc
@@ -399,6 +404,7 @@ class ParadigmAnalyzer:
                 if attempt:
                     repair_note += f"\n确定性校验失败：{last_error}"
                 response = await run_audit.chat_completion(client, stage="paradigm_extraction", role="sub", subject=evidence.title,
+                    archive_context={"origins": [evidence]},
                     model=model,
                     messages=[{"role": "user", "content": prompt + repair_note}],
                     temperature=0.1,
@@ -439,6 +445,8 @@ class ParadigmAnalyzer:
                     subject=evidence.title,
                     response=response,
                 )
+                for extraction in parsed:
+                    review_archive.extraction(extraction)
                 return parsed
             except Exception as exc:
                 last_error = exc
@@ -701,6 +709,7 @@ class ParadigmAnalyzer:
                     else "\n上一轮结构无效。请缩短每个字段，只返回一个合法 JSON 对象。"
                 )
                 response = await run_audit.chat_completion(client, stage="technical_report_index", role="sub", subject=evidence.title,
+                    archive_context={"origins": [evidence]},
                     model=model,
                     messages=[{"role": "user", "content": prompt + repair_note}],
                     temperature=0.1,
@@ -804,6 +813,7 @@ class ParadigmAnalyzer:
                 if attempt:
                     repair_note += f"\n确定性校验失败：{last_error}"
                 response = await run_audit.chat_completion(client, stage="technical_report_mechanism", role="sub", subject=f"{evidence.title} / mechanism-{index}",
+                    archive_context={"origins": [evidence], "mechanism_id": str(seed.get("mechanism_id") or index)},
                     model=model,
                     messages=[{"role": "user", "content": prompt + repair_note}],
                     temperature=0.1,
@@ -851,6 +861,7 @@ class ParadigmAnalyzer:
                     subject=f"{evidence.title} / mechanism-{index}",
                     response=response,
                 )
+                review_archive.extraction(parsed)
                 return parsed, ""
             except Exception as exc:
                 last_error = exc
@@ -1107,6 +1118,7 @@ class ResearcherTrajectoryAnalyzer:
                 for attempt in range(2):
                     response, response_recorded = None, False
                     response = await run_audit.chat_completion(client, stage="researcher_trajectory", role="main", subject=f"{candidate.name} / {profile.name}",
+                        archive_context={"candidate": candidate, "cache_signatures": [signature]},
                         model=model, messages=messages, temperature=0.1,
                         max_tokens=1100, response_format={"type": "json_object"},
                     )
@@ -1157,6 +1169,7 @@ class ResearcherTrajectoryAnalyzer:
                 response_recorded = True
             else:
                 run_audit.event("researcher_trajectory_cache", "reused", f"复用 {profile.name} 同身份、同材料与规则版本的人物研究")
+                review_archive.judgment("researcher_trajectory_cache", {"candidate": candidate}, payload, signature)
         except Exception as exc:
             logger.warning("研究轨迹分析失败 [%s]: %s", profile.name, exc)
             if not response_recorded:
@@ -1293,6 +1306,7 @@ class ParadigmSynthesizer:
                         "逐层纠偏和提高分辨率。"
                     )
                 response = await run_audit.chat_completion(client, stage=stage, role="main", subject=candidate.name,
+                    archive_context={"candidate": candidate},
                     model=model,
                     messages=[{"role": "user", "content": request_prompt}],
                     temperature=0.1,

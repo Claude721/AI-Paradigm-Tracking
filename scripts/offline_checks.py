@@ -49,6 +49,7 @@ def _safe_environment() -> dict[str, str]:
         "SMTP_",
         "EMAIL_",
         "RESEARCH_",
+        "ARCHIVE_",
         "PRIORITY_",
         "ESTABLISHED_",
         "MONITORED_",
@@ -67,6 +68,7 @@ def _safe_environment() -> dict[str, str]:
     env.update(
         {
             "AI_RADAR_SKIP_DOTENV": "true",
+            "RESEARCH_ARCHIVE_ENABLED": "false",
             "PIPELINE_MODE": "paradigm",
             "PYTHONHASHSEED": "0",
             "TZ": "UTC",
@@ -207,6 +209,7 @@ def main() -> int:
                 "main.py",
                 "config.py",
                 "run_audit.py",
+                "research_archive.py",
                 "healthcheck.py",
                 "smokecheck.py",
                 "tavily_protocol.py",

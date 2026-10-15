@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 import copy
 import logging
 import sqlite3
@@ -45,6 +46,7 @@ from paradigms.scoring import is_reportable, score_candidate
 from paradigms.scheduler import ResearchLaneScheduler
 from paradigms.async_utils import gather_scoped
 from run_audit import run_audit
+from research_archive import review_archive
 from runtime_clock import research_now, research_window, scheduled_date, observation_now
 
 logger = logging.getLogger(__name__)
@@ -464,6 +466,11 @@ class ParadigmOrchestrator:
                     ),
                 )
             for extraction in extractions:
+                # Also retain deterministic rejects and restored extractions.
+                review_archive.judgment("origin_screening", {"origins": [extraction.evidence]},
+                    lambda: {"system_retention": True if extraction.rubric_assessment.get("decision") == "deep_dive"
+                        else False if extraction.rubric_assessment.get("decision") in {"observe", "reject"} else None,
+                        "normalized_extraction": asdict(extraction)})
                 gate_reason = initial_gate_reason(extraction)
                 run_audit.record_origin(
                     {
@@ -1036,6 +1043,13 @@ class ParadigmOrchestrator:
             ]
         )
         queue_after = self.store.work_queue_snapshot(reference_time=research_now())
+        selected_keys = {candidate.key for candidate in reportable}
+        for candidate in [*candidates, *deferred_candidates, *refresh_execution_deferred, *refresh_unchanged]:
+            review_archive.judgment("candidate_final", {"candidate": candidate}, lambda: {
+                "system_retention": True if candidate.status == "reportable" else False if candidate.status in {"observe", "rejected"} else None,
+                "selected_for_report": candidate.key in selected_keys,
+                "candidate_snapshot": candidate.to_dict(),
+            })
         stats["work_queue_after"] = queue_after
         stats["pending_queue_net_change"] = (
             queue_after["pending_total_count"] - queue_before["pending_total_count"]
@@ -2601,6 +2615,10 @@ def _resumable_deep_snapshot(store, candidate, supporting):
         EvidenceEnricher.supporting_signature(snapshot, supporting)
     ):
         return None
+    review_archive.judgment("deep_checkpoint_cache", {"candidate": snapshot}, {
+        "synthesis_rubric": snapshot.deep_checkpoint_synthesis_rubric,
+        "checkpoint_stage": snapshot.deep_checkpoint_stage,
+    }, snapshot.deep_checkpoint_input_signature)
     return snapshot
 
 

@@ -28,6 +28,7 @@ _WORKFLOW_STEPS = (
     ("PREPARE_STATE_STEP_OUTCOME", "prepare_state", "准备状态制品"),
     ("UPLOAD_STATE_STEP_OUTCOME", "upload_state", "上传跨周状态"),
     ("UPLOAD_REPORT_STEP_OUTCOME", "upload_report", "上传报告制品"),
+    ("MAIL_REVIEWS_STEP_OUTCOME", "mail_reviews", "发送本轮研究数据附件"),
     ("CONTINUATION_STEP_OUTCOME", "continuation", "排队本周新研究"),
     ("RESEARCH_CONTINUATION_STEP_OUTCOME", "research_continuation", "排队原批次预算续跑"),
     ("UPLOAD_AUDIT_STEP_OUTCOME", "upload_audit", "上传审计制品"),
@@ -91,6 +92,47 @@ async def send_failure_email(context: dict | None = None) -> bool:
     await asyncio.to_thread(_send_failure_sync, payload)
     logger.info("任务失败提醒已发送至 %s 个收件人", len(config.SMTP_TO))
     return True
+
+
+async def send_review_archive_email(path: Path, summary: dict) -> None:
+    """Independent data delivery; never edits the report outbox or research state."""
+    if not config.EMAIL_PUSH_ENABLED:
+        raise RuntimeError("Data email is disabled; review JSON remains local, not confirmed delivered")
+    missing = _missing_smtp_config()
+    if missing:
+        raise RuntimeError("Data email configuration is incomplete: " + ", ".join(missing))
+    try:
+        await asyncio.to_thread(_send_review_archive_sync, path, summary)
+    except ValueError:
+        raise RuntimeError("Review ZIP validation or attachment-size limit failed; no data was truncated or delivered") from None
+    except Exception:
+        raise RuntimeError("Review data email failed; JSON/ZIP remains local but was not confirmed delivered") from None
+    logger.info("研究数据 ZIP 已发送至现有 %s 个收件人；未修改正式报告投递状态", len(config.SMTP_TO))
+
+
+def _send_review_archive_sync(path: Path, summary: dict) -> None:
+    from research_archive import ArchiveError, read_bundle
+    data = path.read_bytes()
+    if len(data) > config.EMAIL_MAX_ATTACHMENT_BYTES:
+        raise ArchiveError("Review ZIP exceeds EMAIL_MAX_ATTACHMENT_BYTES; no reviewed material was truncated")
+    read_bundle(data)
+    message = EmailMessage()
+    run_id = os.getenv("GITHUB_RUN_ID", "local")
+    attempt = os.getenv("GITHUB_RUN_ATTEMPT", "1")
+    message["Subject"] = f"[研究数据留存] AI 技术范式雷达｜{scheduled_date()}｜{run_id}-{attempt}"
+    message["From"] = config.SMTP_FROM or config.SMTP_USERNAME
+    message["To"] = ", ".join(config.SMTP_TO)
+    message.set_content(
+        "附件是本轮模型审阅原始数据，仅用于本地保存与人工标注。\n"
+        "正式研究结论请查看报告邮件；本轮执行是否完成以 Workflow 状态为准。\n\n"
+        f"归档原点：{summary.get('origins', 0)}；请求：{summary.get('calls', 0)}；判断：{summary.get('judgments', 0)}\n"
+        f"留存捕获错误：{summary.get('capture_errors', 0)}；捕获状态已确认：{bool(summary.get('capture_status_known'))}\n\n"
+        "ZIP 含 JSON 正文、prompt 与可见模型判断，未加密，请私下保存，不要公开转发。\n"
+        "请下载到电脑，使用 scripts/review_archive.py merge 合并到本地档案；已有人工反馈不会被新附件覆盖。\n"
+        "不保存密钥、不接入训练。此附件未上传为 GitHub 研究留存制品。"
+    )
+    message.add_attachment(data, maintype="application", subtype="zip", filename=path.name)
+    _deliver_message(message, require_all_recipients=True)
 
 
 def _send_sync(
@@ -221,7 +263,7 @@ def _send_failure_sync(context: dict) -> None:
         )
     elif failure_class == "post_delivery":
         opening = (
-            "研究与邮件主流程已经成功，但后置状态或 artifact 保存失败；"
+            "研究与邮件主流程已经成功，但后置状态、artifact 或数据附件发送失败；"
             "正式报告可能已经收到，请勿直接 reset_state。"
         )
     else:
@@ -253,7 +295,13 @@ def _send_failure_sync(context: dict) -> None:
                 f"已保存路线草稿：{context.get('fragment_count', 0)} 条",
             ]
         )
-    if context.get("outbox_status"):
+    if context.get("failure_stage") == "发送本轮研究数据附件":
+        action = (
+            "数据附件未确认完整寄出，不影响已完成的正式报告交付。"
+            "Runner 销毁后，未寄出的审阅原始内容无法从普通审计还原；"
+            "不要为补附件盲目重跑付费研究。请检查附件大小上限、SMTP 与收件人配置。"
+        )
+    elif context.get("outbox_status"):
         action = (
             "研究检查点和待交付报告仍保留在 outbox。保持 reset_state=false "
             "重新运行，系统会复用候选快照和已保存路线草稿。"
@@ -478,20 +526,24 @@ def _missing_smtp_config() -> list[str]:
     return missing
 
 
-def _deliver_message(message: EmailMessage) -> None:
+def _deliver_message(message: EmailMessage, *, require_all_recipients: bool = False) -> None:
     if config.SMTP_USE_SSL:
         with smtplib.SMTP_SSL(
             config.SMTP_HOST, config.SMTP_PORT, timeout=30
         ) as server:
             server.login(config.SMTP_USERNAME, config.SMTP_PASSWORD)
-            server.send_message(message)
+            refused = server.send_message(message)
+            if require_all_recipients and (not isinstance(refused, dict) or refused):
+                raise RuntimeError("Not all configured data-email recipients were confirmed")
         return
 
     with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as server:
         if config.SMTP_USE_STARTTLS:
             server.starttls()
         server.login(config.SMTP_USERNAME, config.SMTP_PASSWORD)
-        server.send_message(message)
+        refused = server.send_message(message)
+        if require_all_recipients and (not isinstance(refused, dict) or refused):
+            raise RuntimeError("Not all configured data-email recipients were confirmed")
 
 
 def _audit_attachments(stats: dict) -> list[Path]:

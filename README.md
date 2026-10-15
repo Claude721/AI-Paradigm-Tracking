@@ -152,6 +152,10 @@ Tavily 使用工作名的宽召回再核验关联；逐候选回执区分 API �
 | `logs/` | 去敏运行审计、用量、离线/来源诊断 |
 | `paradigm-radar-v0-state-<run_id>` | 云端跨周数据库及状态元数据快照 |
 | `paradigm-radar-audit-<run_id>` | 云端审计、配置诊断和执行代码身份 |
+| `.private/research_archive/` | 本地审阅 JSON：含淘汰/留存样本、实际提示词/可见回答及独立人工反馈；不含密钥 |
+| 邮件 `research-reviews-<run_id>-<attempt>.zip` | 正式 Workflow 单独发出的本轮审阅数据附件，不上传新增的审阅数据 GitHub 制品 |
+
+JSON 留存默认开启，不改变研究逻辑、不新增模型调用、不接入训练，**不需要归档 Secret**。Runner 本地收集后用现有 SMTP/收件人独立寄出普通 ZIP；它不是阶段性研究报告，失败时也尝试寄出已捕获样本。请下载到电脑，用本地 `merge` 累计保存，已有 `feedback.json` 人工标签不被新附件覆盖，原始模型判断不改写。Runner 不会读取你电脑的人工标签；原有业务状态/报告/去敏审计制品保持不变。ZIP 未加密，请私下保存。操作见[本地留存与人工反馈](docs/RESEARCH_ARCHIVE.md)。
 
 云端首次 V0 没有新 namespace 快照时从空库启动，不导入旧失败队列，旧制品不删除。后续恢复健康 V0 快照；已有快照都不可用时明确失败，不静默清库。不要提交 `.env`、数据库、日志或生成报告。
 
