@@ -11,7 +11,7 @@ import json
 
 from .models import ORIGIN_EVIDENCE_TYPES, _evidence_datetime, nonnegative_number, technical_evidence_from_dict
 
-VERSION = 4
+VERSION = 5
 PRIMARY_ADAPTERS = frozenset({
     "arxiv", "huggingface-papers", "openalex", "openreview", "research-blog",
     "priority-research-page", "curated-kol-feeds", "high-signal-forums",
@@ -108,12 +108,12 @@ def delivery_proof(stats, candidates, ledger, *, minimum_sources):
         "scoped_pending_count": ledger["pending_total_count"],
         **({"deep_scope_keys": ledger["deep_scope_keys"],
             "deep_scope_sealed": ledger["deep_scope_sealed"]}
-           if stats.get("delivery_contract_version") in {3, 4} else {}),
+           if stats.get("delivery_contract_version") in {3, 4, 5} else {}),
         **({"execution_receipts": ledger["execution_receipts"],
             **{f"{kind}_{field}": ledger[f"{kind}_{field}"]
                for kind in ("origin", "deep", "refresh")
                for field in ("attempted", "failed", "unattempted")}}
-           if stats.get("delivery_contract_version") == 4 else {}),
+           if stats.get("delivery_contract_version") in {4, 5} else {}),
         "routes": sorted([
             {"key": item.key, "signature": item.report_signature}
             for item in candidates
@@ -134,7 +134,7 @@ def violations(stats):
     if minimum < 1:
         issues.append("有效一手信源最小数无效")
     actual = acquisition_summary(stats.get("frontier_coverage", {}))["usable_primary_sources"]
-    if proof.get("usable_primary_sources") != actual or len(actual) < minimum:
+    if proof.get("usable_primary_sources") != actual or (stats.get("delivery_contract_version") != 5 and len(actual) < minimum):
         issues.append("有效一手取材入口不足，不能把抓取失败写成无信号")
     routes = proof.get("routes")
     if not isinstance(routes, list) or any(not isinstance(row, dict) or
@@ -154,7 +154,7 @@ def violations(stats):
         issues.append("完成深挖数超过研究计划")
     if proof["refresh_completed"] > proof["refresh_planned"]:
         issues.append("完成刷新数超过研究计划")
-    if stats.get("delivery_contract_version") == 4:
+    if stats.get("delivery_contract_version") in {4, 5}:
         return [*issues, *_execution_violations(stats, proof, ledger, routes)]
     # A route entering the cohort is a research obligation, never a top-N
     # editorial sample. Nonempty output cannot hide unfinished peer judgments.
@@ -194,9 +194,15 @@ def execution_result_kind(ledger, candidates):
     return "complete_memo" if candidates else "complete_no_selection"
 
 
+def weekly_result_kind(candidates):
+    """Publication outcome, never a claim that the research plan is complete."""
+    return "weekly_memo" if candidates else "weekly_receipt"
+
+
 def _execution_violations(stats, proof, ledger, routes):
     """All tasks must be visited; only selected routes must succeed."""
     issues = []
+    weekly = stats.get("delivery_contract_version") == 5
     receipts = proof.get("execution_receipts")
     if not isinstance(receipts, list) or receipts != ledger.get("execution_receipts"):
         return ["执行回执与持久化任务账本不一致"]
@@ -223,17 +229,23 @@ def _execution_violations(stats, proof, ledger, routes):
                or proof[f"{kind}_{field}"] != value or ledger.get(f"{kind}_{field}") != value
                for field, value in derived.items()):
             issues.append(f"{kind} 执行计数与逐对象回执不一致")
-        if expected["unattempted"]:
+        if expected["unattempted"] and not weekly:
             issues.append(f"{kind} 仍有未尝试或预算/依赖中断的任务")
     keys = sorted(row["key"] for row in receipts if row["kind"] == "deep")
     if (proof.get("deep_scope_keys") != keys or ledger.get("deep_scope_keys") != keys
-            or proof.get("deep_scope_sealed") is not True or ledger.get("deep_scope_sealed") is not True):
+            or type(proof.get("deep_scope_sealed")) is not bool
+            or proof.get("deep_scope_sealed") != ledger.get("deep_scope_sealed")
+            or not weekly and proof.get("deep_scope_sealed") is not True):
         issues.append("全部深挖候选身份清单未封存")
     if proof["origin_selected"] != proof["origin_planned"]:
         issues.append("选定原点与执行计划不一致")
     closed = {row["key"] for row in receipts if row["kind"] in {"deep", "refresh"} and row["outcome"] == "completed"}
     if any(row["key"] not in closed for row in routes):
         issues.append("入选路线没有自身成功的研究回执")
+    if weekly:
+        if stats.get("result_kind") != weekly_result_kind(routes):
+            issues.append("周报类型与本次入选路线不一致")
+        return issues
     judgments = proof["deep_completed"] + proof["refresh_completed"]
     if not routes and ((proof["deep_planned"] + proof["refresh_planned"] > 0 and not judgments)
                        or proof["origin_planned"] > 0 and not proof["origin_completed"] and not judgments):

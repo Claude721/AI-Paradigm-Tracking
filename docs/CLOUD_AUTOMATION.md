@@ -56,11 +56,13 @@ Settings → Secrets and variables → Actions：
 
 社区渠道执行统一判定，不允许调度层放行后综合层再以任一失败渠道拒绝。Tavily 次数保护不足会给出容量提醒而不截断深挖；2026-10-15 线上 `TAVILY_REQUEST_SAFETY_LIMIT` 已从 12 改为 0，其余月度费用保护、平台开关及自动续跑默认不变。
 
-v4 要求本期原点、全部合格深挖候选及选定刷新均有真实尝试，不要求全部成功。单条结构/接口/检查点失败保存原快照与失败回执，其他合格路线正常交付；不得标成技术淘汰。未尝试、纯预算/依赖中断仍阻断流程完成；全部核心判断失败不能变成成功空报告。无入选时给出有边界的本轮结果与数量，不发送阶段性 memo 或待续研清单。
+默认 v5 以每周交付为主目标：单条失败、未尝试、预算停止、来源覆盖不足均独立留档，不否决其他合格结果。没有可发表路线（包括模型/信源整体故障）也发送本周运行回执，不能写成技术否定或“没有重要技术”。不再发送阶段性 memo，也不声称研究计划已经完成。
 
-研究诊断可以仍有单条失败、历史积压及 coverage_incomplete。delivery_scope 从 SQLite 核对 planned/attempted/completed/failed/unattempted 及逐对象版本回执；入选路线必须有自己的成功研究记录。fresh_research_completed 依据执行交付契约，不要求 pending 清零。未建 outbox 的 v3 活动计划原地升级，窗口/名单/用量不变；已有 v2/v3 outbox 和已交付记录不重写。无需调整 Variables、Key 或 reset_state。
+delivery_scope 仍从 SQLite 核对数量、逐对象版本与入选路线自己的成功记录。发表前逐条起草、过滤失败正文，冻结实际发表子集；之后确定性组装报告，不再依赖总编调用。delivery_ready 是交付资格，research_health 是研究健康度，fresh_research_completed 不因交付成功而变真。未建 outbox 的 v3/v4 活动计划升级为 v5，历史冻结 outbox 不重写。无需更改 Variables、Key 或 reset_state。
 
-报告的每条路线及全文每个 URL 必须可追溯；人物不得同名误配或猜邮箱，正文中文、无评分表。编辑质量失败明确失败。EMAIL_PUSH_REQUIRED=true 后 SMTP 失败也明确失败，不能提前登记 last_reported_signature。
+每条路线及每个 URL 必须可追溯，人物不猜测、中文正文无评分表。单条编辑/原文问题只阻止该条发表，全部无正文则发回执。EMAIL_PUSH_REQUIRED=true 后 SMTP 失败仍使交付失败，保留 outbox；只有投递确认才更新实际发表对象的 last_reported_signature。交付成功不等于本期研究无故障或覆盖完整。
+
+独立审阅 JSON 邮件失败不再把已交付周报翻成整轮失败；该辅助步骤显式 warning，并在 Job Summary 标明“本轮数据留存未完成”，不能宣称留存成功，也不擅自上传私有材料。正式报告 SMTP、状态持久化和运行环境故障仍是需要处理的交付/基础设施错误。
 
 人物归因为软约束：已查未找到、未披露具名作者、接口异常或模型辅助归因不足分别记录，均不阻断已合格技术交付；报告不能因此虚构人物。技术/时效/原文/链接门和费用保护不放松。
 

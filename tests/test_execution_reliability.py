@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1232,6 +1233,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
         store = SimpleNamespace(
             load_pending_report_job=Mock(return_value=pending),
             enqueue_report=Mock(return_value=fresh_job),
+            transaction=nullcontext,
         )
         orchestrator = SimpleNamespace(
             store=store,
@@ -1279,6 +1281,7 @@ class ExecutionReliabilityTests(unittest.TestCase):
         store = SimpleNamespace(
             load_pending_report_job=Mock(return_value=None),
             enqueue_report=Mock(return_value=fresh_job),
+            transaction=nullcontext,
         )
         orchestrator = SimpleNamespace(
             store=store,

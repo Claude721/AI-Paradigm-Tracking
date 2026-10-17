@@ -373,7 +373,14 @@ jobs:
       - name: 本轮审阅 JSON 打包并寄送附件
         id: mail_reviews
         if: ${{ always() && steps.pipeline.outcome != 'skipped' && steps.pipeline.outcome != '' && !inputs.source_check_only && (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) }}
+        continue-on-error: true
         run: python scripts/review_archive.py mail --output .private/mail/research-reviews-${{ github.run_id }}-${{ github.run_attempt }}.zip
+
+      - name: 单独标明留存附件失败（不否决研究周报）
+        if: ${{ always() && steps.mail_reviews.outcome == 'failure' }}
+        run: |
+          echo "::warning::审阅 JSON 附件未寄送成功，本轮数据留存未完成；研究周报交付状态独立，不将其改写为研究失败。"
+          echo "审阅 JSON 附件寄送失败：本轮留存未完成，请检查 mail_reviews 步骤；已完成的研究周报不受影响。" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 续投完成后排队本周新研究
         id: continuation

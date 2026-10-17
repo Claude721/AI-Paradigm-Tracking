@@ -181,7 +181,7 @@ def _send_sync(
         message["X-AI-Radar-Delivery-Key"] = delivery_key
     if is_paradigm:
         status_line = "AI 技术范式雷达本期研究与交付已完成。"
-        if stats.get("delivery_contract_version") in {2, 3, 4}:
+        if stats.get("delivery_contract_version") in {2, 3, 4, 5}:
             scope = stats["delivery_scope"]
             research_note = (
                 f"完成原点初筛：{scope['origin_completed']} 份；选定机制深挖：{scope['deep_completed']} 条；历史路线刷新：{scope['refresh_completed']} 条。\n"
@@ -193,6 +193,16 @@ def _send_sync(
                     f"完成判断 {scope['deep_completed']} 条，执行失败 {scope['deep_failed']} 条。\n"
                     "失败对象单独留档，不作技术否定；报告只包含通过逐路线核验的结论。\n\n"
                 )
+            if stats.get("delivery_contract_version") == 5:
+                status_line = "AI 技术范式雷达本周结果已生成。"
+                research_note = (
+                    f"本次发表 {len(scope['routes'])} 条已核验路线；"
+                    f"完成初筛 {scope['origin_completed']} 份、深挖 {scope['deep_completed']} 条。\n"
+                    "失败、未形成判断和覆盖缺口独立留档，不影响已核验结果的交付；"
+                    "不声称所有研究已完成。详见报告与运行审计。\n\n"
+                )
+                if not scope['routes']:
+                    message.replace_header("Subject", f"AI 技术范式雷达｜{report_date}｜本周运行回执（无可发表路线）")
         else:
             research_note = (
                 f"本轮完成机制抽取：{stats.get('analysis_completed_count', stats.get('analysis_count', 0))}/"

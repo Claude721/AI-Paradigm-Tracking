@@ -58,7 +58,10 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
     def process(self, discovered=None, *, accepted=False, omit=()):
         with patch("agents.paradigm_orchestrator.ParadigmStore", return_value=self.store):
             value = ParadigmOrchestrator()
-        self.assertEqual(value.delivery_contract_version, 4)
+        self.assertEqual(value.delivery_contract_version, 5)
+        # Historical contract acceptance remains regression-tested explicitly.
+        # Current weekly-publication behavior has its own production-path tests.
+        value.delivery_contract_version = 4
         self.assertTrue(value.discovery.bounded)
         self.assertEqual(value.discovery.arxiv.query_result_limit, config.PARADIGM_SOURCE_QUERY_LIMIT)
         self.assertEqual(value.discovery.priority_pages.per_page, config.PARADIGM_OFFICIAL_DETAIL_LIMIT)

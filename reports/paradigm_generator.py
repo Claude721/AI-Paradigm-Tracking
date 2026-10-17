@@ -99,9 +99,22 @@ class ParadigmReportGenerator:
         stats = pipeline_stats or {}
         require_completed_research(stats, candidates=candidates)
         ordered = sorted(candidates, key=lambda item: item.total_score, reverse=True)
+        if stats.get("delivery_contract_version") == 5:
+            # v5 freezes the publication subset after route-local writing.
+            # Rendering is deterministic: overview/model/budget failures cannot
+            # suppress already checked prose or trigger another paid request.
+            drafts = [str((route_fragments or {}).get(_route_fragment_key(item), "")) for item in ordered]
+            if any(_route_draft_violations(draft, item) for item, draft in zip(ordered, drafts)):
+                raise ReportInputContractError(["周报快照缺少已通过核验的路线正文"])
+            content = self._weekly_content(date, stats, ordered, drafts)
+            violations = _editorial_violations(content, ordered, weekly=True) if ordered else []
+            if violations:
+                raise ReportQualityContractError(violations)
+            path.write_text(content.strip() + "\n", encoding="utf-8")
+            return path
         if not ordered:
             content = self._empty_report(date, stats)
-            if stats.get("delivery_contract_version") in {2, 3, 4}:
+            if stats.get("delivery_contract_version") in {2, 3, 4, 5}:
                 content = _attach_coverage_boundary(content, stats)
         else:
             preflight = _report_input_violations(ordered)
@@ -182,6 +195,93 @@ class ParadigmReportGenerator:
                 raise RuntimeError("报告未通过编辑质量门槛，任务已停止并可安全重试") from exc
         path.write_text(content.strip() + "\n", encoding="utf-8")
         return path
+
+    async def prepare_weekly_routes(self, candidates, *, date, cached, save_fragment):
+        """Attempt every route; a writer failure excludes only that publication.
+
+        Checked prose is checkpointed immediately under its evidence/prompt key.
+        Timeout stops new spending, not delivery of completed prose. Cancellation
+        of the entire run is deliberately not swallowed.
+        """
+        semaphore = asyncio.Semaphore(config.PARADIGM_REPORT_ROUTE_CONCURRENCY)
+        fragments, successful, failures = {}, set(), {}
+
+        async def prepare(item, index):
+            try:
+                preflight = _report_input_violations([item])
+                if preflight:
+                    raise ReportInputContractError(preflight)
+                key = _route_fragment_key(item)
+                value = cached.get(key, "")
+                if not value or _route_draft_violations(value, item):
+                    async with semaphore:
+                        value = await self._draft_one_route(date, item, index=index, total=len(candidates))
+                issues = _route_draft_violations(value, item)
+                if issues:
+                    raise ReportQualityContractError(issues)
+                result = save_fragment(key, value)
+                if inspect.isawaitable(result):
+                    await result
+                fragments[key] = value
+                successful.add(item.key)
+            except Exception as exc:
+                # No raw provider response or prompt in the public receipt.
+                failures[item.key] = type(exc).__name__
+                run_audit.event("weekly_publication", "route_excluded", f"{item.key}: {type(exc).__name__}")
+
+        tasks = [asyncio.create_task(prepare(item, index)) for index, item in enumerate(candidates, 1)]
+        try:
+            if tasks:
+                _, pending = await asyncio.wait(tasks, timeout=config.PARADIGM_REPORT_TIMEOUT_SECONDS)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        for item in candidates:
+            if item.key not in successful:
+                failures.setdefault(item.key, "PublicationTimeout")
+        return [item for item in candidates if item.key in successful], fragments, failures
+
+    @staticmethod
+    def _weekly_content(date, stats, candidates, drafts):
+        if not candidates:
+            proof = stats["delivery_scope"]
+            if stats.get("research_stage_interrupted"):
+                reason = "本轮研究阶段发生执行异常，已完成检查点保留。"
+            elif stats.get("publication_excluded_count"):
+                reason = "已有技术研究结果，但相应正文写作或发表核验未通过，未发送未经核验的文字。"
+            elif any(proof.get(kind + "_failed", 0) for kind in ("origin", "deep", "refresh")):
+                reason = "本轮存在执行失败，失败对象不提供技术结论。"
+            elif stats.get("run_budget_exhausted"):
+                reason = "本轮因预算保护停止新增调用。"
+            elif not proof["usable_primary_sources"]:
+                reason = "本轮未取得可用的一手发现通道，不能据此判断本周技术动态。"
+            else:
+                reason = "本轮已完成判断的对象尚未形成同时满足技术、承接和本期时效要求的发表结果。"
+            content = (f"# AI 技术范式雷达\n\n> {date} · 本周运行回执\n\n"
+                       "## 本期研究 Memo\n\n本次没有可发表的已核验技术路线。"
+                       + reason +
+                       "这只说明本次输出为空，不代表本周没有重要技术，也不把访问失败、"
+                       "预算停止或未形成判断的对象算作技术淘汰。\n\n"
+                       "## 接下来真正值得盯的信号\n\n"
+                       "继续核验机制、独立承接与发布时间；本轮处理事实和具体故障保留在运行审计中。")
+        else:
+            frame = (f"# AI 技术范式雷达\n\n> {date}\n\n## 本期研究 Memo\n\n"
+                     f"本次交付 {len(candidates)} 条已通过技术、承接、时效和原文核验的路线。"
+                     "下文分别解释机制改变了什么、证据支持到哪里，以及仍需观察什么。"
+                     "数量由可核验的结果决定，不把单项实验直接等同于成熟范式。"
+                     "取材和处理边界见文末，未形成判断的对象不参与结论。\n\n"
+                     "## 接下来真正值得盯的信号\n\n"
+                     "重点观察各路线的独立复现、跨团队采用和反事实验证，"
+                     "以新增证据判断能力边界是否真正扩展，不用发布热度替代机制证据。")
+            content = _assemble_editorial_frame(frame, drafts)
+            content = _attach_primary_source_index(_attach_researcher_index(content, candidates), candidates)
+        return _attach_coverage_boundary(content, stats)
 
     async def _editorial_frame(
         self,
@@ -422,7 +522,7 @@ class ParadigmReportGenerator:
             f"本期获取 {stats.get('origin_count', 0)} 份一手材料，按来源广度选定并完成 "
             f"{stats['delivery_scope']['origin_completed']} 份材料的原点初筛，以及 "
             f"{stats['delivery_scope']['deep_completed']} 条选定机制的深挖核验。"
-            if stats.get("delivery_contract_version") in {2, 3, 4} else
+            if stats.get("delivery_contract_version") in {2, 3, 4, 5} else
             f"本期共扫描 {stats.get('origin_count', 0)} 份一手机制材料，已完成配置信源的召回与全部计划研究判断。"
         )
         if stats.get("delivery_contract_version") == 4:
@@ -867,7 +967,7 @@ def _researcher_dossier(profile: ResearcherProfile) -> dict:
 
 
 def _public_stats(stats: dict) -> dict:
-    if stats.get("delivery_contract_version") in {2, 3, 4}:
+    if stats.get("delivery_contract_version") in {2, 3, 4, 5}:
         scope = stats["delivery_scope"]
         return {key: stats[key] for key in (
             "origin_count", "ordinary_discovery_lookback_days", "high_signal_discovery_lookback_days",
@@ -934,6 +1034,7 @@ def _editorial_violations(
     *,
     require_primary_sources: bool = True,
     require_researcher_index: bool = True,
+    weekly: bool = False,
 ) -> list[str]:
     forbidden = (
         "评分拆解",
@@ -955,7 +1056,7 @@ def _editorial_violations(
     )
     researcher_coverage = _covers_researchers(content, candidates or [])
     violations = []
-    if len(content.strip()) < 800:
+    if len(content.strip()) < 800 and not weekly:
         violations.append("正文过短")
     if "## 本期研究 Memo" not in content:
         violations.append("缺少本期研究 Memo")
@@ -963,7 +1064,7 @@ def _editorial_violations(
         violations.append("缺少后续观察信号")
     # 450–650 字是编辑目标；这里保留更宽但仍有意义的交付边界。
     # 轻微偏离只写入审计，不消耗全文重写，也不会销毁整轮研究结果。
-    if not 250 <= memo_chinese_characters <= 1000:
+    if not weekly and not 250 <= memo_chinese_characters <= 1000:
         violations.append(
             f"开篇 Memo 中文长度为 {memo_chinese_characters}，交付范围为 250–1000"
         )
@@ -1418,7 +1519,7 @@ def _attach_research_scope_boundary(content: str, stats: dict) -> str:
 def _attach_coverage_boundary(content: str, stats: dict) -> str:
     """Coverage defects belong in failure audit, not a formal research memo."""
     require_completed_research(stats, content=content)
-    if stats.get("delivery_contract_version") in {2, 3, 4}:
+    if stats.get("delivery_contract_version") in {2, 3, 4, 5}:
         content = re.sub(r"(?m)^> 本期取材范围：.*(?:\n|$)", "", content).rstrip()
         proof = stats["delivery_scope"]
         note = ("本期取材范围：从 " + str(len(proof["usable_primary_sources"])) +
@@ -1436,6 +1537,15 @@ def _attach_coverage_boundary(content: str, stats: dict) -> str:
             if stats.get("discovery_resumed") is True:
                 note += (f"本次为同批次续跑，复用此前取材快照；本次新增完成原点初筛 {stats.get('analysis_completed_count', 0)} 条、"
                          f"深挖判断 {stats.get('current_window_deep_completed_count', stats.get('deep_candidate_count', 0))} 条，以上处理总数为本期累计。")
+        if stats.get("delivery_contract_version") == 5:
+            note = (f"本期取材与处理范围：{len(proof['usable_primary_sources'])} 个可用一手发现通道；"
+                    + "；".join(f"{label}计划 {proof[kind + '_planned']}，完成 {proof[kind + '_completed']}，"
+                                 f"失败 {proof[kind + '_failed']}，未执行完毕（含预算/依赖中断）{proof[kind + '_unattempted']}"
+                                 for kind, label in (("origin", "初筛"), ("deep", "深挖"), ("refresh", "刷新")))
+                    + f"。发现通道缺口 {len(proof['source_issue_names'])} 个；"
+                    + f"因写作或发表核验问题未发表 {stats.get('publication_excluded_count', 0)} 条。"
+                    + ("本轮因预算保护停止新增调用。" if stats.get('run_budget_exhausted') else "")
+                    + "仅对正文已核验路线作结论；不声称研究计划全部完成或全网覆盖，详情见审计。")
         return content.rstrip() + "\n\n> " + note + "\n"
     return content
 

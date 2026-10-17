@@ -92,14 +92,14 @@ Doctor 核对配置完整、URL 格式、请求选项结构，不限定模型 ID
 | PARADIGM_BOOTSTRAP_LOOKBACK_DAYS | 14 | 冷启动也保持有界，不引入 60 天积压 |
 | PARADIGM_RESEARCH_ORIGIN_LIMIT | 48 | 本期跨发布者/来源轮转选定原点，1–500 |
 | PARADIGM_RESEARCH_REFRESH_LIMIT | 4 | 最久未检查历史路线，0–50；0 关闭刷新 |
-| PARADIGM_MIN_PRIMARY_SOURCES | 2 | 最少可用一手发现通道，1–9；不是独立复现数 |
+| PARADIGM_MIN_PRIMARY_SOURCES | 2 | 一手发现通道广度目标，1–9；正式 v5 仅作诊断，Smoke 仍作入口验收门槛 |
 | PARADIGM_SOURCE_QUERY_LIMIT | 100 | arXiv 每查询原点上限，1–1000，仍保留各车道 |
 | PARADIGM_SOURCE_PAGE_LIMIT | 2 | OpenAlex/OpenReview/已支持官方目录每查询分页上限，1–20；到限不是穷尽成功 |
 | PARADIGM_OFFICIAL_DETAIL_LIMIT | 6 | 每官方入口本进程新增详情上限，1–100 |
 
 这些是研究排期和正常取材边界，不是技术淘汰，不声称全量完成。已有 GitHub Variables 会覆盖默认；显式 30/60 天不是废弃配置，会继续增加高信号回补范围。有效回补窗口不小于普通窗口，冷启动不小于回补窗口。若希望使用 14 天起点，再明确改值或删除相应覆盖，不在清理时静默改研究范围。
 
-以下额外熔断默认仍为 0：PARADIGM_DISCOVERY_SAFETY_LIMIT、PARADIGM_ANALYSIS_SAFETY_LIMIT、PARADIGM_REPORT_SAFETY_LIMIT、PARADIGM_REFRESH_SAFETY_LIMIT。熔断/超时/未选不写成 Rubric 淘汰。全部合格候选不可配置 Top-K：旧 PARADIGM_RESEARCH_DEEP_LIMIT / PARADIGM_DEEP_SAFETY_LIMIT 已从正式 Workflow 和配置向导移除，遗留 Variables 不生效。v4 要求全部尝试、逐条隔离失败，其他合格路线可交付；未尝试或预算/依赖中断仍阻断交付。显式报告熔断也不能静默截掉已合格路线。没有新增配置开关。
+以下额外熔断默认仍为 0：PARADIGM_DISCOVERY_SAFETY_LIMIT、PARADIGM_ANALYSIS_SAFETY_LIMIT、PARADIGM_REPORT_SAFETY_LIMIT、PARADIGM_REFRESH_SAFETY_LIMIT。熔断/超时/未选不写成 Rubric 淘汰。全部合格候选进入深挖队列，不配置 Top-K；旧 PARADIGM_RESEARCH_DEEP_LIMIT / PARADIGM_DEEP_SAFETY_LIMIT 不生效。v5 不以全部尝试/成功作为交付前提，预算/依赖待办如实留存，不扣住已完成正文。没有新增开关。PARADIGM_MIN_PRIMARY_SOURCES=2 现在是通道广度健康目标，不再作为交付否决票；费用保护仍限制新增调用，不限制成果发表。
 
 PARADIGM_RUBRIC_PATH、FRONTIER_LANDSCAPE_PATH 默认留空使用仓库量表/地图。PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS=2、PARADIGM_MIN_SECONDARY_ENGAGEMENT=50 是客观承接辅助边界，不是模型主观分。PARADIGM_ALLOW_UPDATES=true，相同证据签名不重复交付。
 
@@ -176,7 +176,7 @@ TAVILY_MONTHLY_CREDIT_LIMIT=1000
 
 最后一行分别为 PARADIGM_AUTO_RESUME_MAX_RUNS、PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS、PARADIGM_AUTO_RESUME_MAX_TOKENS。开启后也只处理健康状态上传后的同批纯预算延期；执行、覆盖故障和未知用量不自动扩大支出。tokens 是轮间停止线，不是人民币单轮硬费用上限。
 
-同窗续跑保持选定计划。正常跨周运行归档旧未交付研究计划，待投递 outbox 仍优先恢复。v4 的单条失败及历史 pending 不要求清零；未建 outbox 的 v3 计划可保留原窗口和任务升级，已有 v2/v3 outbox 保留原契约。无须重置数据库或更改模型/API Key。
+同窗续跑保持选定计划。正常跨周运行归档旧未交付研究计划，待投递 outbox 仍优先恢复。v5 的交付成功不要求 pending 清零或全部已尝试；未建 outbox 的 v3/v4 计划保留原窗口和任务升级，历史冻结 outbox 保留原契约。无须重置数据库或更改模型/API Key。
 
 ## 邮件与验收
 

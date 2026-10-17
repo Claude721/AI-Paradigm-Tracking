@@ -668,9 +668,9 @@ class ParadigmStore:
             if campaign_id:
                 self.campaigns.require_ready(campaign_id, candidates)
                 ledger = self.campaigns.reconcile(campaign_id)
-                if ledger["pending_total_count"] and stats.get("delivery_contract_version") != 4:
+                if ledger["pending_total_count"] and stats.get("delivery_contract_version") not in {4, 5}:
                     raise ResearchNotCompleteError(["研究批次任务清单未闭合"])
-            elif stats.get("delivery_contract_version") in {2, 3, 4}:
+            elif stats.get("delivery_contract_version") in {2, 3, 4, 5}:
                 raise ResearchNotCompleteError(["V0 交付缺少持久化本期研究批次"])
             job = self._enqueue_completed_report(candidates, stats, report_date=report_date)
             if campaign_id:

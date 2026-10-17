@@ -195,7 +195,7 @@ class CampaignStore:
         with self.store._connect() as conn:
             conn.execute("UPDATE research_campaigns SET status='superseded', updated_at=? WHERE campaign_id=? AND status IN ('discovering','researching','ready')", (_now(), key))
 
-    def upgrade_execution_contract(self, key):
+    def upgrade_execution_contract(self, key, *, target_version=4):
         """Migrate an undelivered v3 plan without changing its clock or work.
 
         Already-created outboxes keep their original delivery contract. Only
@@ -203,15 +203,17 @@ class CampaignStore:
         """
         with self.store.transaction():
             campaign = self.get(key, load_discovery=False)
-            if (campaign.stats.get("delivery_contract_version") == 3
+            if (campaign.stats.get("delivery_contract_version") in {3, 4}
+                    and campaign.stats.get("delivery_contract_version") < target_version
                     and campaign.status in {"discovering", "researching", "ready"}
                     and not campaign.delivery_key):
-                stats = {**campaign.stats, "delivery_contract_version": 4}
+                stats = {**campaign.stats, "previous_delivery_contract_version": campaign.stats["delivery_contract_version"],
+                         "delivery_contract_version": target_version}
                 stats.pop("delivery_scope", None)
                 with self.store._connect() as conn:
                     conn.execute("UPDATE research_campaigns SET stats_json=?, status=?, updated_at=? WHERE campaign_id=?",
                                  (_encode(stats), "discovering" if campaign.status == "discovering" else "researching", _now(), key))
-            if (campaign.stats.get("delivery_contract_version") in {3, 4}
+            if (campaign.stats.get("delivery_contract_version") in {3, 4, 5}
                     and campaign.status in {"discovering", "researching", "ready"}
                     and not campaign.delivery_key):
                 self._repair_partial_report_receipts(key)
@@ -251,7 +253,7 @@ class CampaignStore:
 
     def set_origin_scope(self, key, origins, *, input_diagnostics=None):
         campaign = self.get(key, load_discovery=False)
-        if campaign.stats.get("delivery_contract_version") not in {2, 3, 4}:
+        if campaign.stats.get("delivery_contract_version") not in {2, 3, 4, 5}:
             return
         if "origin_scope" in campaign.stats:
             return
@@ -360,7 +362,7 @@ class CampaignStore:
         from database.paradigm_store import _deep_checkpoint_input_signature, _persistable_candidate
         with self.store.transaction():
             campaign = self.get(key, load_discovery=False)
-            bounded = campaign.stats.get("delivery_contract_version") in {2, 3, 4}
+            bounded = campaign.stats.get("delivery_contract_version") in {2, 3, 4, 5}
             scope = set(campaign.stats.get("origin_scope", []))
             with self.store._connect() as conn:
                 origins = conn.execute("""SELECT e.fingerprint, o.source_signature, e.last_analyzed_at
@@ -433,14 +435,14 @@ class CampaignStore:
             result[f"{kind}_completed"] = sum(count for lane, status, count in counts if lane == kind and status == "completed")
             result[f"{kind}_pending"] = result[f"{kind}_planned"] - result[f"{kind}_completed"]
         result["pending_total_count"] = sum(result[f"{kind}_pending"] for kind in ("origin", "deep", "refresh"))
-        if campaign.stats.get("delivery_contract_version") in {3, 4}:
+        if campaign.stats.get("delivery_contract_version") in {3, 4, 5}:
             with self.store._connect() as conn:
                 result["deep_scope_keys"] = sorted(row[0] for row in conn.execute(
                     "SELECT object_key FROM campaign_work WHERE campaign_id=? AND kind='deep'", (key,)))
             # Origin closure seals the cohort deterministically. Reconciliation
             # reopens this proof if a parent revision becomes pending again.
             result["deep_scope_sealed"] = result["origin_pending"] == 0
-        if campaign.stats.get("delivery_contract_version") == 4:
+        if campaign.stats.get("delivery_contract_version") in {4, 5}:
             with self.store._connect() as conn:
                 attempts = {}
                 for kind, identity, revision, outcome, attempt in conn.execute(
@@ -472,6 +474,11 @@ class CampaignStore:
             accounting["cumulative_research_seconds"] += stats.get("elapsed_seconds", 0)
             accounting["cumulative_llm_total_tokens"] += stats.get("llm_total_tokens", 0)
             accounting["cumulative_unreported_usage_calls"] += stats.get("llm_unreported_usage_count", 0)
+        elif stats.get("delivery_contract_version") == 5:
+            # Publication follows research in the same attempt. Count only the
+            # new writer usage, not the entire attempt for a second time.
+            accounting["cumulative_llm_total_tokens"] += max(0, stats.get("llm_total_tokens", 0) - previous.stats.get("llm_total_tokens", 0))
+            accounting["cumulative_unreported_usage_calls"] += max(0, stats.get("llm_unreported_usage_count", 0) - previous.stats.get("llm_unreported_usage_count", 0))
         stats = {**previous.stats, **stats,
                  **accounting, "last_accounted_attempt": previous.attempt_count}
         with self.store._connect() as conn:
@@ -480,17 +487,18 @@ class CampaignStore:
     def bind_delivery(self, key, delivery_key, *, delivered=False):
         self.require_ready(key)
         snapshot = self.reconcile(key)
-        if snapshot["pending_total_count"] and self.get(key, load_discovery=False).stats.get("delivery_contract_version") != 4:
+        if snapshot["pending_total_count"] and self.get(key, load_discovery=False).stats.get("delivery_contract_version") not in {4, 5}:
             raise ResearchNotCompleteError(["持久化研究批次仍有未闭合任务"])
         with self.store._connect() as conn:
             conn.execute("UPDATE research_campaigns SET delivery_key=?, status=?, updated_at=? WHERE campaign_id=?", (delivery_key, "delivered" if delivered else "waiting_delivery", _now(), key))
 
     def require_ready(self, key, candidates=()):
         campaign = self.get(key)
-        if campaign is None or campaign.status not in {"ready", "waiting_delivery"} or campaign.discovery is None or not campaign.stats.get("refresh_scope_sealed"):
+        if (campaign is None or campaign.status not in {"ready", "waiting_delivery"} or campaign.discovery is None
+                or campaign.stats.get("delivery_contract_version") != 5 and not campaign.stats.get("refresh_scope_sealed")):
             raise ResearchNotCompleteError(["持久化研究批次没有有效的完整研究凭据"])
         require_completed_research(campaign.stats)
-        if campaign.stats.get("delivery_contract_version") in {2, 3, 4}:
+        if campaign.stats.get("delivery_contract_version") in {2, 3, 4, 5}:
             from paradigms.delivery_policy import delivery_proof
             expected = campaign.stats["delivery_scope"]["routes"]
             saved = self.store.load_candidate_snapshots([row["key"] for row in expected])

@@ -234,7 +234,14 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
         persisted_violations = _editorial_violations(
             job.report_content,
             job.candidates,
+            weekly=stats.get("delivery_contract_version") == 5,
         )
+        if stats.get("delivery_contract_version") == 5 and not job.candidates:
+            # A receipt is not a technical memo, but is still a constrained
+            # artifact: never reuse arbitrary/tampered prose or added URLs.
+            expected_receipt = generator._weekly_content(job.report_date, stats, [], [])
+            persisted_violations = ([] if job.report_content.strip() == expected_receipt.strip()
+                                    else ["持久化运行回执与真实冻结范围不符"])
         if persisted_violations:
             store.invalidate_rendered_report(
                 job.delivery_key,
@@ -260,6 +267,12 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
             render_attempt = store.begin_render_attempt(job.delivery_key)
             stats["delivery_render_attempt"] = render_attempt
             route_fragments = store.load_report_fragments(job.delivery_key)
+            if stats.get("delivery_contract_version") == 5:
+                from reports.paradigm_generator import _route_fragment_key
+                restored = store.campaigns.cache_get_many("weekly_publication_draft",
+                    [_route_fragment_key(item) for item in job.candidates])
+                route_fragments = {**{key: value.get("content", "") for key, value in restored.items()
+                                      if isinstance(value, dict)}, **route_fragments}
             if route_fragments:
                 run_audit.event(
                     "report_outbox",
@@ -487,9 +500,17 @@ async def _run_pipeline_once(*, resume_only: bool = False, expected_campaign_id:
         try:
             require_completed_research(stats)
             report_date = stats.get("report_date") or scheduled_date()
-            job = orchestrator.store.enqueue_report(
-                orchestrator.pending_delivery, stats, report_date=report_date,
+            from paradigms.weekly_delivery import prepare_weekly_delivery
+            selected, stats, fragments = await prepare_weekly_delivery(
+                orchestrator.store, generator, orchestrator.pending_delivery,
+                stats, report_date=report_date,
             )
+            with orchestrator.store.transaction():
+                job = orchestrator.store.enqueue_report(
+                    selected, stats, report_date=report_date,
+                )
+                for fragment_key, content in fragments.items():
+                    orchestrator.store.save_report_fragment(job.delivery_key, fragment_key, content)
         except ResearchNotCompleteError as exc:
             stats.update({
                 "result_kind": "research_blocked", "email_sent": False,
@@ -588,7 +609,16 @@ def _write_pipeline_result(result: dict) -> Path:
         "fresh_research_completed": bool(
             summary["run_kind"] == "new_research" and not research_completion_violations(result)
             and not result.get("delivery_quarantined")
+            and (result.get("delivery_contract_version") != 5 or
+                 not (result.get("research_campaign") or {}).get("pending_total_count", 0)
+                 and not result.get("research_stage_interrupted") and not coverage_incomplete)
         ),
+        "research_health": result.get("research_health", "unknown"),
+        "research_stage_interrupted": bool(result.get("research_stage_interrupted")),
+        "delivery_ready": bool(result.get("delivery_ready")),
+        "execution_complete": bool(result.get("execution_complete")),
+        "publication_excluded": result.get("publication_excluded", {}),
+        "published_route_count": result.get("published_route_count", 0),
         "research_incomplete": research_incomplete,
         "coverage_incomplete": coverage_incomplete,
         "pending_work_count": int(result.get("pending_work_count", 0) or 0),
@@ -657,7 +687,13 @@ async def _regenerate_report_once() -> dict:
         if job is None:
             raise RuntimeError("没有已闭合的历史报告可重生成；请先完成正式研究")
         candidates, stats = job.candidates, dict(job.stats)
-        report_path = await generator.generate(candidates, stats, report_date=job.report_date)
+        fragments = {}
+        if stats.get("delivery_contract_version") == 5:
+            from reports.paradigm_generator import _route_fragment_key
+            fragments = {key: value.get("content", "") for key, value in store.campaigns.cache_get_many(
+                "weekly_publication_draft", [_route_fragment_key(item) for item in candidates]).items()
+                if isinstance(value, dict)}
+        report_path = await generator.generate(candidates, stats, report_date=job.report_date, route_fragments=fragments)
     logger.info(f"报告已重新生成: {report_path}")
     from notifications.email_notifier import send_report_email
     stats["report_path"] = str(report_path)

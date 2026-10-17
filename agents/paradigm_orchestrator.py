@@ -94,16 +94,17 @@ class ParadigmOrchestrator:
         Also called on resume/direct batch entry; constructors alone cannot
         guarantee agreement for restored or injected stage instances.
         """
-        allow_partial = getattr(self, "delivery_contract_version", None) in {2, 3, 4}
+        allow_partial = getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5}
         for stage in (getattr(self, "enricher", None), getattr(self, "synthesizer", None)):
             if isinstance(stage, (EvidenceEnricher, ParadigmSynthesizer)):
                 stage.allow_partial_sources = allow_partial
 
     async def run(self, *, reference_time: datetime | None = None, resume_only: bool = False) -> dict:
         active = self.store.campaigns.active()
-        if active and getattr(self, "delivery_contract_version", None) == 4:
-            active = self.store.campaigns.upgrade_execution_contract(active.campaign_id)
-        bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4}
+        if active and getattr(self, "delivery_contract_version", None) in {4, 5}:
+            active = self.store.campaigns.upgrade_execution_contract(
+                active.campaign_id, target_version=self.delivery_contract_version)
+        bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5}
         now = reference_time or datetime.now(timezone.utc)
         if bounded and active and not resume_only and active.status != "waiting_delivery" and (
             active.stats.get("delivery_contract_version") != self.delivery_contract_version or
@@ -141,7 +142,57 @@ class ParadigmOrchestrator:
                     bounded=bounded,
                 )
                 self.discovery.arxiv.seed_arxiv_ids = active.seeds
-            return await self._run_research()
+            try:
+                return await self._run_research()
+            except Exception as exc:
+                if getattr(self, "delivery_contract_version", None) != 5:
+                    raise
+                # Stage outages do not erase committed work or suppress the
+                # weekly receipt. Broken storage still raises here: an
+                # unverifiable database is not a trustworthy publication.
+                logger.exception("研究阶段中断；从持久化检查点构建本周交付，不回滚成功判断")
+                return self._weekly_checkpoint_after_interruption(exc)
+
+    def _weekly_checkpoint_after_interruption(self, error):
+        from paradigms.delivery_policy import delivery_proof, weekly_result_kind
+        from paradigms.discovery import DiscoveryBatch
+        campaign = self.store.campaigns.get(self.campaign.campaign_id)
+        if campaign.discovery is None:
+            batch = DiscoveryBatch([], [], {}, {"source_health": {
+                "research_stage": {"status": "query_failed", "results": 0}}})
+            self.store.campaigns.save_discovery(campaign.campaign_id, batch)
+        else:
+            batch = campaign.discovery
+        ledger = self.store.campaigns.reconcile(campaign.campaign_id)
+        closed = {row["key"] for row in ledger["execution_receipts"]
+                  if row["kind"] in {"deep", "refresh"} and row["outcome"] == "completed"}
+        selected = []
+        for item in self.store.load_candidate_snapshots(sorted(closed)):
+            if not is_reportable(item) or not _delivery_primary_source_ready(item) or not self.store.candidate_inputs_current(item):
+                continue
+            item.freshness_assessment = assess_candidate_freshness(item, window_days=campaign.ordinary_days)
+            if item.freshness_assessment["decision"] != "defer":
+                selected.append(item)
+        selected = self.store.prepare_report(selected)
+        self.store.save_candidates(selected)
+        self.pending_delivery = selected
+        stats = {**campaign.stats, **run_audit.last_stats, **run_audit.token_totals(),
+                 "pipeline_mode": "paradigm", "delivery_contract_version": 5,
+                 "reference_time": research_now().isoformat(), "report_date": scheduled_date(research_now()),
+                 "ordinary_discovery_lookback_days": campaign.ordinary_days,
+                 "origin_count": len(batch.origins), "source_counts": batch.source_counts,
+                 "frontier_coverage": batch.coverage, "coverage_incomplete": True,
+                 "research_campaign": ledger, "research_incomplete": True, "run_incomplete": True,
+                 "research_stage_interrupted": True, "research_interruption_kind": type(error).__name__,
+                 "result_kind": weekly_result_kind(selected), "delivery_ready": True,
+                 "research_scope_origin_count": ledger["origin_planned"],
+                 "execution_complete": False,
+                 "pending_work_count": ledger["pending_total_count"]}
+        stats["delivery_scope"] = delivery_proof(stats, selected, ledger, minimum_sources=config.PARADIGM_MIN_PRIMARY_SOURCES)
+        self.store.campaigns.save_stats(campaign.campaign_id, stats, ready=True)
+        run_audit.event("weekly_publication", "research_interrupted", type(error).__name__)
+        run_audit.checkpoint(stats)
+        return stats
 
     async def _run_research(self) -> dict:
         started = datetime.now(timezone.utc)
@@ -155,7 +206,7 @@ class ParadigmOrchestrator:
         }
         reopener = getattr(self.store, "reopen_failed_community_judgments", None)
         stats["community_failed_judgments_reopened"] = (
-            reopener(allow_partial_sources=True) if callable(reopener) and getattr(self, "delivery_contract_version", None) in {2, 3, 4}
+            reopener(allow_partial_sources=True) if callable(reopener) and getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5}
             else reopener() if callable(reopener) else 0
         )
         queue_before = self.store.work_queue_snapshot(reference_time=research_now())
@@ -165,7 +216,7 @@ class ParadigmOrchestrator:
             stats["discovery_executed"] = True
             batch = await self.discovery.run()
             stats["discovery_resumed"] = False
-        elif getattr(self, "delivery_contract_version", None) in {2, 3, 4}:
+        elif getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5}:
             stats["discovery_executed"] = False
             batch = self.campaign.discovery
             stats["discovery_resumed"] = True
@@ -179,7 +230,7 @@ class ParadigmOrchestrator:
             stats["discovery_retry_sources"] = sorted(retry_sources)
             stats["discovery_executed"] = bool(retry_sources)
             batch = await self.discovery.retry(self.campaign.discovery) if retry_sources else self.campaign.discovery
-        if getattr(self, "delivery_contract_version", None) in {2, 3, 4}:
+        if getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5}:
             from paradigms.delivery_policy import validated_discovery
             batch, rejected = validated_discovery(batch)
             for key, count in rejected.items():
@@ -380,7 +431,7 @@ class ParadigmOrchestrator:
                 recall_lanes=recall_lanes,
             )
         )
-        bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4}
+        bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5}
         if bounded:
             from paradigms.delivery_policy import bounded_origins
             selected = bounded_origins(batch.origins, limit=config.PARADIGM_RESEARCH_ORIGIN_LIMIT,
@@ -999,7 +1050,7 @@ class ParadigmOrchestrator:
             or stats["delivery_source_deferred_count"]
             or stats["report_safety_deferred_count"]
         )
-        # 保留兼容统计，但未闭合研究/覆盖均不得进入报告或邮件交付。
+        # Research completeness remains a diagnostic, not publication permission.
         stats["run_incomplete"] = stats["research_incomplete"]
         stats["pending_work_count"] = (
             stats["evidence_checkpoint_rejected_count"]
@@ -1096,15 +1147,17 @@ class ParadigmOrchestrator:
             # result is independent of unrelated acquisition/backlog failures.
             stats["result_kind"] = ("research_blocked" if ledger["pending_total_count"] else
                 "complete_memo" if reportable else "complete_no_signal")
-            if self.delivery_contract_version == 4:
-                from paradigms.delivery_policy import execution_result_kind
-                stats["result_kind"] = execution_result_kind(ledger, reportable)
+            if self.delivery_contract_version in {4, 5}:
+                from paradigms.delivery_policy import execution_result_kind, weekly_result_kind
+                stats["result_kind"] = (weekly_result_kind(reportable) if self.delivery_contract_version == 5
+                                        else execution_result_kind(ledger, reportable))
                 stats["execution_complete"] = not any(ledger[f"{kind}_unattempted"] for kind in ("origin", "deep", "refresh"))
                 stats["local_execution_failure_count"] = sum(ledger[f"{kind}_failed"] for kind in ("origin", "deep", "refresh"))
         from paradigms.completion import research_completion_violations
         ready = not research_completion_violations(stats)
         if getattr(self, "delivery_contract_version", None) == 4 and not ready:
             stats["result_kind"] = "research_blocked"
+        stats["delivery_ready"] = ready
         self.store.campaigns.save_stats(self.campaign.campaign_id, stats, ready=ready)
         stats["research_campaign"] = self.store.campaigns.snapshot(self.campaign.campaign_id)
         run_audit.checkpoint(stats)
@@ -1136,7 +1189,7 @@ class ParadigmOrchestrator:
         reserve: int, *, candidate_keys: set[str], stats: dict, clock=None,
     ) -> dict:
         """First technical visits precede model repairs and optional people I/O."""
-        if getattr(self, "delivery_contract_version", None) != 4:
+        if getattr(self, "delivery_contract_version", None) not in {4, 5}:
             return await self._service_research_lanes_once(
                 origins, supporting, deadline, reserve,
                 candidate_keys=candidate_keys, stats=stats, clock=clock,
@@ -1184,7 +1237,7 @@ class ParadigmOrchestrator:
             ) else "backfill"
             origin_queues[lane].append(item)
         initial_deep = self.store.load_pending_deep_candidates()
-        bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4}
+        bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5}
         if bounded:
             member_keys = self.store.campaigns.candidate_keys(self.campaign.campaign_id)
             initial_deep = [item for item in initial_deep if item.key in member_keys]
@@ -1491,7 +1544,7 @@ class ParadigmOrchestrator:
                         self.store.save_candidates(saved)
                         if campaign_key:
                             self.store.campaigns.complete_refresh(campaign_key, [item.key for item in [*values, *stable]
-                                if getattr(self, "delivery_contract_version", None) != 4
+                                if getattr(self, "delivery_contract_version", None) not in {4, 5}
                                 or item.rubric_assessment.get("decision") in {"report", "observe", "reject"}])
                             finish_attempts(attempts, [*values, *stable], budget, failures, kind="refresh")
                     for item in saved:
@@ -2034,7 +2087,7 @@ class ParadigmOrchestrator:
                         fresh, values, "external_enrichment"
                     )
                     from paradigms.search_receipts import blocking_searches
-                    blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3, 4})
+                    blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5})
                     search_failed = [item for item in values if blocked(item)]
                     values = [item for item in values if not blocked(item)]
                     fresh = [item for item in fresh if not blocked(item)]
@@ -2163,7 +2216,7 @@ class ParadigmOrchestrator:
                     process_batch(), timeout=remaining
                 )
             except asyncio.TimeoutError:
-                if getattr(self, "delivery_contract_version", None) == 4:
+                if getattr(self, "delivery_contract_version", None) in {4, 5}:
                     # The flow actually started. Its timeout is a local failed
                     # attempt, unlike the untouched tail or no-budget branch.
                     for item in group:
@@ -2262,7 +2315,7 @@ class ParadigmOrchestrator:
                     allow_subset=True,
                 )
                 from paradigms.search_receipts import blocking_searches
-                blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3, 4})
+                blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5})
                 search_failed = [item for item in candidate_batch if blocked(item)]
                 values = [item for item in values if not blocked(item)]
                 if values:
@@ -2288,7 +2341,7 @@ class ParadigmOrchestrator:
                 _mark_refresh_attempted(self, group)
                 snapshots = [_community_progress_snapshot(original, progress)
                              for original, progress in zip(group, candidate_batch)]
-                if getattr(self, "delivery_contract_version", None) == 4:
+                if getattr(self, "delivery_contract_version", None) in {4, 5}:
                     for failed in snapshots:
                         failed.execution_failure_count += 1
                         failed.last_execution_failure_at = datetime.now(timezone.utc).isoformat()
