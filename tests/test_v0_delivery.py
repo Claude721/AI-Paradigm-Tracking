@@ -333,6 +333,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         origins = [origin(index) for index in range(1, 4)]
         for item in origins:
             item.raw["origin_kind"] = "technical_report"
+            item.raw["origin_classification_reason"] = "explicit_document_metadata:technical_report"
         process = self.process(batch(origins))
         origins_seen, deep_seen = set(), set()
 

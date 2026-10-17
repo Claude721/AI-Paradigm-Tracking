@@ -211,7 +211,43 @@ class CampaignStore:
                 with self.store._connect() as conn:
                     conn.execute("UPDATE research_campaigns SET stats_json=?, status=?, updated_at=? WHERE campaign_id=?",
                                  (_encode(stats), "discovering" if campaign.status == "discovering" else "researching", _now(), key))
+            if (campaign.stats.get("delivery_contract_version") in {3, 4}
+                    and campaign.status in {"discovering", "researching", "ready"}
+                    and not campaign.delivery_key):
+                self._repair_partial_report_receipts(key)
         return self.get(key)
+
+    def _repair_partial_report_receipts(self, key):
+        """Correct only proven old misclassification, never infer success.
+
+        Require a failed mechanism checkpoint of the same source revision,
+        recorded inside this exact finished attempt. A slice, interrupted
+        request, budget stop or older revision cannot authorize this repair.
+        """
+        with self.store._connect() as conn:
+            rows = conn.execute("""SELECT a.attempt_id, a.started_at, a.finished_at,
+                    s.checkpoint_json FROM research_attempts a
+                JOIN origin_research_state s ON s.fingerprint=a.object_key
+                    AND s.source_signature=a.input_revision
+                WHERE a.campaign_id=? AND a.kind='origin'
+                    AND a.outcome='dependency_pending' AND a.finished_at IS NOT NULL""", (key,)).fetchall()
+            for attempt, started, finished, payload in rows:
+                checkpoint = json.loads(payload)
+                if (checkpoint.get("technical_report_last_run_failure") is not True
+                        or not checkpoint.get("technical_report_mechanism_failure_counts")):
+                    continue
+                from paradigms.analyzer import unvisited_report_mechanisms
+                if unvisited_report_mechanisms(checkpoint):
+                    continue
+                try:
+                    failed_at = datetime.fromisoformat(checkpoint["last_analysis_failure_at"])
+                    start_at, finish_at = datetime.fromisoformat(started), datetime.fromisoformat(finished)
+                    confirmed = start_at <= failed_at <= finish_at
+                except (KeyError, ValueError, TypeError):
+                    confirmed = False
+                if confirmed:
+                    conn.execute("UPDATE research_attempts SET outcome='execution_failed', reason=? WHERE attempt_id=? AND outcome='dependency_pending'",
+                        ("reclassified_partial_report_failure:dependency_pending", attempt))
 
     def set_origin_scope(self, key, origins, *, input_diagnostics=None):
         campaign = self.get(key, load_discovery=False)

@@ -19,6 +19,7 @@ description: 把同一路线的论文、原创思想、代码、评审与二次�
 最终阶段版本化技术 Rubric：{rubric_definition}
 上一代方法：{lineage_parent}
 证据列表：{evidence}
+程序给出的各字段可选编号（只是合法集合，不是应全部选择的答案）：{evidence_index_contract}
 社区覆盖说明：{community_coverage}
 程序核验的社区/已启用学术增强执行回执：{community_search_receipts}
 
@@ -43,6 +44,8 @@ description: 把同一路线的论文、原创思想、代码、评审与二次�
 对每条外部证据做独立性和相关性审计。arXiv 与 Hugging Face 对同一论文的收录只算一个原始事件；论文日报、awesome list、关键词聚合仓库不是实现；名称碰巧相似但内容无关的仓库或帖子必须排除。作者本人发布工作只用于核验身份和原始主张，不算独立二次讨论。只有官方代码出现的真实社区承接、独立复现、实质 fork、引用承接、非作者 KOL 分析、社区讨论和产品采用才构成扩散证据。
 
 必须用 `mechanism_support_evidence_indices` 显式列出 records 中真正支持本次综合机制的一手原点 index。同一主题、宽泛背景或宏观评论不足以支持同一机制；既然正文判断某篇文章未针对该机制，就不能把它放入支持清单。重复收录同一论文仍是一份原点。其他已经展开的一手原点会被独立保留为排除材料，不参与该路线事实、发布者或承接计分；折叠材料不得据此判为无关。支持与 excluded 清单不得重叠。
+
+上述三个字段都必须是无重复的 JSON 整数数组，分别从程序提供的同名合法集合中选择；不能使用字符串编号、数组位置或样例数字。`implementation` 即使是作者的官方仓库也不是原点支持编号，只有 `original_implementation` 才是实现原点；实现/采用证据仍可以保留在证据包中。比如论文 index=0、官方代码 implementation index=1 时，原点支持最多是 [0]，不能写 [0,1]。没有对应证据时返回 []，不得照抄示例或强行选满。
 
 人物履历、联系人或贡献角色无法核验时保持未知，不降低技术判断，也不因此拒绝路线；模型仍应尽力指出一手材料中的真实署名与贡献线索，不用名气补足机制证据。
 
@@ -123,9 +126,9 @@ Tavily 返回的 `indexed_discovery_only` 只是公开网页索引线索：它�
   "why_now": "本期成立的技术前提",
   "lineage_path": ["上一代能力边界", "关键中间节点", "当前路线"],
   "evidence_assessment": "原始自证、独立验证和噪声分别是什么",
-  "excluded_evidence_indices": [3, 5],
-  "mechanism_support_evidence_indices": [0, 1],
-  "substantive_uptake_evidence_indices": [2],
+  "excluded_evidence_indices": [],
+  "mechanism_support_evidence_indices": [],
+  "substantive_uptake_evidence_indices": [],
   "objective_momentum_signals": ["平台、动作、可核验数字与时间"],
   "secondary_discussion_summary": "二次传播者真正讨论的亮点、争议和潜在用途；没有则明确写暂无实质讨论",
   "trend_interpretation": "单点提出、多团队承接或跨圈扩散的克制判断",

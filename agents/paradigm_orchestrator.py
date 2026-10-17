@@ -1135,6 +1135,33 @@ class ParadigmOrchestrator:
         self, origins: list, supporting: list, deadline: float,
         reserve: int, *, candidate_keys: set[str], stats: dict, clock=None,
     ) -> dict:
+        """First technical visits precede model repairs and optional people I/O."""
+        if getattr(self, "delivery_contract_version", None) != 4:
+            return await self._service_research_lanes_once(
+                origins, supporting, deadline, reserve,
+                candidate_keys=candidate_keys, stats=stats, clock=clock,
+            )
+        synthesizer = getattr(self, "synthesizer", None)
+        previous_people = getattr(self, "_defer_person_enrichment", False)
+        previous_retries = getattr(synthesizer, "defer_retries", False)
+        self._defer_person_enrichment = True
+        if isinstance(synthesizer, ParadigmSynthesizer):
+            synthesizer.defer_retries = True
+        try:
+            return await self._service_research_lanes_once(
+                origins, supporting, deadline, reserve,
+                candidate_keys=candidate_keys, stats=stats, clock=clock,
+            )
+        finally:
+            self._defer_person_enrichment = previous_people
+            if isinstance(synthesizer, ParadigmSynthesizer):
+                synthesizer.defer_retries = previous_retries
+                synthesizer._deferred_repairs.clear()
+
+    async def _service_research_lanes_once(
+        self, origins: list, supporting: list, deadline: float,
+        reserve: int, *, candidate_keys: set[str], stats: dict, clock=None,
+    ) -> dict:
         """Advance bounded visits across durable origin/deep/refresh queues.
 
         Every origin visit commits before the next candidate snapshot is read.
@@ -1325,7 +1352,19 @@ class ParadigmOrchestrator:
                 )
                 values, count, failures, slices, budget, hydrated, done, resumable = result
                 done_ids = {item.fingerprint for item in [*done, *resumable, *budget]}
-                finish_attempts(attempts, done, budget, [item for item in group if item.fingerprint not in done_ids], kind="origin")
+                # A returned report with failed mechanism assessments really
+                # entered the flow. Keep it retryable without calling it an
+                # untouched dependency. A healthy partial slice is different:
+                # its unvisited mechanisms still require another turn.
+                from paradigms.analyzer import unvisited_report_mechanisms
+                report_failure = lambda item: bool(item.raw.get("technical_report_last_run_failure")
+                    or item.raw.get("technical_report_mechanism_failure_counts"))
+                failed_partial = [item for item in resumable
+                                  if report_failure(item)
+                                  and not unvisited_report_mechanisms(item)]
+                finish_attempts(attempts, done, budget,
+                    [*failed_partial, *(item for item in group if item.fingerprint not in done_ids)],
+                    kind="origin")
                 extractions.extend(values)
                 visited_origins.update(item.fingerprint for item in group if item.fingerprint not in {value.fingerprint for value in budget})
                 for item in done:
@@ -1335,14 +1374,15 @@ class ParadigmOrchestrator:
                     origin_budget_by_key.pop(item.fingerprint, None)
                 for item in resumable:
                     origin_partial[item.fingerprint] = item
-                    if item.raw.get("technical_report_last_run_failure"):
+                    unvisited = unvisited_report_mechanisms(item)
+                    if report_failure(item) and not unvisited:
                         origin_failed.add(item.fingerprint)
                     else:
                         origin_failed.discard(item.fingerprint)
                     # A mechanism slice is a fair visit, not a forced new run.
                     # Requeue only demonstrated progress; failed/no-progress
                     # mechanisms stay durable without spinning this process.
-                    if not item.raw.get("technical_report_last_run_failure") and len(item.raw.get("technical_report_completed_mechanisms", {})) > before_progress.get(item.fingerprint, 0):
+                    if unvisited or (not report_failure(item) and len(item.raw.get("technical_report_completed_mechanisms", {})) > before_progress.get(item.fingerprint, 0)):
                         snapshots = self.store.load_origin_snapshots([item.fingerprint])
                         if snapshots:
                             origin_queues[lane].append(snapshots[0])
@@ -1450,7 +1490,9 @@ class ParadigmOrchestrator:
                     with self.store.transaction():
                         self.store.save_candidates(saved)
                         if campaign_key:
-                            self.store.campaigns.complete_refresh(campaign_key, [item.key for item in [*values, *stable]])
+                            self.store.campaigns.complete_refresh(campaign_key, [item.key for item in [*values, *stable]
+                                if getattr(self, "delivery_contract_version", None) != 4
+                                or item.rubric_assessment.get("decision") in {"report", "observe", "reject"}])
                             finish_attempts(attempts, [*values, *stable], budget, failures, kind="refresh")
                     for item in saved:
                         history_index.upsert(item)
@@ -1469,6 +1511,48 @@ class ParadigmOrchestrator:
                 "refresh_analysis_count": refresh_attempted,
             })
 
+        # No repair or biography may take the first research turn away from a
+        # remaining candidate. Failures remain real pending objects throughout.
+        mandatory_visited = not (any(origin_queues.values()) or deep_tasks
+                                 or deep_blocked or refresh_keys)
+        if bounded and campaign_key and mandatory_visited:
+            attempt_ledger = self.store.campaigns.snapshot(campaign_key)
+            mandatory_visited = all(attempt_ledger.get(kind + "_unattempted") == 0
+                                    for kind in ("origin", "deep", "refresh"))
+        post_phase_seconds = {"synthesis_repair": 0.0, "researcher_attribution": 0.0}
+        if getattr(self, "_defer_person_enrichment", False) and mandatory_visited and _remaining_seconds(deadline) > 0:
+            post_started = monotonic()
+            await self._repair_syntheses_after_first_visits(
+                completed_deep, refreshed, supporting, deadline,
+            )
+            post_phase_seconds["synthesis_repair"] = round(max(monotonic() - post_started, 0), 3)
+            post_started = monotonic()
+            people = [item for item in [*completed_deep.values(), *refreshed.values()]
+                      if item.rubric_assessment.get("decision") in {"report", "observe", "reject"}
+                      and item.deep_checkpoint_stage == "synthesized"]
+            # Eligible routes get the optional time first; observed routes can
+            # still gain an attribution if the entire technical queue is done.
+            def people_priority(item):
+                reviewed = copy.deepcopy(item)
+                score_candidate(reviewed)
+                return is_reportable(reviewed), reviewed.total_score
+            people.sort(key=people_priority, reverse=True)
+            self._defer_person_enrichment = False
+            try:
+                concurrency = max(getattr(self, "deep_concurrency", 1), 1)
+                for offset in range(0, len(people), concurrency):
+                    if _remaining_seconds(deadline) <= 0.5:
+                        break
+                    group = people[offset:offset + concurrency]
+                    done, _, _ = await self._deep_analyze_in_batches(group, supporting, deadline)
+                    for item in done:
+                        (refreshed if item.key in refreshed else completed_deep)[item.key] = item
+            finally:
+                self._defer_person_enrichment = True
+            post_phase_seconds["researcher_attribution"] = round(max(monotonic() - post_started, 0), 3)
+            run_audit.event("research_service_order", "observed",
+                "全部首次技术访问结束后才执行结构修复和可选人物补充；未补充人物不改变技术判断")
+
         for queue in origin_queues.values():
             origin_budget_by_key.update((item.fingerprint, item) for item in queue)
         origin_budget = list(origin_budget_by_key.values())
@@ -1483,6 +1567,7 @@ class ParadigmOrchestrator:
                 deep_budget[key] = snapshot
         refresh_budget.extend(item for item in refresh_queue if item.key in refresh_keys)
         service = scheduler.snapshot()
+        service["post_first_visit_seconds"] = post_phase_seconds
         # Temporary partial-visit placeholders are not final origin verdicts.
         # Once their parent closes, keep only the actual mechanism assessments.
         extractions = [value for value in extractions if not (
@@ -1512,6 +1597,55 @@ class ParadigmOrchestrator:
             "refresh_input_redirected_count": len(refresh_input_redirected),
             "research_service": service,
         }
+
+    async def _repair_syntheses_after_first_visits(self, completed, refreshed, supporting, deadline):
+        """One repair per parsed failed result, after every first visit.
+
+        Reuse the in-memory evidence actually read by the first request. Do not
+        repeat external searches or relax source revision/CAS checks.
+        """
+        synthesizer = getattr(self, "synthesizer", None)
+        if not isinstance(synthesizer, ParadigmSynthesizer):
+            return
+        repairs = [item for item in [*completed.values(), *refreshed.values()]
+                   if item.key in synthesizer._deferred_repairs
+                   and item.rubric_assessment.get("decision") == "incomplete"]
+        semaphore = asyncio.Semaphore(max(getattr(self, "deep_concurrency", 1), 1))
+        async def repair(item):
+            async with semaphore:
+                if _remaining_seconds(deadline) <= 0.5:
+                    return
+                originals = self.store.load_candidate_snapshots([item.key])
+                if not originals or not self.store.candidate_inputs_current(originals[0]):
+                    return
+                original = originals[0]
+                from database.paradigm_store import _persistable_candidate
+                if original.to_dict() != _persistable_candidate(item).to_dict():
+                    run_audit.event("synthesis_repair", "deferred",
+                        f"{item.key[:80]}：候选已被更新，拒绝用旧首轮响应覆盖新快照")
+                    return
+                reviewed = copy.deepcopy(item)
+                try:
+                    await asyncio.wait_for(synthesizer.run([reviewed]),
+                        timeout=max(_remaining_seconds(deadline) - 0.5, 0.001))
+                    if reviewed.rubric_assessment.get("decision") not in {"report", "observe", "reject"}:
+                        return
+                    snapshot = EvidenceEnricher.finalize([copy.deepcopy(reviewed)])[0]
+                    snapshot.deep_checkpoint_support_signature = EvidenceEnricher.supporting_signature(original, supporting)
+                    self.store.save_synthesized_checkpoint(original, snapshot)
+                    for name in ("deep_checkpoint_stage", "deep_checkpoint_input_signature",
+                                 "deep_checkpoint_support_signature", "deep_checkpoint_created_at",
+                                 "deep_checkpoint_synthesis_rubric"):
+                        setattr(reviewed, name, copy.deepcopy(getattr(snapshot, name)))
+                    (refreshed if item.key in refreshed else completed)[item.key] = reviewed
+                except (sqlite3.DatabaseError, OSError, SampleBudgetError):
+                    raise
+                except Exception as exc:
+                    # The first failed attempt and healthy peer checkpoints
+                    # survive a local repair/commit conflict.
+                    run_audit.event("synthesis_repair", "deferred",
+                        f"{item.key[:80]}：修复未提交，保留首轮检查点；{type(exc).__name__}")
+        await gather_scoped(*(repair(item) for item in repairs))
 
     async def _analyze_origins_in_batches(
         self,
@@ -1951,7 +2085,8 @@ class ParadigmOrchestrator:
                     for item in trajectory_inputs
                     if item.deep_checkpoint_stage == "synthesized"
                 }
-                if trajectory_inputs:
+                defer_people = getattr(self, "_defer_person_enrichment", False)
+                if trajectory_inputs and not defer_people:
                     try:
                         # Leave time to commit the technical result even if
                         # optional person enrichment consumes its time slice.
@@ -1985,12 +2120,16 @@ class ParadigmOrchestrator:
                         run_audit.event("researcher_attribution", "unresolved",
                             "人物补充阶段未取得完整结果，保留已完成技术判断：" + type(exc).__name__)
                         trajectory_values = trajectory_inputs
+                elif trajectory_inputs:
+                    trajectory_values = trajectory_inputs
                 else:
                     trajectory_values = []
                 completed_saver = getattr(
                     getattr(self, "store", None), "save_completed_deep_checkpoint", None
                 )
                 for candidate in trajectory_values:
+                    if defer_people:
+                        continue
                     previous = before_trajectory.get(candidate.key)
                     if previous is None or completed_saver is None:
                         continue

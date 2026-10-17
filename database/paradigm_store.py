@@ -76,6 +76,8 @@ class RouteHistoryIndex:
         self._routes: dict[str, ParadigmCandidate] = {}
         self._postings: dict[str, set[str]] = {}
         self._tokens: dict[str, set[str]] = {}
+        self._origins: dict[str, set[str]] = {}
+        self._origin_tokens: dict[str, set[str]] = {}
         self._order: dict[str, int] = {}
         for key, candidate in historical:
             self.upsert(candidate, key=key)
@@ -91,14 +93,18 @@ class RouteHistoryIndex:
         for token in _candidate_route_tokens(candidate):
             for key in self._postings.get(token, ()):
                 counts[key] = counts.get(key, 0) + 1
+        origin_matches = set().union(*(self._origins.get(identity, set())
+                                     for identity in _ordinary_origin_ids(candidate)))
         keys = sorted(
-            (key for key, count in counts.items() if count >= 2),
+            {key for key, count in counts.items() if count >= 2} | origin_matches,
             key=self._order.__getitem__,
         )
         return [(key, self._routes[key]) for key in keys]
 
     def upsert(self, candidate: ParadigmCandidate, *, key: str | None = None) -> None:
         route_key = key or candidate.key
+        for identity in self._origin_tokens.get(route_key, ()):
+            self._origins.get(identity, set()).discard(route_key)
         for token in self._tokens.get(route_key, ()):
             posting = self._postings[token]
             posting.discard(route_key)
@@ -107,6 +113,7 @@ class RouteHistoryIndex:
         if candidate.status == "rejected":
             self._routes.pop(route_key, None)
             self._tokens.pop(route_key, None)
+            self._origin_tokens.pop(route_key, None)
             return
         tokens = _candidate_route_tokens(candidate)
         if route_key not in self._order:
@@ -115,6 +122,10 @@ class RouteHistoryIndex:
         self._tokens[route_key] = tokens
         for token in tokens:
             self._postings.setdefault(token, set()).add(route_key)
+        origins = _ordinary_origin_ids(candidate)
+        self._origin_tokens[route_key] = origins
+        for identity in origins:
+            self._origins.setdefault(identity, set()).add(route_key)
 
 
 class ParadigmStore:
@@ -1822,6 +1833,8 @@ def _route_similarity(
         item.fingerprint in current_reports for item in historical.evidence
     ):
         return 0.0
+    if _ordinary_origin_ids(current) & _ordinary_origin_ids(historical):
+        return 1.0
     current_family = _route_tokens(current.route_family)
     previous_family = _route_tokens(historical.route_family)
     current_all = _candidate_route_tokens(current)
@@ -1842,6 +1855,18 @@ def _route_similarity(
     ):
         family_score = 1.0
     return 0.45 * family_score + 0.4 * content_score + 0.15 * domain_score
+
+
+def _ordinary_origin_ids(candidate: ParadigmCandidate) -> set[str]:
+    # Only a single-work hypothesis has this identity shortcut. An excluded
+    # background article or broad multi-work cluster cannot merge other routes.
+    # Full frozen inputs still own all source-revision/CAS validation.
+    from paradigms.evidence_association import distinct_origins, supported_origins
+    origins = (supported_origins(candidate) if candidate.mechanism_origin_support
+               else distinct_origins(candidate.evidence))
+    if len(origins) != 1 or origins[0].raw.get("origin_kind") == "technical_report":
+        return set()
+    return {origins[0].fingerprint}
 
 
 def _candidate_route_tokens(candidate: ParadigmCandidate) -> set[str]:

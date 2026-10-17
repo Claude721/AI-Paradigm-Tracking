@@ -94,6 +94,10 @@ def _find_similar_group(
                 and item.evidence.fingerprint == representative.evidence.fingerprint
                 and item.evidence.raw.get("origin_kind") == "technical_report"):
             continue
+        if (item.evidence.fingerprint == representative.evidence.fingerprint
+                and item.evidence.raw.get("origin_kind") != "technical_report"
+                and representative.evidence.raw.get("origin_kind") != "technical_report"):
+            return key  # One ordinary original has one hypothesis, in any language.
         if item_parent and normalize_paradigm_name(representative.lineage_parent) not in {"", item_parent}:
             continue
         other_words = _keyword_set(representative)

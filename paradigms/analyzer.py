@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -1018,6 +1019,17 @@ def _should_prefilter_origin(evidence: TechnicalEvidence) -> bool:
     )
 
 
+def unvisited_report_mechanisms(evidence: TechnicalEvidence | dict) -> set[str]:
+    """Known index children not yet assessed in this source-owned checkpoint."""
+    raw = evidence if isinstance(evidence, dict) else evidence.raw
+    seeds = raw.get("technical_report_mechanism_seeds", [])
+    completed = raw.get("technical_report_completed_mechanisms", {})
+    failures = raw.get("technical_report_mechanism_failure_counts", {})
+    expected = {_report_mechanism_key(seed, index) for index, seed in enumerate(seeds, 1)}
+    tried = set(completed) | {key for key, count in failures.items() if count > 0}
+    return expected - tried
+
+
 def _report_mechanism_key(seed: dict, index: int) -> str:
     payload = json.dumps(
         {"index": index, "seed": seed},
@@ -1273,6 +1285,11 @@ class ParadigmSynthesizer:
         self.model = model
         self.skill_loader = SkillLoader()
         self.allow_partial_sources = allow_partial_sources
+        # Production gives every candidate its first turn before repairs. The
+        # context is process-local and bound to the exact rendered request;
+        # it is never a substitute for a durable completed judgment.
+        self.defer_retries = False
+        self._deferred_repairs = {}
 
     def _get_client(self):
         if self.client is None:
@@ -1300,6 +1317,21 @@ class ParadigmSynthesizer:
         candidate.excluded_evidence = []
         candidate.mechanism_origin_support = {}
         evidence_payload = _bounded_synthesis_evidence(candidate.evidence)
+        visible_evidence_indices = {
+            int(record["index"]) for record in evidence_payload["records"]
+            if not record.get("detail_deferred_due_to_context")
+        }
+        association_contract = {
+            "mechanism_support_evidence_indices": sorted(
+                i for i in visible_evidence_indices
+                if candidate.evidence[i].evidence_type in ORIGIN_EVIDENCE_TYPES
+            ),
+            "excluded_evidence_indices": sorted(visible_evidence_indices),
+            "substantive_uptake_evidence_indices": sorted(
+                i for i in visible_evidence_indices
+                if candidate.evidence[i].evidence_type not in ORIGIN_EVIDENCE_TYPES
+            ),
+        }
         prompt = self.skill_loader.render(
             "paradigm_synthesis",
             provisional_name=candidate.name,
@@ -1322,6 +1354,7 @@ class ParadigmSynthesizer:
             mental_model_method=self.skill_loader.load("technical-mental-model"),
             lineage_parent=candidate.lineage_parent,
             evidence=json.dumps(evidence_payload, ensure_ascii=False),
+            evidence_index_contract=json.dumps(association_contract, ensure_ascii=False),
             community_coverage=json.dumps(candidate.community_coverage, ensure_ascii=False),
             community_search_receipts=json.dumps(search_receipt_summary(candidate), ensure_ascii=False),
         )
@@ -1332,21 +1365,21 @@ class ParadigmSynthesizer:
             f"证据明细 {len(evidence_payload['records'])} 条，"
             f"折叠 {evidence_payload['overflow']['count']} 条",
         )
-        visible_evidence_indices = {
-            int(record["index"])
-            for record in evidence_payload["records"]
-            if not record.get("detail_deferred_due_to_context")
-        }
         last_error: Exception | None = None
         partial_payload: dict[str, object] = {}
         validation_error = ""
-        for attempt in range(2):
+        prompt_signature = hashlib.sha256(prompt.encode()).hexdigest()
+        deferred = self._deferred_repairs.pop(candidate.key, None)
+        if deferred and deferred[0] == prompt_signature:
+            _, partial_payload, validation_error = deferred
+        for attempt in range(1 if self.defer_retries else 2):
             response = None
+            stage = "paradigm_synthesis"
             try:
                 client, model = self._get_client()
-                stage = "paradigm_synthesis"
                 request_prompt = prompt
-                if attempt and partial_payload and "原点机制关联" not in validation_error:
+                repairing = bool(partial_payload)
+                if repairing and "原点机制关联" not in validation_error:
                     stage = "paradigm_synthesis_repair"
                     request_prompt = self.skill_loader.render(
                         "paradigm_synthesis_repair",
@@ -1367,13 +1400,15 @@ class ParadigmSynthesizer:
                         ),
                         rubric_definition=rubric_prompt("final"),
                     )
-                elif attempt:
+                elif attempt or validation_error:
                     request_prompt += (
+                        "\n确定性校验失败：" + validation_error + "\n"
                         "\n上一轮输出未满足契约。请根据原材料重新输出完整 JSON，补齐所选"
                         " innovation_types 的全部 Rubric 题；心智模型必须先给主观察"
                         "坐标与低分辨率运行图，再用至少两个 resolution_ladder 节点"
                         "逐层纠偏和提高分辨率。原点机制关联必须显式给出 "
                         "mechanism_support_evidence_indices：仅列已展开且确实支持当前机制的原点 index。"
+                        "不得把官方 implementation、社区材料或示例编号放入原点支持清单。"
                     )
                 response = await run_audit.chat_completion(client, stage=stage, role="main", subject=candidate.name,
                     archive_context={"candidate": candidate},
@@ -1388,14 +1423,19 @@ class ParadigmSynthesizer:
                     payload = _merge_structured_payload(partial_payload, payload)
                 partial_payload = payload
                 try:
+                    # Failed validation must not mutate the input of a repair.
+                    # In particular an exclusion cannot renumber its sources.
+                    reviewed = copy.deepcopy(candidate)
                     self._apply_synthesis_payload(
-                        candidate,
+                        reviewed,
                         payload,
                         visible_evidence_indices=visible_evidence_indices,
                     )
                 except Exception as exc:
                     validation_error = str(exc)
                     raise
+                for field in fields(candidate):
+                    setattr(candidate, field.name, getattr(reviewed, field.name))
                 run_audit.record_llm(
                     stage=stage,
                     role="main",
@@ -1413,17 +1453,15 @@ class ParadigmSynthesizer:
                     exc,
                 )
                 run_audit.record_llm(
-                    stage=(
-                        "paradigm_synthesis_repair"
-                        if attempt and partial_payload
-                        else "paradigm_synthesis"
-                    ),
+                    stage=stage,
                     role="main",
                     model=self.model,
                     subject=f"{candidate.name} / attempt-{attempt + 1}",
                     response=response,
                     error=exc,
                 )
+        if self.defer_retries and partial_payload:
+            self._deferred_repairs[candidate.key] = (prompt_signature, partial_payload, validation_error)
         failure = evaluate_rubric(
             stage="final",
             innovation_types=candidate.innovation_types
@@ -1453,7 +1491,14 @@ class ParadigmSynthesizer:
             support = sorted(visible_origins)
         if (not isinstance(support, list) or any(type(i) is not int for i in support)
                 or len(set(support)) != len(support) or not set(support) <= visible_origins):
-            raise ValueError("原点机制关联无效：必须使用已展开的一手原点 index，不能引用折叠、外来或二次材料")
+            shape = [value if type(value) is int else "<" + type(value).__name__ + ">"
+                     for value in support[:20]] if isinstance(support, list) else "<" + type(support).__name__ + ">"
+            raise ValueError(
+                "原点机制关联无效：mechanism_support_evidence_indices 必须为无重复的整数数组；"
+                f"本次可用一手原点 index={sorted(visible_origins)}，"
+                f"收到={json.dumps(shape, ensure_ascii=False)}；"
+                "不能引用官方 implementation、折叠、外来或二次材料"
+            )
         raw_excluded = payload.get("excluded_evidence_indices", [])
         if (not isinstance(raw_excluded, list) or any(type(i) is not int for i in raw_excluded)
                 or not set(raw_excluded) <= visible_evidence_indices or set(raw_excluded) & set(support)):

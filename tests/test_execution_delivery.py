@@ -37,6 +37,7 @@ class ExecutionDeliveryTests(unittest.IsolatedAsyncioTestCase):
         # Multiple mechanisms only come from a formal report.
         for item in process.discovery.run.return_value.origins:
             item.raw["origin_kind"] = "technical_report"
+            item.raw["origin_classification_reason"] = "explicit_document_metadata:technical_report"
         base = process.synthesizer.run
         visits = set()
         async def synthesize(items):

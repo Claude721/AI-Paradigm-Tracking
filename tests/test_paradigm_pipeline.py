@@ -2183,6 +2183,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             mental_model_method="先建立低分辨率运行图，再逐层提高分辨率。",
             lineage_parent="video prediction",
             evidence="[]",
+            evidence_index_contract="{}",
             community_coverage="{}",
             community_search_receipts="{}",
         )

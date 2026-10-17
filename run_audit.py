@@ -270,6 +270,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- 本次原点完成/计划：{stats.get('current_window_origin_completed_count', 0)}/{stats.get('current_window_origin_planned_count', 0)}",
         f"- 本次路线最终判断闭合/计划：{stats.get('current_window_deep_completed_count', 0)}/{stats.get('current_window_deep_planned_count', 0)}",
         f"- 三类工作耗时（秒）：{(stats.get('research_service') or {}).get('seconds', {})}",
+        f"- 首次访问后的修复/人物补充耗时（秒）：{(stats.get('research_service') or {}).get('post_first_visit_seconds', {})}",
         "",
         "## 信源返回量（取材快照；续跑不代表本次重新请求）",
         "",
