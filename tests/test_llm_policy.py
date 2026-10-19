@@ -140,6 +140,43 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
                             response_format={"type": "json_object"})
         create.assert_awaited_once_with(model=MODEL, max_completion_tokens=100)
 
+    async def test_low_reasoning_policy_is_serialized_without_increasing_output_cap(self):
+        captured = []
+        def handle(request):
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, json={
+                "id": "offline", "object": "chat.completion", "created": 0,
+                "model": "configured-main-model",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": '{"ok":true}'}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}})
+        sdk = AsyncOpenAI(api_key="offline-test-only", base_url="https://model.example.invalid/v1",
+                          max_retries=0,
+                          http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)))
+        resolved = profile(role="main", provider="compatible-service", model="configured-main-model",
+            request_options='{"extra_body":{"thinking":{"type":"enabled"},"reasoning_effort":"low"}}')
+        try:
+            response = await ModelPolicyClient(sdk, resolved).create(
+                model=resolved.model, messages=[{"role": "user", "content": 'Return JSON {"ok":true}'}],
+                max_tokens=5600, response_format={"type": "json_object"})
+        finally:
+            await sdk.close()
+        self.assertEqual(completed_content(response), '{"ok":true}')
+        self.assertEqual(captured[0]["reasoning_effort"], "low")
+        self.assertEqual(captured[0]["thinking"], {"type": "enabled"})
+        self.assertEqual(captured[0]["max_tokens"], 5600)
+        self.assertNotIn("enable_thinking", captured[0])
+        self.assertNotIn("max_completion_tokens", captured[0])
+
+    def test_main_reasoning_change_invalidates_only_main_stage_identity(self):
+        with patch.object(config, "MAIN_AGENT_REQUEST_OPTIONS", ""):
+            original_main = _stage_cache_signature("main", MODEL, "same prompt", "same input")
+            original_sub = _stage_cache_signature("sub", MODEL, "same prompt", "same input")
+        with patch.object(config, "MAIN_AGENT_REQUEST_OPTIONS",
+                          '{"extra_body":{"thinking":{"type":"enabled"},"reasoning_effort":"low"}}'):
+            self.assertNotEqual(original_main, _stage_cache_signature("main", MODEL, "same prompt", "same input"))
+            self.assertEqual(original_sub, _stage_cache_signature("sub", MODEL, "same prompt", "same input"))
+
     async def test_explicit_empty_body_disables_provider_default_extension(self):
         create = AsyncMock()
         client = ModelPolicyClient(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),

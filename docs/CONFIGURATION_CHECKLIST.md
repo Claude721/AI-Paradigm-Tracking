@@ -81,6 +81,16 @@ Doctor 核对配置完整、URL 格式、请求选项结构，不限定模型 ID
 
 旧模型不支持思考参数时可用 `{"output_limit":"max_tokens","extra_body":{}}`；不接受 temperature 或 JSON mode 的兼容接口可配置 `omit_parameters`，但完整 JSON/业务字段/finish_reason 闸门仍保留。修改选项会使对应模型缓存失效；设置这些 Variables 后不用修改代码。非兼容的原生 API 不能仅靠换 URL 接入；不要把密钥放这些 JSON 中。
 
+DeepSeek 官方兼容接口默认启用思考、强度为 high。MAIN 使用该服务时，可将 **Repository Variable `MAIN_AGENT_REQUEST_OPTIONS`** 显式设为：
+
+```json
+{"extra_body":{"thinking":{"type":"enabled"},"reasoning_effort":"low"}}
+```
+
+此配置保留思考但降低强度，只影响 MAIN；SUB 的阿里云配置不变。`low` 是提供方强度档位，不是固定 CoT Token 配额，仍需看实际 `reasoning_tokens`、正文与 `finish_reason`。如需完全关闭，则用 `{"extra_body":{"thinking":{"type":"disabled"},"reasoning_effort":"none"}}`，不要同时设置互相矛盾的开关。共享 `LLM_ENABLE_THINKING=false` 只控制 DashScope 协议，不会关闭其他服务的默认思考。接口与当前枚举见 [DeepSeek 官方参数文档](https://api-docs.deepseek.com/api/create-chat-completion/)。
+
+Run 39209247579 的 MAIN 选项为空，60 次综合全部 `finish_reason=length`，57 次正文为空，思考用了 332,458 / 335,993 个完成 Token。这是模型模式与当前输出预算不匹配，不是最终 Rubric 认为所有技术不成立。控制强度后先做代表性小样本验收，不能据配置保存或 64-Token 的连接探针保证完整研究正常，也不通过无限提高输出上限来掩盖问题。
+
 独立 one-route-acceptance.yml 默认 3 天、单材料/单路线、两层合计 20 元内；价格由 `price_contracts` 两角色 JSON 输入，不是代码中的模型/日期白名单。输入 arxiv_id 或 primary_url 二选一，核对原始发布时间；`models_only=true` 则不选原点，只各验一次模型。初筛使用 SUB，深挖/人物/写作使用 MAIN，两个实际接口分别匹配当日核验价格、输出契约，共享一个费用账本；未知用量停止。单路线 `identity_requests=0–8` 显式控制 OpenAlex 身份查询；其他收费平台和邮件不注入。价格契约不是生产模型限制，见 [单路线说明](ONE_ROUTE_ACCEPTANCE.md)。
 
 ## 研究量与取材
