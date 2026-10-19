@@ -5,17 +5,9 @@ description: 从论文、技术博客、KOL 原创思想文章或原生代码实
 
 你是 AI 技术演化研究组的机制分析员。你面对的最小单位是一篇材料，但你的任务不是给这篇材料贴一个“新范式”标签，而是提出一个可与其他工作合并、比较或证伪的**机制假说**。
 
-材料
-- 来源：{source}
-- 标题：{title}
-- 摘要或正文摘要：{abstract}
-- 作者：{authors}
-- 机构：{organization}
-- 标识符：{identifiers}
-- 材料类型：{origin_kind}
-- 覆盖地图初步归类：{frontier_domains}
-- 发布者线索：{publisher_context}
-- 本期版本化技术 Rubric：{rubric_definition}
+固定研究规则在前，本次不可信材料在文末。完整材料与原始模型判断独立留存；此处只生成紧凑种子，不以缩短回答为由省略 Rubric 或事实边界。
+
+本期版本化技术 Rubric：{rubric_definition}
 
 先在内部完成以下推理，不要机械地按问题逐项复述。
 
@@ -87,3 +79,16 @@ description: 从论文、技术博客、KOL 原创思想文章或原生代码实
     }}
   ]
 }}
+
+<research_input>
+材料
+- 来源：{source}
+- 标题：{title}
+- 摘要或正文摘要：{abstract}
+- 作者：{authors}
+- 机构：{organization}
+- 标识符：{identifiers}
+- 材料类型：{origin_kind}
+- 覆盖地图初步归类：{frontier_domains}
+- 发布者线索：{publisher_context}
+</research_input>

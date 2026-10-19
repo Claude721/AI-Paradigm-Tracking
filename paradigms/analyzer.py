@@ -35,6 +35,7 @@ from .rubric import (
     evaluate_rubric,
     legacy_dimension_scores,
     rubric_prompt,
+    scoped_rubric_prompt,
     validate_model_answers,
     validate_innovation_types,
     valid_saved_screening,
@@ -1332,8 +1333,7 @@ class ParadigmSynthesizer:
                 if candidate.evidence[i].evidence_type not in ORIGIN_EVIDENCE_TYPES
             ),
         }
-        prompt = self.skill_loader.render(
-            "paradigm_synthesis",
+        prompt_fields = dict(
             provisional_name=candidate.name,
             route_family=candidate.route_family,
             provisional_thesis=candidate.thesis,
@@ -1347,17 +1347,20 @@ class ParadigmSynthesizer:
                 candidate.innovation_types or [candidate.novelty_type or "other"],
                 ensure_ascii=False,
             ),
-            screening_rubric=json.dumps(
-                candidate.screening_rubric, ensure_ascii=False
-            ),
-            rubric_definition=rubric_prompt("final"),
+            screening_rubric=_compact_json(_screening_prompt_context(candidate.screening_rubric)),
             mental_model_method=self.skill_loader.load("technical-mental-model"),
             lineage_parent=candidate.lineage_parent,
-            evidence=json.dumps(evidence_payload, ensure_ascii=False),
+            evidence=_compact_json(evidence_payload),
             evidence_index_contract=json.dumps(association_contract, ensure_ascii=False),
             community_coverage=json.dumps(candidate.community_coverage, ensure_ascii=False),
             community_search_receipts=json.dumps(search_receipt_summary(candidate), ensure_ascii=False),
         )
+        initial_types = candidate.innovation_types or [candidate.novelty_type or "other"]
+        initial_rubric = scoped_rubric_prompt("final", initial_types)
+        def render_prompt(rubric):
+            return self.skill_loader.render("paradigm_synthesis", **prompt_fields,
+                                          rubric_definition=rubric)
+        prompt = render_prompt(initial_rubric)
         run_audit.event(
             "paradigm_synthesis",
             "request_bounded",
@@ -1377,9 +1380,17 @@ class ParadigmSynthesizer:
             stage = "paradigm_synthesis"
             try:
                 client, model = self._get_client()
-                request_prompt = prompt
+                expanded_types = list(json.loads(initial_rubric)["type_criteria"])
+                if partial_payload:
+                    try:
+                        expanded_types = sorted(set(expanded_types) | set(
+                            validate_innovation_types(partial_payload.get("innovation_types"))))
+                    except ValueError:
+                        pass  # Malformed output still has to pass the real validator.
+                request_rubric = scoped_rubric_prompt("final", expanded_types)
+                request_prompt = render_prompt(request_rubric)
                 repairing = bool(partial_payload)
-                if repairing and "原点机制关联" not in validation_error:
+                if repairing and not any(reason in validation_error for reason in ("原点机制关联", "创新类型扩展")):
                     stage = "paradigm_synthesis_repair"
                     request_prompt = self.skill_loader.render(
                         "paradigm_synthesis_repair",
@@ -1398,7 +1409,7 @@ class ParadigmSynthesizer:
                             },
                             ensure_ascii=False,
                         ),
-                        rubric_definition=rubric_prompt("final"),
+                        rubric_definition=request_rubric,
                     )
                 elif attempt or validation_error:
                     request_prompt += (
@@ -1423,6 +1434,10 @@ class ParadigmSynthesizer:
                     payload = _merge_structured_payload(partial_payload, payload)
                 partial_payload = payload
                 try:
+                    returned_types = payload.get("innovation_types", initial_types)
+                    returned_types = validate_innovation_types(returned_types)
+                    if set(returned_types) - set(expanded_types):
+                        raise ValueError("创新类型扩展：须先展开新增类型的完整 Rubric，再基于原文复核；不能凭模型记忆补题")
                     # Failed validation must not mutate the input of a repair.
                     # In particular an exclusion cannot renumber its sources.
                     reviewed = copy.deepcopy(candidate)
@@ -1607,6 +1622,29 @@ class ParadigmSynthesizer:
             ]
 
 
+def _compact_json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _screening_prompt_context(assessment) -> dict:
+    """Keep every model answer, not its duplicated scoring explanation.
+
+    The immutable full assessment remains in the candidate/archive/CAS input.
+    Objective scores, weights and repeated criterion text are derived in code;
+    they must not become another source of technical facts for MAIN.
+    """
+    if not isinstance(assessment, dict):
+        return {}
+    result = {key: assessment[key] for key in ("version", "stage", "decision", "innovation_types")
+              if key in assessment}
+    if isinstance(assessment.get("answers"), list):
+        result["answers"] = [
+            {key: row[key] for key in ("criterion_id", "answer", "evidence") if key in row}
+            if isinstance(row, dict) else row for row in assessment["answers"]
+        ]
+    return result
+
+
 def _bounded_synthesis_evidence(
     evidence: list[TechnicalEvidence],
     *,
@@ -1710,10 +1748,14 @@ def _bounded_synthesis_evidence(
             "historical": bool(item.raw.get("historical")),
             "relationship_hint": str(item.raw.get("relationship", ""))[:120],
         }
+        # Remove only exact duplication inside the already-visible excerpt.
+        # An extra abstract fact or a fact outside that excerpt must survive.
+        if detailed["summary"] and detailed["summary"] in detailed["document_excerpt"]:
+            detailed.pop("summary")
         # Omit empty optional fields, not facts. This removes repeated schema
         # scaffolding without shrinking the evidence budget or its denominator.
         detailed = {key: value for key, value in detailed.items() if value not in ("", [], {}, None)}
-        encoded_length = len(json.dumps(detailed, ensure_ascii=False))
+        encoded_length = len(_compact_json(detailed))
         if used + encoded_length <= char_budget:
             records.append(detailed)
             used += encoded_length
@@ -1732,7 +1774,7 @@ def _bounded_synthesis_evidence(
             "detail_deferred_due_to_context": True,
         }
         compact = {key: value for key, value in compact.items() if value not in ("", [], {}, None)}
-        compact_length = len(json.dumps(compact, ensure_ascii=False))
+        compact_length = len(_compact_json(compact))
         if used + compact_length <= char_budget:
             records.append(compact)
             used += compact_length

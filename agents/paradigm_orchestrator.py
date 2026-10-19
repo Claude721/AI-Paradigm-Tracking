@@ -2152,10 +2152,27 @@ class ParadigmOrchestrator:
                             trajectory_values = trajectory_inputs
                         else:
                             async def enrich_and_analyze_people():
+                                # Identity facts can affect publisher admission;
+                                # never gate that lookup on an admission which
+                                # might itself need those facts. Only optional
+                                # narrative generation is publication-scoped.
                                 identity = getattr(self.enricher, "enrich_people", None)
                                 if callable(identity):
-                                    await identity(trajectory_inputs)
-                                return await self.trajectory.run(trajectory_inputs)
+                                    enriched = await identity(trajectory_inputs)
+                                    _validate_candidate_stage_output(trajectory_inputs, enriched, "researcher_identity")
+                                inputs = trajectory_inputs
+                                if getattr(self, "delivery_contract_version", None) == 5:
+                                    inputs = _publication_people_inputs(trajectory_inputs,
+                                        window_days=getattr(self, "ordinary_discovery_lookback_days", config.SOURCING_LOOKBACK_DAYS))
+                                    if len(inputs) != len(trajectory_inputs):
+                                        run_audit.event("researcher_attribution", "publication_scoped",
+                                            f"技术判断全部保留；人物补充 {len(inputs)}/{len(trajectory_inputs)} 条，其余明确未执行")
+                                if not inputs:
+                                    return trajectory_inputs
+                                values = await self.trajectory.run(inputs)
+                                _validate_candidate_stage_output(inputs, values, "researcher_trajectory")
+                                by_key = {item.key: item for item in values}
+                                return [by_key.get(item.key, item) for item in trajectory_inputs]
                             trajectory_values = await asyncio.wait_for(
                                 enrich_and_analyze_people(), timeout=min(person_seconds, 60.0),
                             )
@@ -2944,6 +2961,38 @@ def _record_deferred_candidate(candidate, reason: str) -> None:
             "rubric_decision": "not_executed",
         }
     )
+
+
+def _publication_people_inputs(candidates, *, window_days):
+    """Limit optional prose, not technical research or public identity lookup.
+
+    Evaluate on a copy: scheduling a biography must not commit a new technical
+    verdict. Skipped biographies still close the technical checkpoint with an
+    explicit not-executed receipt, so they do not cause endless research reruns.
+    """
+    selected = []
+    for candidate in candidates:
+        reviewed = copy.deepcopy(candidate)
+        # Legacy publisher derivation can still consult continuity diagnostics.
+        # Use only a scheduling upper bound so suppressing a biography cannot
+        # suppress its own future admission. Never persist this hypothetical
+        # value or use it to admit/publish the real candidate.
+        for person in reviewed.researchers:
+            if person.attribution_analysis_status != "completed":
+                person.trajectory_consistency = 10.0
+        score_candidate(reviewed)
+        freshness = assess_candidate_freshness(reviewed,
+            reference_time=research_now(), window_days=window_days)
+        if is_reportable(reviewed) and freshness.get("decision") == "include":
+            selected.append(candidate)
+            continue
+        for person in key_researcher_profiles(candidate.researchers, config.PARADIGM_KEY_RESEARCHER_LIMIT):
+            if person.attribution_analysis_status != "completed":
+                person.attribution_analysis_status = "not_executed"
+                note = "本轮未进入发表集合，未调用可选人物模型；保留署名和公开档案，不改变技术判断"
+                if note not in person.contact_search_notes:
+                    person.contact_search_notes.append(note)
+    return selected
 
 
 def _delivery_profile_ready(candidate) -> bool:

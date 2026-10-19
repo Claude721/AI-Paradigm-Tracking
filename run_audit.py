@@ -85,6 +85,12 @@ class RunAudit:
         content = getattr(message, "content", "") or ""
         total = getattr(usage, "total_tokens", None)
         usage_reported = type(total) is int and total >= 0 and (not content or total > 0)
+        cached = _optional_usage_count(getattr(prompt_details, "cached_tokens", None))
+        if cached is None:
+            cached = _optional_usage_count(getattr(usage, "prompt_cache_hit_tokens", None))
+        prompt_count = _optional_usage_count(getattr(usage, "prompt_tokens", None))
+        if prompt_count is None or (cached is not None and cached > prompt_count):
+            cached = None
         self.llm_calls.append(
             {
                 "stage": stage,
@@ -99,7 +105,7 @@ class RunAudit:
                 ),
                 "total_tokens": _integer(getattr(usage, "total_tokens", 0)),
                 "reasoning_tokens": _optional_usage_count(getattr(completion_details, "reasoning_tokens", None)),
-                "cached_tokens": _optional_usage_count(getattr(prompt_details, "cached_tokens", None)),
+                "cached_tokens": cached,
                 "finish_reason": _clean(
                     str(getattr(first_choice, "finish_reason", "") or ""), 40
                 ),
@@ -198,6 +204,8 @@ class RunAudit:
                 _integer(item.get("reasoning_tokens")) for item in self.llm_calls
             ),
             "llm_reasoning_usage_missing_count": sum(item.get("reasoning_tokens") is None for item in self.llm_calls),
+            "llm_cached_prompt_tokens": sum(_integer(item.get("cached_tokens")) for item in self.llm_calls),
+            "llm_cache_usage_missing_count": sum(item.get("cached_tokens") is None for item in self.llm_calls),
             "llm_total_tokens": sum(
                 _integer(item.get("total_tokens")) for item in self.llm_calls
             ),
@@ -371,6 +379,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
             f"- 用量未确认：{llm.get('llm_unreported_usage_count', 0)} 次；不能将缺失用量视为测得零",
             f"- 输入 tokens：{llm['llm_prompt_tokens']}",
             f"- 输出 tokens：{llm['llm_completion_tokens']}",
+            f"- 已确认缓存命中输入 tokens：{llm.get('llm_cached_prompt_tokens', 0)}；细分未报告 {llm.get('llm_cache_usage_missing_count', 0)} 次，不视为零命中；命中部分仍包含在输入总数内",
             f"- 已确认 reasoning tokens 下限：{llm['llm_reasoning_tokens']}；细分未报告 {llm.get('llm_reasoning_usage_missing_count', 0)} 次，不能当作零思考",
             f"- 合计 tokens：{llm['llm_total_tokens']}",
         ]

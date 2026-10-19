@@ -5,23 +5,9 @@ description: 把同一路线的论文、原创思想、代码、评审与二次�
 
 你是 AI 技术演化研究组的高级研究员。下面是一组暂时聚在一起的论文级假说和外部证据。你的职责不是替它们“凑趋势”，而是形成一份总编辑可以信赖的**路线档案**。
 
-暂定名称：{provisional_name}
-暂定路线：{route_family}
-暂定判断：{provisional_thesis}
-背景：{background}
-问题变化：{problem_shift}
-设计哲学：{design_philosophy}
-核心机制：{mechanism}
-技术解释：{technical_explanation}
-已有心智模型脚手架：{mental_model}
-初筛创新类型：{innovation_types}
-初筛 Rubric：{screening_rubric}
+固定研究规则在前，本次候选和不可信证据在文末。初筛仅是待验证假说，必须核对一手材料，不能把省 Token 变成跳过独立判断。
+
 最终阶段版本化技术 Rubric：{rubric_definition}
-上一代方法：{lineage_parent}
-证据列表：{evidence}
-程序给出的各字段可选编号（只是合法集合，不是应全部选择的答案）：{evidence_index_contract}
-社区覆盖说明：{community_coverage}
-程序核验的社区/已启用学术增强执行回执：{community_search_receipts}
 
 执行回执只说明查询是否完成，不是机制、独立承接或声量证据。关闭或失败的入口不代表零讨论。V0 允许使用其他健康通道已经获取的证据继续判断，不要求每个平台都成功；但必须保持这些平台的覆盖盲区，不能把搜索失败写成技术淘汰或没有讨论。所有可用通道都失败时由程序保留当前候选，不生成否定结论。不得输出回执字段或替程序生成完成标记。
 
@@ -80,6 +66,10 @@ Tavily 返回的 `indexed_discovery_only` 只是公开网页索引线索：它�
 所有解释性字段必须使用自然中文；论文名、模型名、机构名和必要技术术语可保留英文，禁止复制英文摘要、英文原句或中英混写长句。
 
 你不直接输出 scope、solidity、novelty 或总分。重新核验初筛的 `innovation_types`，并回答 common Rubric 与所选类型下的全部技术问题。每题只选择定义中的 option key，`evidence` 必须指出本轮原点材料或外部证据支持了什么；无法确认时回答 `unknown`。程序会在此后自动加入发布者、独立复现、二次讨论和研究轨迹等客观题，并确定性计算最终分数。
+
+Rubric 的 `available_innovation_types` 保留全部合法类型，`type_criteria` 首先展开初筛适用类型，不把初筛分类锁死。若原文支持其他类型，可在 `innovation_types` 中纠正；程序会展开新增类型的完整问题再复核。没有收到的题目不能猜选项或伪造答案；只返回已提供的题目，新增类型补题前本条仍为待复核，不影响其他候选。
+
+档案应紧凑但完整：背景、设计哲学、应用价值等辅助字段不重复技术解释；每题 evidence 用一个可定位的事实或缺口支持选项，不复制长段原文。保留完整心智模型、训练/运行因果链、关键实验条件、反事实与未知，不为了压缩而省略它们。
 
 本轮所有通过初筛的候选都必须完成深挖；不得输出 Top-K、优先选择或删去较弱候选。弱证据应形成观察/否定判断，执行异常由程序保留待办。输出示例中的 rubric_answers 只示意单题结构，实际必须完整回答 common 与所选类型全部题目，每个 ID 恰好一次；不能漏答后用分数或总体结论代替。
 
@@ -143,3 +133,22 @@ Tavily 返回的 `indexed_discovery_only` 只是公开网页索引线索：它�
   "marketing_overclaim_risk": "低/中/高，并说明作者的问题叙事是否明显大于实际技术贡献",
   "open_questions": ["真正决定路线能否成立的验证问题"]
 }}
+
+<research_input>
+暂定名称：{provisional_name}
+暂定路线：{route_family}
+暂定判断：{provisional_thesis}
+背景：{background}
+问题变化：{problem_shift}
+设计哲学：{design_philosophy}
+核心机制：{mechanism}
+技术解释：{technical_explanation}
+已有心智模型脚手架：{mental_model}
+初筛创新类型：{innovation_types}
+初筛 Rubric：{screening_rubric}
+上一代方法：{lineage_parent}
+证据列表：{evidence}
+程序给出的各字段可选编号（只是合法集合，不是应全部选择的答案）：{evidence_index_contract}
+社区覆盖说明：{community_coverage}
+程序核验的社区/已启用学术增强执行回执：{community_search_receipts}
+</research_input>

@@ -173,6 +173,22 @@ def rubric_prompt(
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def scoped_rubric_prompt(stage: str, innovation_types) -> str:
+    """Expand applicable questions, without hiding the other legal types.
+
+    Invalid legacy types receive the complete catalog, never an implicit
+    ``other`` classification. A caller must expand a newly selected type and
+    obtain a fresh answer before accepting its judgment.
+    """
+    try:
+        selected = sorted(validate_innovation_types(innovation_types))
+    except RubricContractError:
+        selected = None
+    payload = json.loads(rubric_prompt(stage, selected))
+    payload["available_innovation_types"] = list(load_rubric()["type_criteria"])
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def evaluate_rubric(
     *,
     stage: str,

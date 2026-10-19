@@ -5,14 +5,6 @@ description: 对 Technical Report 机制索引中的单个机制回答版本化 
 
 你是 AI 技术演化研究组的机制审计员。系统报告已经由上一步拆成独立机制；你现在只评估下面这**一个机制**，不要新增其他机制，也不要重写整份报告。
 
-报告：{report_title}
-发布组织：{organization}
-报告摘要：{report_summary}
-
-<mechanism_seed>
-{mechanism_seed}
-</mechanism_seed>
-
 <screening_rubric>
 {rubric_definition}
 </screening_rubric>
@@ -48,3 +40,12 @@ description: 对 Technical Report 机制索引中的单个机制回答版本化 
     ]
   }}
 }}
+
+<research_input>
+报告：{report_title}
+发布组织：{organization}
+报告摘要：{report_summary}
+<mechanism_seed>
+{mechanism_seed}
+</mechanism_seed>
+</research_input>
