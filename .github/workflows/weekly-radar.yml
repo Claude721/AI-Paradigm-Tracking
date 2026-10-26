@@ -45,14 +45,14 @@ on:
         default: ""
         type: string
   schedule:
-    # 避开整点的 Actions 高峰；使用上海时区，无需手算 UTC。
-    - cron: "15 9 * * 5"
+    # 北京时间每周一 08:00；GitHub 高峰排队可能使实际启动稍晚。
+    - cron: "0 8 * * 1"
       timezone: "Asia/Shanghai"
 
 permissions:
   contents: read
   # 恢复历史待交付后，当前 job 会在状态快照上传成功后自动排队一次本周
-  # 新研究；否则一次成功的续投会静默吞掉周五研究任务。
+  # 新研究；否则一次成功的续投会静默吞掉本周研究任务。
   actions: write
 
 concurrency:
