@@ -8,21 +8,25 @@ from datetime import datetime, timezone
 
 
 def initialize(conn):
-    conn.executescript("""
+    # Keep the caller's schema write lock and rollback boundary intact.
+    for statement in ("""
         CREATE TABLE IF NOT EXISTS provider_credit_periods (
             provider TEXT NOT NULL, period TEXT NOT NULL,
             baseline_credits INTEGER NOT NULL, observed_credits INTEGER NOT NULL,
             observed_through INTEGER NOT NULL,
             PRIMARY KEY(provider, period)
         );
+    """, """
         CREATE TABLE IF NOT EXISTS provider_credit_requests (
             request_id INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL, period TEXT NOT NULL,
             credits INTEGER NOT NULL, status TEXT NOT NULL
         );
+    """, """
         CREATE INDEX IF NOT EXISTS idx_provider_credit_requests
             ON provider_credit_requests(provider, period);
-    """)
+    """):
+        conn.execute(statement)
 
 
 def _integer(value):

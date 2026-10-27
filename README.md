@@ -205,6 +205,8 @@ python scripts/offline_checks.py # 清除生产配置、拒绝网络的发布门
 python scripts/source_audit.py --list  # 无网络列输入清单，故意不读 .env
 ```
 
+提交或 PR 会自动触发“离线发布验收”，在 Ubuntu 的 Python 3.11、3.12 上分别执行完整发布门，无生产 Secrets、研究 API 或邮件调用。先确认两项 CI 均通过，再授权正式运行；生产 Workflow 自身的离线发布门仍保留，不能以跳过失败测试代替修复。
+
 以下操作需明确授权真实访问、费用或邮件：
 
 ```bash

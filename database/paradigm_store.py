@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -132,6 +133,7 @@ class ParadigmStore:
     def __init__(self, db_path: Path | str | None = None):
         self.db_path = Path(db_path) if db_path else config.PARADIGM_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._transaction_context = threading.local()
         self._init_db()
         from database.research_campaign import CampaignStore
         self.campaigns = CampaignStore(self)
@@ -140,7 +142,7 @@ class ParadigmStore:
 
     @contextmanager
     def _connect(self):
-        active = getattr(self, "_active_transaction", None)
+        active = getattr(self._transaction_context, "connection", None)
         if active is not None:
             yield active
             return
@@ -155,20 +157,23 @@ class ParadigmStore:
     @contextmanager
     def transaction(self):
         """Nest store operations into one atomic, version-checked checkpoint."""
-        if getattr(self, "_active_transaction", None) is not None:
+        if getattr(self._transaction_context, "connection", None) is not None:
             yield
             return
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._active_transaction = conn
+            self._transaction_context.connection = conn
             try:
                 yield
             finally:
-                self._active_transaction = None
+                self._transaction_context.connection = None
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
-            conn.executescript(
+        # Serialize schema inspection and every migration on the database,
+        # including cold starts from independent processes. executescript()
+        # would implicitly commit and release this lock between migrations.
+        with self.transaction(), self._connect() as conn:
+            for statement in (
                 """
                 CREATE TABLE IF NOT EXISTS evidence_state (
                     fingerprint TEXT PRIMARY KEY,
@@ -181,6 +186,8 @@ class ParadigmStore:
                     last_seen_at TEXT NOT NULL,
                     last_analyzed_at TEXT
                 );
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS paradigms (
                     paradigm_key TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -193,6 +200,8 @@ class ParadigmStore:
                     last_reported_signature TEXT,
                     last_reported_at TEXT
                 );
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS report_deliveries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     paradigm_key TEXT NOT NULL,
@@ -204,6 +213,8 @@ class ParadigmStore:
                     delivery_key TEXT NOT NULL DEFAULT '',
                     UNIQUE(paradigm_key, report_signature)
                 );
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS report_outbox (
                     delivery_key TEXT PRIMARY KEY,
                     report_date TEXT NOT NULL,
@@ -221,6 +232,8 @@ class ParadigmStore:
                     delivered_at TEXT,
                     quarantined_at TEXT
                 );
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS report_render_fragments (
                     delivery_key TEXT NOT NULL,
                     fragment_key TEXT NOT NULL,
@@ -229,27 +242,40 @@ class ParadigmStore:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(delivery_key, fragment_key)
                 );
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS paradigm_evidence (
                     paradigm_key TEXT NOT NULL,
                     fingerprint TEXT NOT NULL,
                     first_linked_at TEXT NOT NULL,
                     PRIMARY KEY(paradigm_key, fingerprint)
                 );
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS radar_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                """,
+                """
                 CREATE INDEX IF NOT EXISTS idx_evidence_last_seen
                     ON evidence_state(last_seen_at DESC);
+                """,
+                """
                 CREATE INDEX IF NOT EXISTS idx_paradigm_score
                     ON paradigms(total_score DESC);
+                """,
+                """
                 CREATE INDEX IF NOT EXISTS idx_report_outbox_status
                     ON report_outbox(status, created_at);
+                """,
+                """
                 CREATE INDEX IF NOT EXISTS idx_report_fragments_delivery
                     ON report_render_fragments(delivery_key);
                 """
-            )
+            ):
+                conn.execute(statement)
             # Version 3 adds a delivery identifier to legacy delivery rows.
             # CREATE TABLE IF NOT EXISTS does not add columns to an existing table.
             delivery_columns = {

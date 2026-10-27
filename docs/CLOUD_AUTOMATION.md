@@ -107,6 +107,8 @@ contents: read；actions: write 只用于已有 outbox 恢复后的新研究或�
 
 离线测试清除生产 Variables/Secrets、忽略 .env，代理拒绝网络；还隔离 GITHUB_STEP_SUMMARY/OUTPUT/ENV/STATE/PATH，防止 fixture 污染真实 Runner 结果。
 
+独立的 `offline-regression.yml` 在 push / pull_request / 手动触发时，用 Ubuntu 的 Python 3.11、3.12 各跑完整发布门。它只有 contents: read，不映射生产 Secrets，不恢复生产状态、不发信、不自动排队研究。保存的 `offline-regression-<python>-<run_id>-<attempt>` 只有去敏测试与代码身份记录，14 天保留。生产 `weekly-radar.yml` 仍先过同一完整发布门；两项 CI 通过后才进行授权正式验收，不用线上付费运行发现本可离线暴露的错误。需要平台侧强制阻止合并时，可另行把两项 CI 设为分支保护检查；代码新增 CI 不会自动修改仓库保护设置。
+
 PARADIGM_AUTO_RESUME_ENABLED=false 默认不扩大支出。开启后只在状态上传成功、同批纯预算延期、次数/时间/已确认 tokens 未达限时排队；覆盖/执行故障与未知用量停止自动链。MAX_TOKENS 是轮间停止线，不是人民币单请求硬费用上限。
 
 ## 生产验收

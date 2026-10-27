@@ -22,8 +22,13 @@ from paradigms.models import (
 )
 
 
+_ACTIVE_CAMPAIGN_INDEX = """CREATE UNIQUE INDEX idx_one_active_campaign
+    ON research_campaigns((1)) WHERE status NOT IN ('delivered', 'superseded')"""
+
+
 def initialize(conn):
-    conn.executescript("""
+    """Called under the store's schema transaction, never implicitly commit it."""
+    for statement in ("""
         CREATE TABLE IF NOT EXISTS research_campaigns (
             campaign_id TEXT PRIMARY KEY,
             reference_time TEXT NOT NULL,
@@ -39,9 +44,7 @@ def initialize(conn):
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
-        DROP INDEX IF EXISTS idx_one_active_campaign;
-        CREATE UNIQUE INDEX idx_one_active_campaign
-            ON research_campaigns((1)) WHERE status NOT IN ('delivered', 'superseded');
+    """, """
         CREATE TABLE IF NOT EXISTS campaign_work (
             campaign_id TEXT NOT NULL,
             kind TEXT NOT NULL,
@@ -53,6 +56,7 @@ def initialize(conn):
             updated_at TEXT NOT NULL,
             PRIMARY KEY(campaign_id, kind, object_key)
         );
+    """, """
         CREATE TABLE IF NOT EXISTS research_attempts (
             attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
             campaign_id TEXT NOT NULL,
@@ -64,6 +68,7 @@ def initialize(conn):
             started_at TEXT NOT NULL,
             finished_at TEXT
         );
+    """, """
         CREATE TABLE IF NOT EXISTS research_stage_cache (
             stage TEXT NOT NULL,
             input_signature TEXT NOT NULL,
@@ -71,7 +76,16 @@ def initialize(conn):
             created_at TEXT NOT NULL,
             PRIMARY KEY(stage, input_signature)
         );
-    """)
+    """):
+        conn.execute(statement)
+    existing = conn.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_one_active_campaign'").fetchone()
+    if existing and "".join(existing[0].split()).casefold() != "".join(_ACTIVE_CAMPAIGN_INDEX.split()).casefold():
+        # Upgrade the old predicate once, with no interval in which another
+        # connection can create an extra active campaign or replace the index.
+        conn.execute("DROP INDEX idx_one_active_campaign")
+        existing = None
+    if not existing:
+        conn.execute(_ACTIVE_CAMPAIGN_INDEX)
 
 
 def _now():

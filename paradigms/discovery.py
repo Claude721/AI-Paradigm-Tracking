@@ -46,6 +46,8 @@ from .models import (
     TechnicalEvidence,
     nonnegative_number,
     _evidence_datetime,
+    technical_evidence_from_dict,
+    safe_public_contact_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -199,54 +201,36 @@ class ParadigmDiscovery:
         native_batches = native_and_repository_batches[:-1]
         repository_batch = native_and_repository_batches[-1]
 
-        origins = [_raw_to_origin(item) for item in arxiv_raw]
-        supporting = [_hf_to_support(item) for item in hf_raw]
+        origins = _convert_records(arxiv_raw, lambda item: [_raw_to_origin(item)], source_health[self.arxiv.source_name])
         # HF Daily Papers 可能覆盖 arXiv 查询词之外的重要论文，因此也作为候补原始论文。
-        origins.extend(_raw_to_origin(item) for item in hf_raw)
-        origins.extend(
-            _follow_builder_blog_to_origin(item)
-            for item in follow_raw
-            if item.source == "follow-builders-blog"
-            and _within_lookback(item, self.high_signal_lookback_days)
-        )
-        supporting.extend(
-            _follow_builder_to_support(item)
-            for item in follow_raw
-            if item.source != "follow-builders-blog"
-            and _within_lookback(item, self.broad_lookback_days)
-        )
-        for batch in native_batches:
-            origins.extend(
-                item for item in batch if item.evidence_type in ORIGIN_EVIDENCE_TYPES
-            )
-            supporting.extend(
-                item for item in batch if item.evidence_type not in ORIGIN_EVIDENCE_TYPES
-            )
-        origins.extend(
-            item
-            for item in repository_batch
-            if item.evidence_type in ORIGIN_EVIDENCE_TYPES
-        )
-        supporting.extend(
-            item
-            for item in repository_batch
-            if item.evidence_type not in ORIGIN_EVIDENCE_TYPES
-        )
+        hf_evidence = _convert_records(hf_raw, lambda item: [_raw_to_origin(item), _hf_to_support(item)],
+                                       source_health[self.hf.source_name])
+        def convert_follow(item):
+            blog = item.source == "follow-builders-blog"
+            days = self.high_signal_lookback_days if blog else self.broad_lookback_days
+            if not _within_lookback(item, days):
+                return []
+            return [_follow_builder_blog_to_origin(item) if blog else _follow_builder_to_support(item)]
+        additional = [*hf_evidence, *_convert_records(follow_raw, convert_follow,
+                                                       source_health[self.follow_builders.source_name])]
+        for source, records in zip([*self.evidence_sources, self.official_repositories],
+                                   [*native_batches, repository_batch]):
+            additional.extend(_convert_records(records, lambda item: [item], source_health[source.source_name]))
+        origins.extend(item for item in additional if item.evidence_type in ORIGIN_EVIDENCE_TYPES)
+        supporting = [item for item in additional if item.evidence_type not in ORIGIN_EVIDENCE_TYPES]
 
         source_counts = {
-            "arxiv": len(arxiv_raw),
-            "huggingface_daily_papers": len(hf_raw),
-            "follow_builders": len(follow_raw),
+            "arxiv": source_health[self.arxiv.source_name]["results"],
+            "huggingface_daily_papers": source_health[self.hf.source_name]["results"],
+            "follow_builders": source_health[self.follow_builders.source_name]["results"],
         }
         source_counts.update(
             {
-                source.source_name: len(batch)
+                source.source_name: source_health[source.source_name]["results"]
                 for source, batch in zip(self.evidence_sources, native_batches)
             }
         )
-        source_counts[self.official_repositories.source_name] = len(
-            repository_batch
-        )
+        source_counts[self.official_repositories.source_name] = source_health[self.official_repositories.source_name]["results"]
 
         # A resumed source can return today's feed even at an older business
         # clock. Do not let post-cutoff events expand the frozen campaign.
@@ -468,6 +452,49 @@ class ParadigmDiscovery:
             "elapsed_seconds": round(max(time.monotonic() - started, 0.0), 3),
             "timeout_seconds": self.source_timeout_seconds,
         }
+
+
+def _convert_records(records, converter, health):
+    """Contain adapter-record faults before merge, sorting or snapshot writes.
+
+    A healthy HTTP/list response is not proof that each nested object is valid.
+    Reject only that object (not a technical verdict), retaining healthy peers
+    and transport failures without logging external payloads or credentials.
+    """
+    result, rejected = [], 0
+    for record in records:
+        try:
+            values = [technical_evidence_from_dict(item.to_dict()) for item in converter(record)]
+            for item in values:
+                if (any(not isinstance(value, str) for value in [*item.authors, *item.keywords])
+                        or any(not isinstance(key, str) or not isinstance(value, str)
+                               for key, value in item.identifiers.items())):
+                    raise ValueError("发现记录的署名/关键词/标识符结构无效")
+                for field in ("frontier_domains", "selection_signals", "also_seen_on"):
+                    value = item.raw.get(field)
+                    if value is not None and (not isinstance(value, list)
+                            or any(not isinstance(label, str) for label in value)):
+                        raise ValueError("发现记录的合并元数据结构无效")
+                    if field in item.raw and value is None:
+                        item.raw[field] = []
+                for field in ("origin_classification_reason", "document_format", "system_layer_count"):
+                    if isinstance(item.raw.get(field), (dict, list)):
+                        raise ValueError("发现记录的分类元数据结构无效")
+                if item.url and not safe_public_contact_target("source", item.url):
+                    raise ValueError("发现记录 URL 无效")
+                item.fingerprint
+                json.dumps(item.to_dict(), allow_nan=False)
+        except (AttributeError, TypeError, ValueError, OverflowError, RecursionError):
+            rejected += 1
+            continue
+        result.extend(values)
+    if rejected:
+        health.update(raw_results=len(records), results=len(records) - rejected, rejected_records=rejected)
+        if health["status"] in {"completed", "completed_after_retry", "completed_with_warnings"}:
+            health["status"] = "completed_with_warnings" if result else "query_failed"
+        health["error_type"] = health.get("error_type") or "RecordContractError"
+        logger.warning("[%s] 隔离 %s 条格式错误记录；其余材料继续，不形成技术否定", health["source"], rejected)
+    return result
 
 
 def _raw_to_origin(item: RawProject) -> TechnicalEvidence:
