@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from runtime_clock import research_now
@@ -38,6 +39,7 @@ from .landscape import (
     arxiv_priority_author_query_plan, arxiv_query_plan,
     classify_frontier_domains, coverage_report,
 )
+from .publication import nonresearch_page_reason
 from .models import (
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
@@ -157,6 +159,12 @@ class ParadigmDiscovery:
         plans = {}
         for source in self._sources():
             value = {field: getattr(source, field) for field in ("lookback_days", "high_signal_lookback_days", "seed_arxiv_ids", "venues", "searches", "pages", "organizations", "feed_base_url") if hasattr(source, field)}
+            if include_adapters:
+                value["origin_input_policy"] = hashlib.sha256(Path(__file__).with_name("publication.py").read_bytes()).hexdigest()
+                if isinstance(source, ResearchFeedSource):
+                    root = Path(__file__).parent.parent / "sources"
+                    value["html_body_policy"] = hashlib.sha256(b"".join(
+                        (root / name).read_bytes() for name in ("priority_research_source.py", "research_feed_source.py"))).hexdigest()
             if isinstance(source, PriorityResearchPageSource) and include_adapters:
                 # An adapter/catalog correction must invalidate its discovery
                 # receipt; unchanged sources and durable task scope survive.
@@ -244,7 +252,15 @@ class ParadigmDiscovery:
         # clock. Do not let post-cutoff events expand the frozen campaign.
         origins = [item for item in origins if not (date := _evidence_datetime(item.published_at)) or date <= research_now() or item.raw.get("explicit_seed")]
         supporting = [item for item in supporting if not (date := _evidence_datetime(item.published_at)) or date <= research_now()]
-        origins = _merge_origins(origins)
+        origin_input_exclusions, usable_origins = [], []
+        for item in origins:
+            reason = nonresearch_page_reason(item.url, item.summary, title=item.title)
+            if reason:
+                origin_input_exclusions.append({"fingerprint": item.fingerprint, "url": item.url,
+                    "source": item.source, "reason": reason, "retryable": reason == "access_challenge"})
+            else:
+                usable_origins.append(item)
+        origins = _merge_origins(usable_origins)
         for item in origins:
             if not item.raw.get("frontier_domains"):
                 item.raw["frontier_domains"] = classify_frontier_domains(
@@ -286,6 +302,7 @@ class ParadigmDiscovery:
         )
         coverage["recall_lanes"] = self.arxiv.recall_coverage()
         coverage["source_health"] = source_health
+        coverage["origin_input_exclusions"] = origin_input_exclusions
         if self.bounded:
             coverage["acquisition_scope"] = {"kind": "bounded_recall",
                 "arxiv_results_per_query": config.PARADIGM_SOURCE_QUERY_LIMIT,

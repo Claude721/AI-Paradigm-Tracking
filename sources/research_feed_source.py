@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from runtime_clock import research_now
@@ -14,6 +15,7 @@ import httpx
 import config
 from paradigms.models import EvidenceType, TechnicalEvidence
 from sources.feed_contract import feed_nodes, feed_text, feed_link
+from sources.priority_research_source import _ArticleParser
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +94,10 @@ class ResearchFeedSource:
             title = _text(node, "title")
             link = feed_link(node, feed_url)
             summary = _text(node, "description") or _text(node, "summary") or _text(node, "content")
+            if re.search(r"<(?:p|div|article|main|html|nav|header|section)\b", summary, re.I):
+                article = _ArticleParser(link)
+                article.feed(summary)
+                summary = article.text
             published = _text(node, "pubDate") or _text(node, "published")
             modified = _text(node, "updated")
             published_dt = _parse_date(published)

@@ -125,10 +125,10 @@ class ProductionChainReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(not blocking_searches(item, allow_partial=True) for item in done))
         self.assertTrue(all(item.deep_checkpoint_stage == "research_complete" for item in done))
 
-    async def test_real_chain_all_providers_failed_stays_pending_without_model(self):
+    async def test_real_chain_all_supplementary_providers_failed_still_reviews_primary_material(self):
         done, budget, failed, _, models = await self.run_chain(outage=True)
-        self.assertEqual((done, budget, len(failed), models), ([], [], 3, 0))
-        self.assertTrue(all(item.status == "pending_deep" for item in failed))
+        self.assertEqual((len(done), budget, failed, models), (3, [], [], 3))
+        self.assertTrue(all(item.community_search_receipts["hackernews"]["status"] == "failed" for item in done))
 
     async def test_production_shaped_64_candidate_cohort_survives_12_request_cap(self):
         done, budget, failed, calls, models = await self.run_chain(cap=12, total=64)

@@ -6,7 +6,7 @@
 
 - `RESEARCH_ARCHIVE_ENABLED=true` 默认开启；`.private/research_archive/` 收集审阅 JSON。可显式设为 false 暂停留存；不删除已有数据。`RESEARCH_ARCHIVE_DIR` 仅本地可换成专用私人目录；正式 Workflow 固定为该私有路径。
 - 正式 Workflow 在研究后独立执行 `mail_reviews`：打包本 run/attempt 的审阅数据，使用已有 SMTP 配置和 **现有 `SMTP_TO` 全部收件人**，发一封 `[研究数据留存]` 邮件。附件名为 `research-reviews-<run_id>-<attempt>.zip`，内部只有 `review-archive.json`。这是数据副本，不是阶段性研究报告，不代表研究或正式交付成功。
-- 研究/报告/SMTP 普通失败时，后置步骤仍尝试发送已捕获数据；数据邮件失败单独让 Workflow 失败，不回滚健康研究、正式报告签名或已发邮件，也不触发额外模型补跑。预算自动续跑若已由用户开启，还须本轮数据留存步骤成功；默认仍关闭。
+- 研究/报告/SMTP 普通失败时，后置步骤仍尝试发送已捕获数据。独立数据邮件失败在 Workflow 中告警，并在 Job Summary 标明“本轮数据留存未完成”，不把已交付周报翻成整轮失败，不回滚健康研究、正式报告签名或已发邮件，也不触发额外模型补跑。正式报告必需邮件失败仍使交付失败。预算自动续跑若已由用户开启，还须本轮数据留存步骤成功；默认仍关闭。
 - Smoke、逐入口检查与独立单路线工作流不发送数据附件。本地正常运行只收集 JSON，不自动额外发送数据邮件；`mail` 是显式发信命令，未获授权不要执行真实发送。
 - 旧 `RESEARCH_ARCHIVE_KEY`、`archive_initialize`、`archive_feedback` 不再使用，不必新增；若先前创建过归档 Secret，可在 GitHub 手动删除。模型 MAIN/SUB 两套 Key 不受影响。
 
@@ -32,6 +32,7 @@ capture-status.json           留存错误/运行身份；无材料正文或 Key
 - `calls[].request.messages` 是应用实际传给模型客户端的完整消息，包括已抽样/截断的正文、二次材料、修复提示，留存不会再次截断。它不是承诺抓到了整篇论文；`available_document_excerpt` 只表示当时可用节选。
 - 保存当时标准、模型/提供方/服务地址和请求策略。协议适配的参数变化记录在 `transport_policy`。不保存 SDK 凭据、HTTP headers、环境变量全集、隐藏系统指令或 `reasoning_content`。已知密钥/常见认证字符串去敏，`redacted=true` 表示安全替换，不冒称字节级原文。
 - 先保存请求，再执行原有调用；可见回答在 JSON/Rubric 校验之前保存。无效 JSON、重试、失败、取消和未捕获回答保持真实状态，不当作成功样本。`judgments` 是现有规则的规范化结果，**不是模型原话**；模型原始可见输出仍在 `calls`。没有进入 MAIN 不伪造 MAIN 判断，只有进入深挖也不自动成为最终正样本。
+- 输出预算截断仍原样保存可见回答与 `finish_reason=length`。完整且验证可用的回答记 `validation.status=passed`；需要补全的记 `needs_repair`，不可当成技术负样本。后续请求保留原草稿、同一原点版本与独立请求 ID；补全成功不会覆盖第一次回答。隐藏 `reasoning_content` 不留存、不送入补全。这个请求级状态不是候选是否发表，也不代表重试一定成功。
 - 原点使用明确 ID/URL，不按标题猜合并。内容变化追加版本，一报告多机制/多原点一路线通过 `origin_refs`、`candidate_key`、`mechanism_id` 和请求 ID 关联。本地合并若将补全 ID 的新批次映射到已有原点，会保留 `imported_origin_id`，不改原始 prompt/模型回答/判断结果。
 - 候选快照中的 `excluded_evidence` 保留模型判为无关的原对象；它不是未经读取的新材料，也不提供报告事实。完整模型输入与原始输出仍按请求记录关联，执行失败样本不自动成为负标签，人工反馈与合并规则不变。
 - 开启前/其他 Runner 的旧缓存不能反推原始输入。复用时有原始请求则引用；没有则明确缺失，不伪造旧 prompt/标准，不付费补跑。每个邮件是本轮增量，不冒称云端累计全文档案。

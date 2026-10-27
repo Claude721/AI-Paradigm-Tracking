@@ -60,12 +60,12 @@ class WeeklyPipelineTests(unittest.TestCase):
 
         self.assertEqual([project.name for project in kept], ["fresh", "undated"])
 
-    def test_weekly_cron_fires_on_friday_in_shanghai(self) -> None:
+    def test_weekly_cron_fires_on_monday_morning_in_shanghai(self) -> None:
         timezone_shanghai = ZoneInfo("Asia/Shanghai")
         trigger = CronTrigger(
-            day_of_week="fri",
-            hour=9,
-            minute=15,
+            day_of_week="mon",
+            hour=8,
+            minute=0,
             timezone=timezone_shanghai,
         )
         now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone_shanghai)
@@ -73,7 +73,22 @@ class WeeklyPipelineTests(unittest.TestCase):
         next_fire = trigger.get_next_fire_time(None, now)
 
         self.assertIsNotNone(next_fire)
-        self.assertEqual(next_fire.isoformat(), "2026-07-24T09:15:00+08:00")
+        self.assertEqual(next_fire.isoformat(), "2026-07-20T08:00:00+08:00")
+
+    def test_cloud_schedule_is_monday_0800_shanghai_and_local_defaults_agree(self) -> None:
+        import ast
+        import re
+        workflow = Path(".github/workflows/weekly-radar.yml").read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r'^    - cron: "([^"]+)"\n      timezone: "([^"]+)"$', workflow, re.M),
+                         [("0 8 * * 1", "Asia/Shanghai")])
+        # Read source defaults rather than depending on mutable local .env values.
+        tree = ast.parse(Path("config.py").read_text(encoding="utf-8"))
+        expected = {"SCHEDULE_DAY_OF_WEEK": "mon", "SCHEDULE_HOUR": 8,
+                    "SCHEDULE_MINUTE": 0, "SCHEDULE_TIMEZONE": "Asia/Shanghai"}
+        defaults = {node.target.id: ast.literal_eval(node.value.args[1])
+                    for node in tree.body if isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name) and node.target.id in expected}
+        self.assertEqual(defaults, expected)
 
     def test_cloud_state_reuses_dedup_history_but_rebuilds_landscape_baseline(self) -> None:
         workflow = Path(".github/workflows/weekly-radar.yml").read_text(

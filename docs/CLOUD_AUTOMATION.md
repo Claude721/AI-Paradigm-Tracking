@@ -2,7 +2,7 @@
 
 ## 默认工作流
 
-weekly-radar.yml 每周五 09:15（Asia/Shanghai）运行，Ubuntu / Python 3.12，90 分钟上限。研究 3600 秒、报告 1200 秒，留出依赖、离线门、邮件和制品时间。本机不用开机。
+weekly-radar.yml 每周一 08:00（Asia/Shanghai）运行（`cron: "0 8 * * 1"`、`timezone: "Asia/Shanghai"`），Ubuntu / Python 3.12，90 分钟上限。研究 3600 秒、报告 1200 秒，留出依赖、离线门、邮件和制品时间。本机不用开机。正常启动后预计 10:00 前完成，但 GitHub 调度/排队可能延迟，不能承诺精确送达时间；调度修改须部署到默认分支才生效，不因修改代码自动补跑。
 
 定时触发会调用已配置模型及邮件；人工测试仍需用户授权。代码修复和上传本身不是新增付费测试/发信授权。
 
@@ -20,7 +20,7 @@ weekly-radar.yml 每周五 09:15（Asia/Shanghai）运行，Ubuntu / Python 3.12
 
 正式运行需 smoke_only=false、source_check_only=false。不必等待所有官网检查全绿。
 
-云端 smoke_only=true：每个独立模型配置最多一次请求、输出上限 64 tokens、验证完整 JSON；相同模型/地址/Key 去重，SDK 不自动重试。原点召回能力门槛沿用 PARADIGM_MIN_PRIMARY_SOURCES（默认 2 类），其他入口失败留诊断，不要求全绿；模型鉴权、JSON 契约或有效输入不足仍失败。JSON 制品保留实际输入/输出/总 tokens，缺用量标 unknown，不能算费用为零。Smoke 不是正式判断或写作质量验收；不会自动串联 3 天研究。
+云端 smoke_only=true：每个独立模型配置最多一次请求、输出上限 64 tokens、验证完整 JSON；相同模型/地址/Key 去重，SDK 不自动重试。输出停止原因为 length 但完整返回 `{"ok":true}` 时可通过，不因预算停止单独否决；半个 JSON 或空正文仍不通过。原点召回能力门槛沿用 PARADIGM_MIN_PRIMARY_SOURCES（默认 2 类），其他入口失败留诊断，不要求全绿；模型鉴权、JSON 契约或有效输入不足仍失败。JSON 制品保留实际输入/输出/总 tokens，缺用量标 unknown，不能算费用为零。Smoke 不是正式判断或写作质量验收；不会自动串联 3 天研究。
 
 ## 模型、信源与邮件配置
 
@@ -31,6 +31,7 @@ Settings → Secrets and variables → Actions：
 - 旧全局模型 Variables 及 DASHSCOPE_API_KEY / LLM_API_KEY / SUB_AGENT_API_KEY / MAIN_AGENT_API_KEY 不再读取；先配置新 Secret 再删旧项。GitHub 不提供旧值读回，不在聊天或日志中迁移明文。
 - 换某层提供方只修改该层三项 Variables 与对应 Secret，无需改代码，不限 Qwen。地址填兼容 API 根地址，不是 /chat/completions 完整路径。
 - 可选 SUB_AGENT_REQUEST_OPTIONS / MAIN_AGENT_REQUEST_OPTIONS 已映射到正式、Smoke 与独立样本。协议默认按 PROVIDER 选择，不绑定模型 ID/固定地址；特殊兼容接口以 JSON 配置输出参数、extra_body 和省略参数，见配置清单。修改后模型缓存失效，不恢复旧参数结果。
+- 当前 MAIN 使用 DeepSeek 时，关闭思考的 Repository Variable 值为 `MAIN_AGENT_REQUEST_OPTIONS={"extra_body":{"thinking":{"type":"disabled"}}}`；不要只设共享 `LLM_ENABLE_THINKING=false` 或继续使用 low。此项不改 SUB、不改 Key、不提高 Token 上限；修改 Variable 不会自动触发研究，实际效果在下一次授权运行的审计中验证。
 - 推荐 OPENALEX_API_KEY；GITHUB_TOKEN 自动取 github.token，不另建同名 Secret。
 - SMTP_USERNAME、SMTP_PASSWORD、SMTP_TO Secrets；现有 QQ SSL 发送路径不变。
 - X、未批准 Reddit、未批准 Semantic Scholar 保持关闭，不为 V0 新增付费平台。
@@ -52,7 +53,11 @@ Settings → Secrets and variables → Actions：
 
 ## 研究与交付
 
-默认有界取材：48 原点、4 历史更新；7 天普通/14 天高信号，保留跨源广度。先闭合本期原点筛选，再对去重后全部合格候选深挖，不设 8 条或其他 Top-K。旧 PARADIGM_RESEARCH_DEEP_LIMIT / PARADIGM_DEEP_SAFETY_LIMIT 不再由正式 Workflow 映射。单官网/Feed/API 故障只记录缺口，健康材料继续。不同发现通道不是独立复现。
+传播与发布者名气为软约束：技术合格路线不因没有知名作者、KOL 转发或二次讨论而被否决。当前 Rubric 只用技术题决定资格；普通分享/互动、独立复现/采用分别留档。即使全部补充传播查询失败，也允许基于可用一手材料继续技术研究，回执仍为失败/未知，不伪造零讨论。
+
+历史更新不再总限 4 条：PARADIGM_RESEARCH_REFRESH_LIMIT=4 只约束无当前事件的后台轮询，0 仅关闭轮询。当前传播事件匹配的旧路线另行召回，旧 pending 以独立深挖任务加入新周；未形成路线的旧原点可再次初筛。7 天约束事件日期，不约束技术年龄；同窗续跑保持冻结范围。无需新增配置、清库或轮换 Key。
+
+默认取材为 48 原点、4 条后台历史轮询，加上当前事件匹配的旧路线；普通 7 天/高信号 14 天。新计划按来源/领域/发布组分散，审计逐来源记录“选定/发现”。论文、官方文章和原创思想均保守预筛，品牌不豁免；正式报告逐机制核验。全部技术合格候选进入深挖，不设 Top-K；未完成保留真实待办，不以整批闭合作为交付前提。旧深挖上限不再映射到正式 Workflow。单官网/API 故障只记缺口，不同发现通道不是独立复现。
 
 社区渠道执行统一判定，不允许调度层放行后综合层再以任一失败渠道拒绝。Tavily 次数保护不足会给出容量提醒而不截断深挖；2026-10-15 线上 `TAVILY_REQUEST_SAFETY_LIMIT` 已从 12 改为 0，其余月度费用保护、平台开关及自动续跑默认不变。
 
@@ -70,6 +75,8 @@ V0 执行顺序为全部首次技术访问 → 剩余时间内的定向结构修
 
 审计与 `pipeline_result.json` 的 `execution_summary` 明确执行方式（new_research/resumed_research/delivery_only/unknown）、本次新增、本期累计、本期待办和全库积压。`fresh_research_executed/completed` 仅指新发现批次；`research_executed` 另行表示进入研究路径。工作流排队条件仍使用 `recovered_delivery_only`，不因这些展示字段改变续投、调度或费用保护。短续跑不代表重新采集了全部信源。
 
+输入清理诊断与技术判断分账：`frontier_coverage.origin_input_exclusions` 记录跨入口被拦住的非研究页/挑战页，官方目录另有 `index_exclusions`、`detail_exclusions` 与 `detail_access_issues`。明确非研究详情可缓存排除回执；挑战页仍待重试，不计技术淘汰、不因单页异常否决健康材料。正文优先文章主体，保留作者、日期和报告链接，不绕过访问护栏。
+
 ## 信源诊断与独立测试
 
 source_check_only 采用 --v0-readiness：有至少 2 类可用一手输入样本时可通过输入能力检查，但每个 failed/not_executed/not_tested 仍保留，acceptance_complete 不会被改成 true。这不是正式研究或生产 V0 认证。
@@ -82,7 +89,7 @@ source_platform_checks 只有单次明确授权后才开启；Tavily/X 可能消
 
 one-route-acceptance.yml 默认 3 天，两层合计最多 20 元、无邮件/生产状态。正常研究的 arxiv_id 与 primary_url 必须且只能选一项；后者须在已登记官方索引原样出现，生产解析器核验正文与原始日期。旧材料、仅修改日期、无日期不支付研究模型；拒绝多机制 Technical Report，不截断或放宽准入。`models_only=true` 则两项原点都留空，只各发一次最小模型请求，不调用其他信源。
 
-价格保护通过 `price_contracts` 输入 sub/main 两角色 JSON 与 `pricing_verified_on`，不含代码日期或模型白名单。实际模型、地址、最高原价、完整输入容量、总输出参数/误差与响应模型别名须匹配；核验日期必须是运行当天。客户端共享一个账本与停止线，未知用量/取消不退款，不自动重跑。价格数据配置不限制生产模型选择。`identity_requests=0–8` 显式允许单路线 OpenAlex 人物身份查询；模型冒烟不注入该 Key，其他收费平台/SMTP 均不注入。研究采用 V0 部分来源容错，但当前路线人物/事实质量门仍保留。完整输入格式见[样本指南](ONE_ROUTE_ACCEPTANCE.md)。
+价格保护通过 `price_contracts` 输入 sub/main 两角色 JSON 与 `pricing_verified_on`，不含代码日期或模型白名单。实际模型、地址、最高原价、完整输入容量、总输出参数/误差与响应模型别名须匹配；核验日期必须是运行当天。客户端共享一个账本与停止线，未知用量/取消不退款，不自动重跑。价格数据配置不限制生产模型选择。`identity_requests=0–8` 显式允许单路线 OpenAlex 人物身份查询；模型冒烟不注入该 Key，其他收费平台/SMTP 均不注入。研究采用 V0 部分来源容错；事实质量门保留，人物归因尽力而为且不虚构。完整输入格式见[样本指南](ONE_ROUTE_ACCEPTANCE.md)。
 
 历史 Runner 证据见 [来源](RUN_38347140838_SOURCE_REVIEW.md)、[接口](RUN_38370843944_INTERFACE_REVIEW.md)。当时全入口闭合目标不再适用 V0 交付。
 

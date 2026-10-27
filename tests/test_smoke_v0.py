@@ -59,8 +59,15 @@ class V0ModelSmokeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.usage, {"reported": False})
                 self.assertIn("unknown", result.detail)
 
-    async def test_truncated_json_keeps_usage_but_fails(self):
+    async def test_complete_json_at_output_limit_keeps_usage_and_passes(self):
         result, _ = await self.probe(finish="length", usage=SimpleNamespace(
+            prompt_tokens=12, completion_tokens=64, total_tokens=76))
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.failure_kind, "")
+        self.assertEqual(result.usage["total_tokens"], 76)
+
+    async def test_incomplete_json_at_output_limit_keeps_usage_but_needs_repair(self):
+        result, _ = await self.probe('{"ok":', finish="length", usage=SimpleNamespace(
             prompt_tokens=12, completion_tokens=64, total_tokens=76))
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.failure_kind, "response_contract")

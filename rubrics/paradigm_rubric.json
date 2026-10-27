@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-15.1",
+  "version": "2026-10-26.2",
   "description": "技术范式雷达的可维护决策量表。模型只选择离散答案并提供证据，所有分数与去留均由程序按本文件确定性计算。",
   "decisions": {
     "deep_dive": {
@@ -15,6 +15,20 @@
     }
   },
   "common_criteria": [
+    {
+      "id": "current_work_intervention",
+      "dimension": "mechanism",
+      "stages": ["screening", "final"],
+      "weight": 1.0,
+      "question": "本文作者自己的新增 AI 技术贡献是什么？只看本文实际提出/实证的学习信号、表示、计算、推理/行动接口或 AI 科学发现闭环，不能把科普介绍的已有机制、其他团队成果或科研出版/声望/组织制度当成本文的新技术。原创概念提议须有作用对象、可执行步骤和可证伪预测；未知如实回答 unknown。",
+      "options": {
+        "own_technical_intervention": 1.0,
+        "own_testable_proposal": 0.8,
+        "explanation_or_restatement": 0.0,
+        "non_ai_process": 0.0,
+        "unknown": 0.0
+      }
+    },
     {
       "id": "problem_is_material",
       "dimension": "problem_definition",
@@ -59,7 +73,7 @@
       "dimension": "novelty",
       "stages": ["screening", "final"],
       "weight": 2.0,
-      "question": "它是否改变了此前可实现能力的边界、学习信号、信息表示、缩放轴或部署前提？",
+      "question": "本文自己的 intervention 相对实际比较的近期基线，是否改变了可实现能力边界、学习信号、信息表示、缩放轴或部署前提？不能把自监督/预训练等既有范式相对更早历史的进步当作本文新颖性，也不能把旧概念本周被重新介绍当成新贡献。",
       "options": {
         "clear_shift": 1.0,
         "plausible_shift": 0.65,
@@ -692,7 +706,8 @@
       "id": "publisher_signal",
       "dimension": "publisher",
       "stages": ["final"],
-      "weight": 2.0,
+      "weight": 0.0,
+      "advisory": true,
       "question": "发布团队和发布形式的可核验势能。",
       "options": {
         "established_formal_release": 1.0,
@@ -705,7 +720,8 @@
       "id": "independent_validation",
       "dimension": "external_validation",
       "stages": ["final"],
-      "weight": 2.5,
+      "weight": 0.0,
+      "advisory": true,
       "question": "独立复现、后续论文、产品采用或真实实现的承接强度。",
       "options": {
         "independent_replication_or_adoption": 1.0,
@@ -721,8 +737,9 @@
       "id": "secondary_discussion",
       "dimension": "momentum",
       "stages": ["final"],
-      "weight": 1.5,
-      "question": "非作者的实质二次讨论与互动承接。",
+      "weight": 0.0,
+      "advisory": true,
+      "question": "公开传播与实质承接分开记录；转发者无需知名，声量不作为技术否决条件。",
       "options": {
         "independent_high_signal": 1.0,
         "multiple_substantive_sources": 0.75,
@@ -749,7 +766,8 @@
       "id": "route_convergence",
       "dimension": "external_validation",
       "stages": ["final"],
-      "weight": 1.0,
+      "weight": 0.0,
+      "advisory": true,
       "question": "同一机制是否被多个独立原点材料共同承接。",
       "options": {
         "multiple_independent_origins": 1.0,

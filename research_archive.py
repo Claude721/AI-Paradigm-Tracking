@@ -298,7 +298,8 @@ class ArchiveStore:
         record = _read(path)
         if record["validation"]["status"] != "not_recorded":
             return
-        record["validation"] = {"status": "failed" if error else "passed",
+        truncated = (record.get("response") or {}).get("finish_reason") == "length"
+        record["validation"] = {"status": "needs_repair" if error and truncated else "failed" if error else "passed",
             "error_type": type(error).__name__ if isinstance(error, Exception) else "reported_failure" if error else ""}
         _write(path, record)
 

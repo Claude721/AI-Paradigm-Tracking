@@ -30,6 +30,7 @@ from .researcher_identity import merge_researcher_profiles
 from .async_utils import gather_scoped
 from .search_receipts import blocking_searches, record_search
 from .evidence_association import references_origin, countable_evidence, VERSION as ASSOCIATION_VERSION
+from .propagation import certify_diffusion, verified_diffusion, work_reference
 
 logger = logging.getLogger(__name__)
 
@@ -128,18 +129,22 @@ class EvidenceEnricher:
                 candidate.evidence = _dedupe_evidence(
                     candidate.evidence, route_key=candidate.key
                 )
+                certify_diffusion(candidate)
                 if blocking_searches(candidate, allow_partial=getattr(self, "allow_partial_sources", False)):
                     # Return the incomplete object, not None (which means a
                     # successful no-update judgment). The scheduler partitions
                     # these objects before synthesis or completion receipts.
                     return candidate
-                changed = False
+                from .rubric import load_rubric
+                saved_version = candidate.rubric_assessment.get("version")
+                changed = bool(saved_version and saved_version != load_rubric()["version"])
                 for item in candidate.evidence:
                     prior = previous.get(item.fingerprint)
                     if prior is None:
                         # A title-only discussion or same-name repository is
                         # a lead, not yet a reason to rewrite the route.
-                        if _new_evidence_requires_synthesis(item):
+                        if (_new_evidence_requires_synthesis(item) or verified_diffusion(candidate, item)
+                                or item.raw.get("indexed_discovery_only") and work_reference(candidate, item)):
                             changed = True
                         continue
                     if item.raw.get("indexed_discovery_only") and not is_verified_substantive_discussion(prior, route_key=candidate.key):
@@ -160,7 +165,7 @@ class EvidenceEnricher:
                         if key in _UPTAKE_METRIC_KEYS
                     }
                     if _material_metric_growth(
-                        item, prior, delta, route_key=candidate.key
+                        item, prior, delta, route_key=candidate.key, diffusion=verified_diffusion(candidate, item)
                     ):
                         item.raw["metric_delta"] = delta
                         item.raw["metric_delta_observed_at"] = (
@@ -248,6 +253,7 @@ class EvidenceEnricher:
         candidate.evidence = _dedupe_evidence(
             [item for item in candidate.evidence if countable_evidence(candidate, item)], route_key=candidate.key
         )
+        certify_diffusion(candidate)
         if blocking_searches(candidate, allow_partial=getattr(self, "allow_partial_sources", False)):
             return  # Never pay for downstream judgments on incomplete inputs.
         _attach_social_profiles(candidate)
@@ -478,6 +484,7 @@ def _material_metric_growth(
     delta: dict[str, float | int],
     *,
     route_key: str,
+    diffusion: bool = False,
 ) -> bool:
     amount = lambda key: nonnegative_number(delta.get(key, 0))
     if item.evidence_type == EvidenceType.CITATION:
@@ -504,10 +511,11 @@ def _material_metric_growth(
     if item.evidence_type in {
         EvidenceType.COMMUNITY_DISCUSSION,
         EvidenceType.SECONDARY_INTERPRETATION,
-    } and is_verified_substantive_discussion(item, route_key=route_key):
+    } and (diffusion or is_verified_substantive_discussion(item, route_key=route_key)):
         return (
             amount("comments") >= 5 or amount("replies") >= 5
             or amount("likes") >= 20 or amount("score") >= 20
+            or amount("retweets") >= 5 or amount("reposts") >= 5
         )
     return False
 

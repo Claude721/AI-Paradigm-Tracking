@@ -60,13 +60,10 @@ def blocking_searches(candidate, *, allow_partial=False):
     pending = incomplete_searches(candidate)
     if not allow_partial:
         return pending
-    pending = [key for key in pending if candidate.community_search_receipts.get(key, {}).get("status") != "not_configured"]
-    # A failed supplementary provider is a blind spot, not a veto. A complete
-    # outage still cannot become a successful negative uptake judgment.
-    if any(receipt.get("status") == "completed"
-           for receipt in candidate.community_search_receipts.values()):
-        return []
-    return pending
+    # Attention is advisory. Even a complete supplementary outage must not
+    # withhold a primary-grounded technical review. Receipts stay incomplete;
+    # no caller may interpret this permission as a negative uptake judgment.
+    return []
 
 
 def search_signature(candidate, provider):
@@ -84,7 +81,10 @@ def search_signature(candidate, provider):
                             bool(config.REDDIT_CLIENT_SECRET), bool(config.REDDIT_USER_AGENT)],
         "x_official": [config.KOL_X_SOURCE_ENABLED, bool(config.TWITTER_BEARER_TOKEN)],
     }
-    payload = [2, provider, candidate.key, candidate.name, candidate.keywords,
+    if provider == "tavily_social_web":
+        from sources.social_web_search_source import SEARCH_IDENTITY_VERSION
+        settings[provider].append(SEARCH_IDENTITY_VERSION)
+    payload = [3, provider, candidate.key, candidate.name, candidate.keywords,
                origins, research_now().isoformat(), research_days(), settings.get(provider)]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 

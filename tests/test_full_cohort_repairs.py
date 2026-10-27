@@ -57,7 +57,7 @@ class EvidenceRepairTests(unittest.TestCase):
         item.evidence.append(unrelated)  # Simulate old saved pollution.
         score_candidate(item)
         self.assertEqual(item.publisher_tier, "unknown")
-        self.assertFalse(_admission_gate(item)[0])
+        self.assertTrue(_admission_gate(item)[0])  # No audience veto; adoption facts remain unverified.
         self.assertEqual(_momentum_score(item), before)
         self.assertEqual(_momentum_evidence(item), [])
 

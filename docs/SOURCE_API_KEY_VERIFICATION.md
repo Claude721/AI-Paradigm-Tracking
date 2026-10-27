@@ -1,14 +1,14 @@
 # 信源 API Key：安全复验指南
 
-更新：2026-10-13。本地不复制用户云端凭据；已授权 Runner 证据优先。公开网页的 403、429、404、访问挑战和解析错误不是模型或信源 Key 无效的证据。**先验收注入与接口，再决定是否轮换，不要整体重置密钥。**
+操作说明同步：2026-10-21；下述接口实测记录截至 2026-10-13，不代表当前 Key/额度状态。本地不复制用户云端凭据；已授权 Runner 证据优先。公开网页的 403、429、404、访问挑战和解析错误不是模型或信源 Key 无效的证据。**先验收注入与接口，再决定是否轮换，不要整体重置密钥。**
 
-最新 [独立验收 run 38370843944](RUN_38370843944_INTERFACE_REVIEW.md)：NYU 8 次 OpenAlex 查询全部 200，Tavily /usage 200，严格 included-only 保护因 PAYG 限额未知停止，未发搜索。没有需要先轮换这两个 Secret 的证据。用户随后要求暂不调用，不能自动复验。控制台 0/1000 说明当时月度余额充足，但不证明搜索已执行；该独立费用保护不应成为整个研究流程卡点。无需先充值或重配 Key，正式研究可从其他健康通道继续。
+历史 [独立验收 run 38370843944](RUN_38370843944_INTERFACE_REVIEW.md)：NYU 8 次 OpenAlex 查询全部 200，Tavily /usage 200，严格 included-only 保护因 PAYG 限额未知停止，未发搜索。当时没有需要先轮换这两个 Secret 的证据。用户随后要求暂不调用，历史授权不可自动复用。控制台 0/1000 说明当时月度余额充足，但不证明搜索已执行；该独立费用保护不应成为整个研究流程卡点。排查当前问题时以当前 run 的注入/请求/用量记录为准，不先充值或整体重配 Key，正式研究可从其他健康通道继续。
 
 较早的 2026-10-10 云端 run `38027283680`：OpenAlex 11 项、GitHub 27 项通过，不需先轮换这两类凭据。X 无 Token，所有者决定暂时关闭，将 Actions Variable `KOL_X_SOURCE_ENABLED=false`（既有 true 不会被新默认覆盖），不用申请 X Secret。当时 Tavily 未测试，使用免费额度前先核对 Plan/Usage/PAYG，见 [X 搜索选项](X_SEARCH_OPTIONS.md) 与[当时云端复核](RUN_38027283680_SOURCE_REVIEW.md)；之后 usage 200 的证据见上段。
 
 ## 1. 在 GitHub 验证已有凭据
 
-只授权 NYU 书目身份或 Tavily 时，改用独立 `source-interface-acceptance.yml` 的 `scope=nyu/tavily/both`，不要勾选全平台检查后误测其他已启用接口。它默认不执行，只在授权 API step 注入选中凭据，无模型/邮件/生产状态；Tavily 先核验已有包含额度与 PAYG 关闭，条件未知时不搜索、不改套餐。2026-10-13 所有者已授权最多 8 次 NYU 身份查询和 1 次 Tavily basic，需新增付费则停止；结果另列。最新 [run 38347140838](RUN_38347140838_SOURCE_REVIEW.md) 中 OpenAlex 11 项通过，摘要两条 Key/用量异常来自离线 fixture 污染，不能据此轮换 Secret。详见 [独立接口验收](SOURCE_ACCEPTANCE.md#独立-nyutavily-接口验收)。
+只授权 NYU 书目身份或 Tavily 时，改用独立 `source-interface-acceptance.yml` 的 `scope=nyu/tavily/both`，不要勾选全平台检查后误测其他已启用接口。它默认不执行，只在当次明确授权的 API step 注入选中凭据，无模型/邮件/生产状态；Tavily 先核验已有包含额度与 PAYG 关闭，条件未知时不搜索、不改套餐。2026-10-13 的 8 次 NYU 身份查询及 1 次 Tavily basic 是历史有界授权，不授权新增付费。较早 [run 38347140838](RUN_38347140838_SOURCE_REVIEW.md) 中 OpenAlex 11 项通过，摘要两条 Key/用量异常来自离线 fixture 污染，不能据此轮换 Secret。详见 [独立接口验收](SOURCE_ACCEPTANCE.md#独立-nyutavily-接口验收)。
 
 1. 先部署本轮代码到要验收的分支。确认 Actions 的执行提交和 `source_audit_latest.json` 中代码指纹；旧工作流没有新检查选项。
 2. 仓库 Settings → Secrets and variables → Actions，核对下表中的 Repository Secrets 名称。只核对名称/提供方账户，不截图或导出值。Environment/Organization Secrets 还需确认该 job/仓库确有访问权限；不能仅凭“设置页面存在”认定注入成功。[GitHub 官方 Secrets 说明](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)

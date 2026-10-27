@@ -40,14 +40,59 @@ def validated_discovery(batch):
     return DiscoveryBatch(values["origins"], values["supporting"], batch.source_counts, batch.coverage), counts
 
 
-def bounded_origins(origins, *, limit, reference_time, days):
-    """Round-robin publishers/sources after priority sorting; never score here."""
+def _round_robin(pools):
+    pools = {key: deque(values) for key, values in pools.items() if values}
+    while pools:
+        for key in list(pools):
+            yield pools[key].popleft()
+            if not pools[key]:
+                del pools[key]
+
+
+def _diverse_origin_order(items):
+    """Sources, domains, then publishing groups; a whole index is not a lab."""
+    sources = defaultdict(list)
+    for item in items:
+        sources[item.source].append(item)
+    queues = {}
+    for source, values in sources.items():
+        domains = defaultdict(list)
+        for item in values:
+            labels = item.raw.get("frontier_domains", [])
+            labels = sorted({v for v in labels if isinstance(v, str) and v}) if isinstance(labels, list) else []
+            domain = min(labels, key=lambda key: (len(domains[key]), key)) if labels else "unclassified"
+            domains[domain].append(item)
+        domain_queues = {}
+        for domain, records in domains.items():
+            publishers = defaultdict(list)
+            for item in records:
+                # Names are scheduling groups, never verified identity facts.
+                group = item.organization.strip().casefold() or (
+                    "authors:" + "|".join(name.strip().casefold() for name in item.authors[:2])
+                    if item.authors else "work:" + item.fingerprint)
+                publishers[group].append(item)
+            domain_queues[domain] = list(_round_robin(publishers))
+        queues[source] = list(_round_robin(domain_queues))
+    return list(_round_robin(queues))
+
+
+def bounded_origins(origins, *, limit, reference_time, days, ordinary_days=7):
+    """Bound acquisition fairly, not technical eligibility or the deep queue.
+
+    Reserve three turns for dated current material per backfill turn. Within
+    each lane distribute by source/domain before publisher; missing affiliation
+    must not collapse hundreds of independent papers into a single publisher.
+    Frozen campaign scopes are not re-ranked when this policy changes.
+    """
     from datetime import timedelta
     cutoff = reference_time - timedelta(days=days)
-    pools = defaultdict(deque)
+    current_cutoff = reference_time - timedelta(days=min(ordinary_days, days))
+    lanes = {"current": [], "backfill": []}
     seen = set()
+    # Recency first. A priority tag breaks ties, not every new unknown paper.
     for item in sorted(origins, key=lambda value: (
-        nonnegative_number(value.raw.get("origin_priority", 0)), value.published_at or ""
+        _evidence_datetime(value.published_at) or reference_time - timedelta(days=days + 1),
+        nonnegative_number(value.raw.get("origin_priority", 0)), value.fingerprint,
     ), reverse=True):
         if item.fingerprint in seen or item.evidence_type not in ORIGIN_EVIDENCE_TYPES:
             continue
@@ -55,16 +100,31 @@ def bounded_origins(origins, *, limit, reference_time, days):
         if not item.raw.get("explicit_seed") and date and not cutoff <= date <= reference_time:
             continue
         seen.add(item.fingerprint)
-        pools[item.organization or item.source].append(item)
+        lane = "current" if date and current_cutoff <= date <= reference_time else "backfill"
+        lanes[lane].append(item)
+    pools = {key: deque(_diverse_origin_order(values)) for key, values in lanes.items()}
     result = []
-    while pools and len(result) < limit:
-        for name in list(pools):
-            result.append(pools[name].popleft())
-            if not pools[name]:
-                del pools[name]
+    while any(pools.values()) and len(result) < limit:
+        for lane in ("current", "current", "current", "backfill"):
+            if not pools[lane]:
+                continue
+            result.append(pools[lane].popleft())
             if len(result) >= limit:
                 break
     return result
+
+
+def origin_selection_summary(origins, selected):
+    def counts(values, field):
+        result = defaultdict(int)
+        for item in values:
+            result[field(item)] += 1
+        return dict(sorted(result.items()))
+    return {"version": 2, "discovered": len(origins), "selected": len(selected),
+            "source_discovered": counts(origins, lambda item: item.source),
+            "source_selected": counts(selected, lambda item: item.source),
+            "undated_selected": sum(not _evidence_datetime(item.published_at) for item in selected),
+            "scope_is_exhaustive": False}
 
 
 def acquisition_summary(coverage):

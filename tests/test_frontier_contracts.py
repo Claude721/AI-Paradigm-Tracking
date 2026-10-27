@@ -584,7 +584,7 @@ class FrontierContractTests(unittest.TestCase):
         self.assertFalse(is_priority_review(extraction))
         self.assertEqual(cluster_extractions([extraction]), [])
 
-    def test_unknown_official_repo_cannot_replace_publisher_or_independent_evidence(self) -> None:
+    def test_unknown_official_repo_is_not_independent_validation_or_a_veto(self) -> None:
         item = _route_candidate(
             key="2606.1",
             route_family="high frequency tactile control",
@@ -605,8 +605,8 @@ class FrontierContractTests(unittest.TestCase):
             )
         )
         score_candidate(item)
-        self.assertFalse(is_reportable(item))
-        self.assertIn("发布者背景未核验", item.admission_reason)
+        self.assertTrue(is_reportable(item))
+        self.assertIn("不因低声量", item.admission_reason)
 
     def test_multiple_verified_frontier_researchers_trigger_deep_editorial_attention(self) -> None:
         item = _route_candidate(
@@ -630,7 +630,7 @@ class FrontierContractTests(unittest.TestCase):
         ]
         score_candidate(item)
         self.assertTrue(is_reportable(item))
-        self.assertIn("多位长期前沿研究者", item.admission_reason)
+        self.assertIn("不因低声量", item.admission_reason)
 
     def test_cross_week_route_is_reconciled_without_exact_name(self) -> None:
         historical = _route_candidate(

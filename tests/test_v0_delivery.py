@@ -120,6 +120,22 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.status, "pending_render")
         self.assertEqual(self.store.load_pending_origins()[0].fingerprint, old.fingerprint)
 
+    async def test_resuming_legacy_selection_keeps_scope_and_truthful_diagnostics(self):
+        items = [origin(1), origin(2)]
+        frozen = self.store.campaigns.begin(reference_time=NOW, ordinary_days=7, high_signal_days=14,
+            bootstrap=False, seeds=[], delivery_contract_version=4)
+        self.store.campaigns.save_discovery(frozen.campaign_id, batch(items))
+        self.store.campaigns.set_origin_scope(frozen.campaign_id, items[:1])
+        process = self.process()
+        with patch("paradigms.delivery_policy.bounded_origins", side_effect=AssertionError("Frozen scope must not be reselected")):
+            result = await process.run(reference_time=NOW)
+        self.assertEqual(result["research_scope_origin_count"], 1)
+        self.assertEqual(result["origin_selection"]["selected"], 1)
+        self.assertEqual(result["origin_selection"]["source_selected"], {"arxiv": 1})
+        self.assertIsNone(result["origin_selection"]["version"])
+        self.assertEqual(self.store.campaigns.get(frozen.campaign_id).stats["origin_scope"],
+                         [items[0].fingerprint])
+
     async def test_healthy_route_delivers_after_bad_selected_peer_was_attempted(self):
         bad = origin(2)
         process = self.process(batch([origin(), bad]), accepted=True, omit={bad.fingerprint})
@@ -447,14 +463,13 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(process.pending_delivery), 1)
         require_completed_research(result, candidates=process.pending_delivery)
 
-    async def test_final_gate_matches_partial_provider_policy_but_blocks_total_outage(self):
+    async def test_final_gate_keeps_outage_receipts_without_vetoing_primary_grounded_work(self):
         process = self.process(accepted=True)
         result = await process.run(reference_time=NOW)
         self.assertEqual(len(process.pending_delivery), 1)
         require_completed_research(result, candidates=process.pending_delivery)
         record_search(process.pending_delivery[0], "hackernews", "failed", reason="http_503")
-        with self.assertRaisesRegex(ResearchNotCompleteError, "未闭合的社区查询"):
-            require_completed_research(result, candidates=process.pending_delivery)
+        require_completed_research(result, candidates=process.pending_delivery)
 
     async def test_manifest_reconciliation_cannot_drop_a_completed_qualified_candidate(self):
         process = self.process(accepted=True)
@@ -510,10 +525,10 @@ class V0PolicyTests(unittest.TestCase):
         self.assertEqual({item.organization for item in selected}, {"OpenAI", "Other Lab"})
         self.assertTrue(all("rejection_reason" not in item.raw for item in items))
 
-    def test_partial_platform_failure_is_not_zero_uptake_and_total_outage_blocks(self):
+    def test_supplementary_outage_is_not_a_veto_or_a_zero_uptake_judgment(self):
         item = candidate()
         record_search(item, "tavily_social_web", "failed")
-        self.assertEqual(blocking_searches(item, allow_partial=True), ["tavily_social_web"])
+        self.assertEqual(blocking_searches(item, allow_partial=True), [])
         record_search(item, "hackernews", "completed")
         self.assertEqual(blocking_searches(item, allow_partial=True), [])
         self.assertEqual(item.community_search_receipts["tavily_social_web"]["status"], "failed")

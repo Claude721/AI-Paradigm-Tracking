@@ -37,7 +37,7 @@ from paradigms.models import (
     assess_candidate_freshness,
     primary_material_url,
 )
-from paradigms.rubric import evaluate_rubric, load_rubric
+from paradigms.rubric import evaluate_rubric, load_rubric, substantive_secondary
 from paradigms.scoring import is_reportable, score_candidate
 from reports.paradigm_generator import (
     ParadigmReportGenerator,
@@ -310,12 +310,12 @@ class ParadigmPipelineTests(unittest.TestCase):
                 parse_json_object(sensitive)
         self.assertNotIn("DO_NOT_LOG_THIS", "\n".join(captured.output))
 
-    def test_unknown_low_volume_work_stays_in_observation_pool(self) -> None:
+    def test_unknown_low_volume_work_can_pass_technical_eligibility(self) -> None:
         item = candidate()
         score_candidate(item)
-        self.assertFalse(is_reportable(item))
-        self.assertIn("发布者背景未核验", item.admission_reason)
-        self.assertEqual(item.rubric_assessment["decision"], "observe")
+        self.assertTrue(is_reportable(item))
+        self.assertIn("不因低声量", item.admission_reason)
+        self.assertEqual(item.rubric_assessment["decision"], "report")
 
     def test_established_team_technical_report_gets_priority_admission(self) -> None:
         evidence = paper()
@@ -331,7 +331,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertTrue(is_reportable(item))
         self.assertTrue(item.is_formal_technical_report)
         self.assertEqual(item.publisher_tier, "established")
-        self.assertIn("优先解读", item.admission_reason)
+        self.assertIn("不因低声量", item.admission_reason)
 
     def test_title_alone_cannot_upgrade_an_ordinary_paper_to_formal_report(self) -> None:
         evidence = paper()
@@ -347,7 +347,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         self.assertFalse(item.is_formal_technical_report)
         self.assertNotIn("正式 Technical Report", item.admission_reason)
 
-    def test_unknown_work_needs_independent_secondary_validation(self) -> None:
+    def test_unknown_work_does_not_need_secondary_validation_for_technical_review(self) -> None:
         item = candidate()
         item.evidence.extend(
             [
@@ -369,8 +369,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             ]
         )
         score_candidate(item)
-        self.assertFalse(is_reportable(item))
-        self.assertIn("缺少实质二次讨论", item.admission_reason)
+        self.assertTrue(is_reportable(item))
+        self.assertEqual(substantive_secondary(item)[0], 0)
 
     def test_author_self_release_is_identity_evidence_not_secondary_validation(self) -> None:
         item = candidate()
@@ -385,8 +385,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             )
         )
         score_candidate(item)
-        self.assertFalse(is_reportable(item))
-        self.assertIn("缺少实质二次讨论", item.admission_reason)
+        self.assertTrue(is_reportable(item))
+        self.assertEqual(substantive_secondary(item)[0], 0)
 
     def test_tavily_indexed_pages_do_not_validate_unknown_publisher(self) -> None:
         item = candidate()
@@ -411,8 +411,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             ]
         )
         score_candidate(item)
-        self.assertFalse(is_reportable(item))
-        self.assertIn("缺少实质二次讨论", item.admission_reason)
+        self.assertTrue(is_reportable(item))
+        self.assertEqual(substantive_secondary(item)[0], 0)
 
     def test_tavily_parses_three_platforms_as_discovery_only(self) -> None:
         item = candidate()
@@ -573,7 +573,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         )
         score_candidate(item)
         self.assertTrue(is_reportable(item))
-        self.assertIn("独立讨论或承接", item.admission_reason)
+        self.assertGreaterEqual(substantive_secondary(item)[0], 1)
 
     def test_weak_rubric_answers_override_model_like_numeric_scores(self) -> None:
         item = candidate()
@@ -1430,7 +1430,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             store = ParadigmStore(Path(directory) / "radar.db")
             item = candidate()
             score_candidate(item)
-            self.assertEqual(item.status, "observe")
+            self.assertEqual(item.status, "reportable")
+            item.status = "observe"  # Persisted observation under the previous audience gate.
             store.save_candidates([item])
             refreshed = store.load_refresh_candidates()
             self.assertEqual([value.key for value in refreshed], [item.key])

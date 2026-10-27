@@ -285,6 +285,16 @@ def evaluate_rubric(
     decision, threshold, minimum_coverage = _decision(
         rubric, stage, score, answer_coverage
     )
+    contribution = next((item for item in normalized_answers
+                         if item["criterion_id"] == "current_work_intervention"), None)
+    contribution_reason = ""
+    if decision != "incomplete" and contribution is not None:
+        if contribution["answer"] in {"explanation_or_restatement", "non_ai_process"}:
+            decision = "reject"
+            contribution_reason = "本文未提出自己的新增 AI 技术机制：" + contribution["evidence"]
+        elif contribution["answer"] == "unknown":
+            decision = "observe"
+            contribution_reason = "尚无法确认本文自身的 AI 技术贡献，保留观察；不把未知解释为不存在机制"
     blockers = _blockers(normalized_answers)
     return {
         "version": rubric["version"],
@@ -298,7 +308,7 @@ def evaluate_rubric(
         "decision": decision,
         "threshold": threshold,
         "minimum_answer_coverage": minimum_coverage,
-        "decision_reason": _decision_reason(
+        "decision_reason": contribution_reason or _decision_reason(
             decision, score, threshold, answer_coverage, minimum_coverage, blockers
         ),
         "blockers": blockers,

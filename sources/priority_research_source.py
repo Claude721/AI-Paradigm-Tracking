@@ -22,6 +22,7 @@ from paradigms.models import EvidenceType, TechnicalEvidence, plausible_research
 from paradigms.publication import (
     classify_publication,
     looks_like_linked_research_document,
+    nonresearch_page_reason,
 )
 from paradigms.reputation import source_identity, source_link_allowed
 from research_watchlist import source_record
@@ -152,6 +153,11 @@ class PriorityResearchPageSource:
             async def complete_detail(index_url, link):
                 page = self.page_coverage[index_url]
                 try:
+                    reason = nonresearch_page_reason(link.url, title=link.title)
+                    if reason and reason != "access_challenge":
+                        detail_queues[index_url].complete(link, None, outside=False, exclusion_reason=reason)
+                        page["detail_exclusions"] = detail_queues[index_url].exclusions
+                        return
                     response = await read_detail(link)
                     outside_before = page["detail_outside_window"]
                     verifications = []
@@ -163,6 +169,10 @@ class PriorityResearchPageSource:
                         page["evidence"] += 1
                     elif page["detail_outside_window"] > outside_before:
                         detail_queues[index_url].complete(link, None, outside=True)
+                    elif page.get("detail_exclusion_reason"):
+                        reason = page.pop("detail_exclusion_reason")
+                        detail_queues[index_url].complete(link, None, outside=False, exclusion_reason=reason)
+                    page["detail_exclusions"] = detail_queues[index_url].exclusions
                     for row, published_at in verifications:
                         self.bibliography_resolver.verified(row, published_at, detail_contract=detail_queues[index_url].contract)
                 except Exception as exc:
@@ -218,9 +228,19 @@ class PriorityResearchPageSource:
                     }
                     logger.warning("官方研究入口返回失败 %s: %s", index_url, exc)
                     continue
+                reason = nonresearch_page_reason(str(response.url), response.text)
+                if (response.headers.get("cf-mitigated", "").casefold() == "challenge"
+                        or response.headers.get("x-vercel-mitigated", "").casefold() == "challenge"):
+                    reason = "access_challenge"
+                if reason:
+                    self.page_coverage[index_url] = {"status": "request_failed", "error": reason,
+                                                     "discovered_links": 0, "evidence": 0}
+                    continue
+                index_exclusions = []
                 try:
                     links = ([] if metadata.get("public_catalog") == "meta_publications_v1" else
-                             _discover_index_links(response.text, str(response.url), source_url=index_url))
+                             _discover_index_links(response.text, str(response.url), source_url=index_url,
+                                                   exclusions=index_exclusions))
                 except Exception as exc:
                     self.page_coverage[index_url] = {"status": "parse_zero_links", "error": type(exc).__name__,
                                                      "discovered_links": 0, "evidence": 0}
@@ -321,9 +341,10 @@ class PriorityResearchPageSource:
                     # Treat the newest dated section as one official release origin,
                     # not the whole multi-year page and not a parse failure.
                     links = [latest] if latest else []
-                allowed_links = [
-                    link for link in links if source_link_allowed(index_url, link.url)
-                ]
+                excluded_links = [*index_exclusions, *[{"url": link.url, "reason": reason} for link in links
+                                  if (reason := nonresearch_page_reason(link.url, title=link.title))]]
+                allowed_links = [link for link in links if source_link_allowed(index_url, link.url)
+                                 and not nonresearch_page_reason(link.url, title=link.title)]
                 recent_links = [
                     link
                     for link in allowed_links
@@ -371,10 +392,12 @@ class PriorityResearchPageSource:
                     ),
                     "discovered_links": len(links),
                     "allowed_links": len(allowed_links),
+                    "index_exclusions": excluded_links,
                     "recent_links": len(recent_links),
                     "selected_links": len(selected_links),
                     "detail_pending": queue.pending_count,
                     "detail_cached": cached_parsed,
+                    "detail_exclusions": queue.exclusions,
                     "detail_queue_version": DETAIL_QUEUE_VERSION,
                     "selection_limit_origin": self.limit_origin,
                     "detail_failures": script_failures + checkpoint_failures,
@@ -455,6 +478,19 @@ class PriorityResearchPageSource:
             self.page_coverage[index_url]["detail_failures"] = int(
                 self.page_coverage[index_url].get("detail_failures", 0)
             ) + 1
+            return None
+        reason = nonresearch_page_reason(str(response.url),
+                                        "" if _is_pdf_response(response, str(response.url)) else response.text)
+        if (response.headers.get("cf-mitigated", "").casefold() == "challenge"
+                or response.headers.get("x-vercel-mitigated", "").casefold() == "challenge"):
+            reason = "access_challenge"
+        if reason:
+            if reason == "access_challenge":
+                self.page_coverage[index_url]["detail_failures"] += 1
+                self.page_coverage[index_url].setdefault("detail_access_issues", []).append(
+                    {"url": link.url, "reason": reason})
+            else:
+                self.page_coverage[index_url]["detail_exclusion_reason"] = reason
             return None
         if (
             (urlparse(link.url).path.casefold().endswith(".pdf")
@@ -713,9 +749,28 @@ class PriorityResearchPageSource:
             ),
             "unresolved_citations": sum(int(item.get("unresolved_citations", 0)) for item in statuses),
             "detail_pending": sum(int(item.get("detail_pending", 0)) for item in statuses),
+            "nonresearch_excluded": sum(len(item.get("index_exclusions", [])) + len(item.get("detail_exclusions", []))
+                                        for item in statuses),
             "evidence": sum(int(item.get("evidence", 0) or 0) for item in statuses),
             "pages": self.page_coverage,
         }
+
+
+def _auxiliary_html(tag, attributes, *, in_body=False):
+    """Only structural UI chrome; never remove text based on research terms."""
+    names = set((attributes.get("class", "") + " " + attributes.get("id", "")).casefold().split())
+    auxiliary = tag not in {"body", "main", "article"} and any(
+        name == marker or name.startswith(marker + "-") or name.startswith(marker + "_")
+        for name in names for marker in {"related", "recommendations", "recommended", "sidebar",
+                                        "navbar", "navigation", "cookie-banner", "cookie-consent"}
+    )
+    style = re.sub(r"\s+", "", attributes.get("style", "")).casefold()
+    return (tag in {"script", "style", "svg", "nav", "aside", "noscript", "button", "select", "form"}
+            or tag in {"header", "footer"} and not in_body or auxiliary
+            or "hidden" in attributes or attributes.get("aria-hidden", "").casefold() == "true"
+            or "display:none" in style or "visibility:hidden" in style
+            or attributes.get("role", "").casefold() in {
+                "navigation", "complementary", "contentinfo", "menubar", "banner", "dialog", "alertdialog"})
 
 
 class _AnchorParser(HTMLParser):
@@ -728,11 +783,10 @@ class _AnchorParser(HTMLParser):
         self._elements: list[tuple[str, bool]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = dict(attrs)
+        attributes = {key.casefold(): value or "" for key, value in attrs}
         lowered = tag.casefold()
         excluded = (any(value for _, value in self._elements)
-                    or lowered in {"nav", "footer", "script", "style"}
-                    or attributes.get("role") in {"navigation", "menubar", "contentinfo", "banner"})
+                    or _auxiliary_html(lowered, attributes))
         if lowered not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
             self._elements.append((lowered, excluded))
         if lowered == "img" and self._href and attributes.get("alt"):
@@ -766,13 +820,18 @@ class _ArticleParser(HTMLParser):
         self.base_url = base_url
         self.title = ""
         self._citation_title = ""
-        self.published_at = ""
+        self._published_metadata = ""
+        self._fallback_date = ""
+        self._body_date = ""
+        self._article_date = ""
         self.modified_at = ""
         self.authors: list[str] = []
         self.site_name = ""
-        self._link_records: list[tuple[str, str, bool, bool]] = []
+        self._link_records: list[tuple[str, str, bool, bool, bool]] = []
         self._title_parts: list[str] = []
         self._text_parts: list[str] = []
+        self._body_parts: list[str] = []
+        self._article_parts: list[str] = []
         self._elements: list[tuple[str, bool, bool]] = []
         self._has_article_body = False
         self._in_title = False
@@ -785,15 +844,22 @@ class _ArticleParser(HTMLParser):
         self._byline_em = False
 
     @property
+    def published_at(self) -> str:
+        return self._published_metadata or self._article_date or self._body_date or self._fallback_date
+
+    @property
     def text(self) -> str:
-        return " ".join(self._text_parts)
+        # Previously only links were scoped to main/article; page chrome still
+        # entered the model as prose. Prefer the narrowest explicit body, with
+        # a fallback for simple academic pages without semantic containers.
+        return " ".join(self._article_parts or self._body_parts or self._text_parts)
 
     @property
     def links(self) -> list[tuple[str, str]]:
         return [
             (label, url)
-            for label, url, in_body, metadata in self._link_records
-            if metadata or not self._has_article_body or in_body
+            for label, url, in_body, metadata, in_article in self._link_records
+            if metadata or (in_article if self._article_parts else not self._has_article_body or in_body)
         ]
 
     def _excluded(self) -> bool:
@@ -802,29 +868,18 @@ class _ArticleParser(HTMLParser):
     def _in_body(self) -> bool:
         return any(item[2] for item in self._elements)
 
+    def _in_article(self) -> bool:
+        return any(tag == "article" and not excluded for tag, excluded, _ in self._elements)
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.casefold()
         attributes = {key.casefold(): value or "" for key, value in attrs}
         container_names = set((attributes.get("class", "") + " " + attributes.get("id", "")).casefold().split())
-        # WordPress body/layout classes such as content-sidebar and
-        # content-sidebar-wrap describe a grid, not a sidebar subtree.
-        # Exclude dedicated sidebar/related containers, not the whole article.
-        auxiliary = lowered not in {"body", "main", "article"} and any(
-            name == marker or name.startswith(marker + "-") or name.startswith(marker + "_")
-            for name in container_names for marker in {"related", "recommendations", "recommended", "sidebar"}
-        )
-        excluded = (
-            self._excluded()
-            or lowered in {"script", "style", "svg", "nav", "footer", "header", "aside"}
-            or auxiliary
-            or attributes.get("role", "").casefold() in {
-                "navigation", "complementary", "contentinfo", "menubar"
-            }
-        )
+        excluded = self._excluded() or _auxiliary_html(lowered, attributes, in_body=self._in_body())
         in_body = not excluded and (
-            lowered in {"main", "article"} or self._in_body()
+            lowered in {"main", "article"} or attributes.get("role", "").casefold() == "main" or self._in_body()
         )
-        if lowered in {"main", "article"} and not excluded:
+        if in_body:
             self._has_article_body = True
         if lowered not in {"area", "base", "br", "col", "embed", "hr", "img",
                            "input", "link", "meta", "param", "source", "track", "wbr"}:
@@ -847,7 +902,11 @@ class _ArticleParser(HTMLParser):
         if lowered == "title":
             self._in_title = True
         if not excluded and lowered == "time" and attributes.get("datetime"):
-            self.published_at = self.published_at or attributes["datetime"]
+            self._fallback_date = self._fallback_date or attributes["datetime"]
+            if in_body:
+                self._body_date = self._body_date or attributes["datetime"]
+            if self._in_article():
+                self._article_date = self._article_date or attributes["datetime"]
         if not excluded and lowered == "a" and attributes.get("href"):
             self._href = urljoin(self.base_url, attributes["href"])
             self._link_label = []
@@ -865,6 +924,7 @@ class _ArticleParser(HTMLParser):
                         urljoin(self.base_url, href),
                         False,
                         True,
+                        False,
                     )
                 )
         if not excluded and lowered == "meta":
@@ -876,7 +936,7 @@ class _ArticleParser(HTMLParser):
                 "citation_publication_date",
                 "citation_date",
             }:
-                self.published_at = self.published_at or attributes.get("content", "")
+                self._published_metadata = self._published_metadata or attributes.get("content", "")
             if key in {"article:modified_time", "datemodified", "last-modified"}:
                 self.modified_at = self.modified_at or attributes.get("content", "")
             if key in {"author", "citation_author"}:
@@ -913,6 +973,7 @@ class _ArticleParser(HTMLParser):
                         urljoin(self.base_url, attributes["content"]),
                         False,
                         True,
+                        False,
                     )
                 )
 
@@ -934,7 +995,7 @@ class _ArticleParser(HTMLParser):
         if lowered == "a" and self._href:
             self._link_records.append(
                 (_compact_text(" ".join(self._link_label)), self._href,
-                 self._in_body(), False)
+                 self._in_body(), False, self._in_article())
             )
             self._href = ""
             self._link_label = []
@@ -952,8 +1013,12 @@ class _ArticleParser(HTMLParser):
             self._title_parts.append(data)
         if self._href:
             self._link_label.append(data)
-        if not self._excluded() and data.strip():
+        if not self._excluded() and not self._in_title and data.strip():
             self._text_parts.append(data.strip())
+            if self._in_body():
+                self._body_parts.append(data.strip())
+            if self._in_article():
+                self._article_parts.append(data.strip())
 
 
 class _StructuredDataParser(HTMLParser):
@@ -1200,7 +1265,8 @@ def _merge_catalog_diagnostics(target, page):
     target["pending_records"].extend(page["pending_records"])
 
 
-def _discover_index_links(html_text: str, base_url: str, *, source_url: str | None = None) -> list[_ResearchLink]:
+def _discover_index_links(html_text: str, base_url: str, *, source_url: str | None = None,
+                          exclusions: list | None = None) -> list[_ResearchLink]:
     parser = _AnchorParser()
     parser.feed(html_text)
     by_url: dict[str, _ResearchLink] = {}
@@ -1220,6 +1286,10 @@ def _discover_index_links(html_text: str, base_url: str, *, source_url: str | No
         else:
             title, href, embedded_date = raw_link
         url = urljoin(base_url, href)
+        if reason := nonresearch_page_reason(url, title=title):
+            if exclusions is not None:
+                exclusions.append({"url": url, "reason": reason})
+            continue
         if url.rstrip("/") == base_url.rstrip("/") or href.startswith("#"):
             continue
         if _generic_index_label(title):
@@ -1347,8 +1417,13 @@ def _discover_latest_changelog_entry(
 ) -> _ResearchLink | None:
     """Extract the newest dated section from a first-party changelog page."""
 
+    # Registered changelogs can render a publication-date badge as a button.
+    # Preserve ONLY exact date labels, not arbitrary UI/button prose globally.
+    def date_label(match):
+        value = _compact_text(re.sub(r"<[^>]+>", " ", html_lib.unescape(match.group(1))))
+        return "<time>" + value + "</time>" if re.fullmatch(r"20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}", value) else match.group(0)
     parser = _ArticleParser(page_url)
-    parser.feed(html_text)
+    parser.feed(re.sub(r"<button\b[^>]*>(.*?)</button>", date_label, html_text, flags=re.I | re.S))
     text = _compact_text(parser.text)
     matches = list(
         re.finditer(r"\b(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})\b", text)
@@ -1356,7 +1431,7 @@ def _discover_latest_changelog_entry(
     dated: list[tuple[datetime, re.Match[str]]] = []
     for match in matches:
         published = _parse_date(match.group(1))
-        if published and published >= cutoff:
+        if published and cutoff <= published <= research_now():
             dated.append((published, match))
     if not dated:
         return None
@@ -1481,6 +1556,8 @@ def _structured_scalar(value: object) -> str:
 
 def _looks_like_research_link(title: str, url: str) -> bool:
     if not title or len(title) < 5 or not url.startswith(("http://", "https://")):
+        return False
+    if nonresearch_page_reason(url, title=title):
         return False
     lowered_title = title.casefold()
     lowered_path = urlparse(url).path.casefold()

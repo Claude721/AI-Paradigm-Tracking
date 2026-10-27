@@ -230,7 +230,8 @@ class CommunityEvidenceClient:
         cutoff = int(
             (research_now() - timedelta(days=research_days())).timestamp()
         )
-        query = candidate.name
+        from .social_web_search_source import _search_identity, _result_is_related
+        query = _search_identity(candidate)[0]
         response = await client.get(
             "https://hn.algolia.com/api/v1/search",
             params={
@@ -251,7 +252,7 @@ class CommunityEvidenceClient:
             raise ValueError("Invalid Hacker News search response")
         results = []
         for hit in payload["hits"]:
-            if not _is_related(candidate, hit.get("title") or ""):
+            if not _result_is_related(candidate, query, " ".join(str(hit.get(key) or "") for key in ("title", "url", "story_text"))):
                 continue
             object_id = hit.get("objectID", "")
             results.append(
@@ -268,7 +269,8 @@ class CommunityEvidenceClient:
                         "comments": hit.get("num_comments", 0) or 0,
                     },
                     identifiers={"hackernews": str(object_id)},
-                    raw={"relationship": "exact_or_mechanism_title_match", "ephemeral_content": True, "social_platform": "hackernews"},
+                    raw={"relationship": "exact_work_reference", "ephemeral_content": True,
+                         "referenced_url": str(hit.get("url") or ""), "social_platform": "hackernews"},
                 )
             )
         candidate.community_coverage["hackernews"] = (
@@ -303,7 +305,7 @@ class CommunityEvidenceClient:
             "https://api.x.com/2/tweets/search/recent",
             headers={"Authorization": f"Bearer {config.TWITTER_BEARER_TOKEN}"},
             params={
-                "query": f'"{phrase}" -is:retweet',
+                "query": f'"{phrase}"',
                 "max_results": 20,
                 "tweet.fields": "created_at,author_id,public_metrics",
                 "expansions": "author_id",

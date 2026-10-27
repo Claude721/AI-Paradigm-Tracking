@@ -37,7 +37,9 @@ def references_origin(candidate, evidence):
         if ids & _ids(origin):
             return True
         title = _normal(origin.title)
-        if len(title) >= 20 and title in text:
+        words = re.findall(r"[^\W_]+", origin.title, re.UNICODE)
+        if len(title) >= 20 and words and re.search(r"(?<!\w)" + r"[\W_]*".join(
+                re.escape(word) for word in words) + r"(?!\w)", evidence.title + " " + evidence.summary, re.I):
             return True
         # Require an actual stable reference, never two generic keyword hits.
         if origin.url and origin.url in evidence.summary:

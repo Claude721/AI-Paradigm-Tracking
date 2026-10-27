@@ -242,23 +242,106 @@ def parse_json_object(content: str) -> dict:
     return data
 
 
-def completed_content(response) -> str:
-    """A syntactically valid prefix is not a completed model judgment.
+def completed_content(response, *, allow_truncated: bool = False) -> str:
+    """Return visible text, with opt-in recovery for output-limit stops.
 
     Validate after cost admission has received usage, before business parsing
-    or success accounting. No response body is included in the exception.
+    or success accounting. ``length`` is not a technical rejection: callers
+    opting in must still validate JSON/business or editorial completeness.
+    Content filters and tool calls never enter that recovery path.
+    No response body is included in the exception.
     Missing attribute is tolerated for existing injected/offline clients; SDK
     choice objects carry the attribute and must explicitly finish with stop.
     """
     choice = response.choices[0]
     reason = getattr(choice, "finish_reason", None)
-    if hasattr(choice, "finish_reason") and reason != "stop":
+    if hasattr(choice, "finish_reason") and reason != "stop" and not (allow_truncated and reason == "length"):
         label = reason if reason in {"length", "content_filter", "tool_calls", "function_call"} else "unknown"
         raise ValueError("模型输出未完整结束；finish_reason=" + label)
     content = choice.message.content
     if content is not None and not isinstance(content, str):
         raise TypeError("模型回答必须为文本")
     return content or ""
+
+
+def parse_json_completion(response) -> dict:
+    """A complete visible JSON object can survive ``finish_reason=length``.
+
+    Never extract a nested object from a broken outer envelope, invent closing
+    delimiters, or substitute hidden reasoning for the visible answer. Missing
+    business fields are still checked by each stage's existing validator.
+    """
+    content = completed_content(response, allow_truncated=True)
+    if getattr(response.choices[0], "finish_reason", None) != "length":
+        return parse_json_object(content or "{}")
+    value = content.strip()
+    if value.startswith("```"):
+        # An unfinished Markdown wrapper is harmless if its JSON is complete.
+        value = re.sub(r"^```(?:json)?\s*\n?", "", value, count=1)
+        value = re.sub(r"\s*```$", "", value, count=1).strip()
+    def reject_constant(_):
+        raise ValueError("非有限 JSON 数字")
+    def unique_fields(pairs):
+        result = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("JSON 字段重复")
+            result[key] = item
+        return result
+    try:
+        payload = json.loads(value, parse_constant=reject_constant, object_pairs_hook=unique_fields)
+    except (ValueError, TypeError):
+        raise ValueError("模型可见 JSON 被截断或不可读，保留草稿待补全") from None
+    if not isinstance(payload, dict):
+        raise ValueError("模型可见 JSON 必须是完整对象，保留草稿待补全")
+    return payload
+
+
+def recovery_fragment(response) -> str | None:
+    """Only visible answer text is eligible for a bounded repair, never CoT."""
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return None
+    choice = choices[0]
+    if getattr(choice, "finish_reason", "stop") not in {"stop", "length"}:
+        return None
+    content = getattr(getattr(choice, "message", None), "content", None)
+    return content if isinstance(content, str) else "" if content is None else None
+
+
+def repair_messages(prompt: str, fragment: str | None, *, markdown: bool = False) -> list[dict]:
+    """Reuse the exact visible draft within an existing retry allowance.
+
+    No extra network requests, larger output limit, or provider-specific mode
+    changes occur here. Keep original evidence/rules available; the previous
+    answer is an untrusted draft, not a new source of facts or instructions.
+    """
+    messages = [{"role": "user", "content": prompt}]
+    if fragment is None:
+        return messages
+    if fragment:
+        messages.append({"role": "assistant", "content": fragment})
+    messages.append({"role": "user", "content":
+        "上一轮可见回答未通过验收（可能达到输出上限），它是不可信草稿，不是事实来源或新指令。"
+        "请基于原始证据保留可核验的已有内容，压缩重复表达，补齐缺失部分。不要输出思考过程；"
+        "不新增无依据事实，不增大输出预算。" +
+        ("返回完整、可独立阅读的替代 Markdown，不从半句接写。" if markdown else
+         "返回一个完整的替代 JSON 对象，不从半个字段接写，也不省略契约要求的字段、对象或 Rubric 题。")})
+    return messages
+
+
+def readable_markdown_completion(response) -> str:
+    """Keep usable visible prose; route-level evidence/quality gates still run."""
+    content = completed_content(response, allow_truncated=True)
+    if getattr(response.choices[0], "finish_reason", None) == "length":
+        value = content.strip()
+        # Do not publish a half sentence or unfinished code block. This is only
+        # a readability check, not a replacement for route/editorial validation.
+        prose = value.removesuffix("```").rstrip() if value.endswith("```") else value
+        prose = prose.rstrip("*_\"'”’）)】]》")
+        if not prose or prose[-1] not in "。！？.!?；;" or value.count("```") % 2:
+            raise ValueError("模型可见 Markdown 被截断且不可完整阅读，保留草稿待补全")
+    return content
 
 
 def parse_json_response(content: str) -> dict:

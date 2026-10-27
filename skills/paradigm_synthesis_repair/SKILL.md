@@ -24,4 +24,6 @@ description: 只修复已经解析成功的范式综合 JSON 中缺失或不合�
 
 如果失败原因指向 Rubric，只返回核验后的 `innovation_types` 和完整 `rubric_answers`；每题只使用 Rubric option key，不输出数字分数。若两类都失败，两部分都返回。
 
+只有完整 Rubric 明确判断 `current_work_intervention` 为 explanation_or_restatement 或 non_ai_process 时，mental_model 才可以为空对象；这表示纠正错误初筛，不得给科普/制度文章虚构 AI 训练过程。真正的技术机制或贡献尚不确定时，仍须满足原有心智模型契约。
+
 只输出合法 JSON 对象，不输出 Markdown、解释或代码围栏。

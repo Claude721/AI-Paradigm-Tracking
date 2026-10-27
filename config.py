@@ -448,10 +448,10 @@ PARADIGM_AUTO_RESUME_MAX_RUNS: int = max(1, min(_env_int("PARADIGM_AUTO_RESUME_M
 PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS: int = max(60, _env_int("PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS", 14400))
 PARADIGM_AUTO_RESUME_MAX_TOKENS: int = max(1, _env_int("PARADIGM_AUTO_RESUME_MAX_TOKENS", 4000000))
 
-# 定时任务（默认每周五 09:15，Asia/Shanghai；与 GitHub Actions 一致）
-SCHEDULE_DAY_OF_WEEK: str = os.getenv("SCHEDULE_DAY_OF_WEEK", "fri")
-SCHEDULE_HOUR: int = _env_int("SCHEDULE_HOUR", 9)
-SCHEDULE_MINUTE: int = _env_int("SCHEDULE_MINUTE", 15)
+# 定时任务（默认每周一 08:00，Asia/Shanghai；与 GitHub Actions 一致）
+SCHEDULE_DAY_OF_WEEK: str = os.getenv("SCHEDULE_DAY_OF_WEEK", "mon")
+SCHEDULE_HOUR: int = _env_int("SCHEDULE_HOUR", 8)
+SCHEDULE_MINUTE: int = _env_int("SCHEDULE_MINUTE", 0)
 SCHEDULE_TIMEZONE: str = os.getenv("SCHEDULE_TIMEZONE", "Asia/Shanghai")
 
 # 报告邮件推送（可选；未启用时只生成本地 Markdown）

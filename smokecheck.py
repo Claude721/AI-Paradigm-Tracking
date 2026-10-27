@@ -406,7 +406,7 @@ async def _check_models(*, client_factory=None) -> list[SmokeResult]:
             )
             # Record confirmed usage even if the response was truncated or malformed.
             receipt = _model_usage(response)
-            content = completed_content(response).strip()
+            content = completed_content(response, allow_truncated=True).strip()
             try:
                 payload = json.loads(content)
                 contract_ok = isinstance(payload, dict) and set(payload) == {"ok"} and payload["ok"] is True

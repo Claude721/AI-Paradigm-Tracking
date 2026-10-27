@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from paradigms.models import TechnicalEvidence, nonnegative_number
-from paradigms.publication import classify_publication
+from paradigms.publication import classify_publication, nonresearch_page_reason
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,10 @@ class ArxivDocumentClient:
                     headers={"User-Agent": "AI-Paradigm-Radar/3.3"},
                 )
                 response.raise_for_status()
+                if (nonresearch_page_reason(str(response.url), response.text)
+                        or response.headers.get("cf-mitigated", "").casefold() == "challenge"
+                        or response.headers.get("x-vercel-mitigated", "").casefold() == "challenge"):
+                    raise ValueError("一手 HTML 返回非研究页面")
         except Exception as exc:
             logger.warning("arXiv HTML 补水失败 [%s]: %s", arxiv_id, exc)
             if (
@@ -92,6 +96,8 @@ class ArxivDocumentClient:
                         headers={"User-Agent": "AI-Paradigm-Radar/3.3"},
                     )
                     project_response.raise_for_status()
+                    if nonresearch_page_reason(str(project_response.url), project_response.text):
+                        raise ValueError("项目页返回非研究页面")
                 project_detail = parse_project_page(
                     project_response.text,
                     base_url=str(project_response.url),
@@ -177,10 +183,16 @@ class ArxivDocumentClient:
                 else:
                     if "application/pdf" in content_type:
                         raise ValueError("PDF 响应不含有效文件头")
-                    parser = _GenericDocumentParser()
+                    if (nonresearch_page_reason(str(response.url), response.text)
+                            or nonresearch_page_reason(url)
+                            or response.headers.get("cf-mitigated", "").casefold() == "challenge"
+                            or response.headers.get("x-vercel-mitigated", "").casefold() == "challenge"):
+                        raise ValueError("链接文档返回非研究页面")
+                    from sources.priority_research_source import _ArticleParser
+                    parser = _ArticleParser(str(response.url))
                     parser.feed(response.text)
                     excerpt = _distributed_text_excerpt(
-                        _compact_text(" ".join(parser.parts)),
+                        _compact_text(parser.text),
                         limit=limit,
                     )
                     source_kind = "official_linked_html"
@@ -498,28 +510,6 @@ class _ArxivHTMLParser(HTMLParser):
             self.authors.append(content)
         elif name == "citation_author_institution":
             self.affiliations.append(content)
-
-
-class _GenericDocumentParser(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self._ignored_depth = 0
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        if tag.casefold() in {"script", "style", "svg", "nav", "footer"}:
-            self._ignored_depth += 1
-
-    def handle_endtag(self, tag: str) -> None:
-        if (
-            tag.casefold() in {"script", "style", "svg", "nav", "footer"}
-            and self._ignored_depth
-        ):
-            self._ignored_depth -= 1
-
-    def handle_data(self, data: str) -> None:
-        if not self._ignored_depth and data.strip():
-            self.parts.append(data.strip())
 
 
 class _ProjectPageParser(HTMLParser):

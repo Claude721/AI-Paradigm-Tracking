@@ -237,6 +237,25 @@ class ParadigmOrchestrator:
                 stats[key] = max(count, self.campaign.stats.get(key, 0))
             if any(rejected.values()):
                 run_audit.event("discovery_record_contract", "isolated", f"坏输入逐条隔离：{rejected}；健康材料继续，不能据此形成成功空报告")
+            if stats.get("discovery_executed"):
+                for item in batch.origins:
+                    item.raw.pop("event_recall_key", None)
+                recalled = self.store.load_event_recalled_origins(batch.supporting,
+                    reference_time=research_now(), window_days=self.ordinary_discovery_lookback_days)
+                by_identity = {item.fingerprint: item for item in batch.origins}
+                for item in recalled:
+                    if item.fingerprint in by_identity:
+                        # Scheduling metadata is one unit: dropping the seen
+                        # ledger reopens this origin when an old event vanishes.
+                        # Keep the fresh source body/date/revision untouched.
+                        by_identity[item.fingerprint].raw.update({
+                            "event_recall_key": item.raw["event_recall_key"],
+                            "event_recall_seen": list(item.raw["event_recall_seen"]),
+                        })
+                    else:
+                        by_identity[item.fingerprint] = item
+                batch.origins = list(by_identity.values())
+                stats["event_recalled_origins"] = len(recalled)
         # 发现源的耗时不可预知，尤其冷启动会翻阅更长窗口。研究阶段的份额
         # 必须在发现完成后按剩余时间重新划分，否则慢发现会把机制抽取窗口
         # 直接吃完，形成“抓到近两万条、只分析六条”的假运行。
@@ -433,16 +452,30 @@ class ParadigmOrchestrator:
         )
         bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5}
         if bounded:
-            from paradigms.delivery_policy import bounded_origins
-            selected = bounded_origins(batch.origins, limit=config.PARADIGM_RESEARCH_ORIGIN_LIMIT,
-                reference_time=research_now(), days=self.high_signal_discovery_lookback_days)
+            from paradigms.delivery_policy import bounded_origins, origin_selection_summary
+            campaign_stats = self.store.campaigns.get(self.campaign.campaign_id, load_discovery=False).stats
+            if "origin_scope" in campaign_stats:
+                scope = set(campaign_stats["origin_scope"])
+                selected = [item for item in batch.origins if item.fingerprint in scope]
+                stats["origin_selection"] = campaign_stats.get("origin_selection") or {
+                    **origin_selection_summary(batch.origins, selected),
+                    "version": None, "policy": "frozen_legacy_scope",
+                }
+            else:
+                event_origins = [item for item in batch.origins if item.raw.get("event_recall_key")]
+                regular = bounded_origins(batch.origins, limit=config.PARADIGM_RESEARCH_ORIGIN_LIMIT,
+                    reference_time=research_now(), days=self.high_signal_discovery_lookback_days,
+                    ordinary_days=self.ordinary_discovery_lookback_days)
+                selected = list({item.fingerprint: item for item in [*event_origins, *regular]}.values())[:config.PARADIGM_RESEARCH_ORIGIN_LIMIT]
+                stats["origin_selection"] = origin_selection_summary(batch.origins, selected)
         with self.store.transaction():
             # Persist the downstream campaign snapshot before the upstream
             # discovery records are acknowledged. A crash commits both or none.
             self.store.campaigns.save_discovery(self.campaign.campaign_id, batch)
             if bounded:
                 self.store.campaigns.set_origin_scope(self.campaign.campaign_id, selected,
-                    input_diagnostics={key: stats.get(key, 0) for key in ("discovery_rejected_origins", "discovery_rejected_supporting")})
+                    input_diagnostics={**{key: stats.get(key, 0) for key in ("discovery_rejected_origins", "discovery_rejected_supporting")},
+                                       "origin_selection": stats["origin_selection"]})
             origins, incremental, origin_checkpoint = self.store.observe_origins(batch.origins)
             self.store.campaigns.reconcile(self.campaign.campaign_id)
         if bounded:
@@ -828,6 +861,7 @@ class ParadigmOrchestrator:
                     "admission_reason": candidate.admission_reason,
                     "rejection_reason": candidate.rejection_reason,
                     "community_coverage": candidate.community_coverage,
+                    "propagation_assessment": candidate.propagation_assessment,
                     "rubric_version": candidate.rubric_assessment.get(
                         "version", ""
                     ),
@@ -1238,6 +1272,28 @@ class ParadigmOrchestrator:
             origin_queues[lane].append(item)
         initial_deep = self.store.load_pending_deep_candidates()
         bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5}
+        historical_pending_keys = set()
+        if bounded:
+            from paradigms.propagation import history_recall_plan
+            history = self.store.load_refresh_candidates(limit=0, include_pending=True, include_rejected=True)
+            current_members = self.store.campaigns.candidate_keys(self.campaign.campaign_id)
+            history = [item for item in history if item.key not in current_members]
+            frozen = self.store.campaigns.get(self.campaign.campaign_id, load_discovery=False)
+            if frozen.stats.get("refresh_scope_sealed"):
+                historical = self.store.load_candidate_snapshots(self.store.campaigns.pending_keys(frozen.campaign_id, "refresh"))
+                recall_stats = frozen.stats.get("history_recall", {"scope_reused": True})
+            else:
+                historical, recall_stats = history_recall_plan(history, supporting,
+                    limit=config.PARADIGM_RESEARCH_REFRESH_LIMIT, reference_time=now, window_days=window)
+            stats["history_recall"] = recall_stats
+            recalled_pending = [item for item in historical if item.status == "pending_deep"]
+            historical_pending_keys = {item.key for item in recalled_pending}
+            if recalled_pending:
+                from database.paradigm_store import _deep_checkpoint_input_signature, _persistable_candidate
+                self.store.campaigns.include(self.campaign.campaign_id, "deep", [
+                    (item.key, _deep_checkpoint_input_signature(item), _persistable_candidate(item).to_dict())
+                    for item in recalled_pending])
+            historical = [item for item in historical if item.key not in historical_pending_keys]
         if bounded:
             member_keys = self.store.campaigns.candidate_keys(self.campaign.campaign_id)
             initial_deep = [item for item in initial_deep if item.key in member_keys]
@@ -1251,11 +1307,8 @@ class ParadigmOrchestrator:
             lane = lane_for(item)
             deep_lanes[item.key] = lane
             deep_queues[lane].append(item.key)
-        historical = self.store.load_refresh_candidates(
-            exclude_keys=set(deep_tasks), limit=0
-        )
-        if bounded:
-            historical = historical[:config.PARADIGM_RESEARCH_REFRESH_LIMIT]
+        if not bounded:
+            historical = self.store.load_refresh_candidates(exclude_keys=set(deep_tasks), limit=0)
         campaign = getattr(self, "campaign", None)
         campaign_key = campaign.campaign_id if campaign else None
         if campaign_key:
@@ -1489,6 +1542,7 @@ class ParadigmOrchestrator:
                     group.append(deep_tasks.pop(key))
                     deep_lanes.pop(key, None)
                 if group:
+                    _mark_refresh_attempted(self, [item for item in group if item.key in historical_pending_keys])
                     attempts = start_attempts("deep", group)
                     done, budget, failures = await self._deep_analyze_in_batches(
                         group, supporting, visit_deadline
@@ -1652,7 +1706,7 @@ class ParadigmOrchestrator:
         }
 
     async def _repair_syntheses_after_first_visits(self, completed, refreshed, supporting, deadline):
-        """One repair per parsed failed result, after every first visit.
+        """One repair per incomplete result/draft, after every first visit.
 
         Reuse the in-memory evidence actually read by the first request. Do not
         repeat external searches or relax source revision/CAS checks.

@@ -14,7 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import config
 from paradigms.search_receipts import search_receipt_summary
-from agents.llm_utils import build_client, completed_content
+from agents.llm_utils import build_client, readable_markdown_completion, recovery_fragment, repair_messages
 from paradigms.models import (
     ORIGIN_EVIDENCE_TYPES,
     EvidenceType,
@@ -348,10 +348,11 @@ class ParadigmReportGenerator:
         temperature: float,
         max_tokens: int,
     ) -> str:
-        """对瞬时连接/读超时做一次显式、可审计的业务重试。"""
+        """保留可读截断正文；连接或不可读输出最多显式重试一次。"""
 
         client, model = self._get_client()
         last_error: Exception | None = None
+        fragment = None
         for attempt in range(2):
             response = None
             try:
@@ -362,13 +363,11 @@ class ParadigmReportGenerator:
                 )
                 response = await run_audit.chat_completion(client, stage=stage, role="main", subject=subject,
                     model=model,
-                    messages=[
-                        {"role": "user", "content": prompt + retry_note}
-                    ],
+                    messages=repair_messages(prompt + retry_note, fragment, markdown=True),
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
-                content = completed_content(response)
+                content = readable_markdown_completion(response)
                 run_audit.record_llm(
                     stage=stage,
                     role="main",
@@ -379,6 +378,7 @@ class ParadigmReportGenerator:
                 return _strip_code_fence(content)
             except Exception as exc:
                 last_error = exc
+                fragment = recovery_fragment(response)
                 run_audit.record_llm(
                     stage=stage,
                     role="main",
@@ -561,6 +561,8 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
         value.fingerprint for value in [*primary_sources, *momentum_evidence]
     }
     return {
+        "current_work_contribution": item.contribution_review,
+        "propagation_assessment": item.propagation_assessment,
         "name": item.name,
         "route_family": item.route_family,
         "report_kind": item.report_kind,
@@ -662,6 +664,8 @@ def _compact_route_dossier(item: ParadigmCandidate) -> dict:
     )
 
     return {
+        "current_work_contribution": item.contribution_review,
+        "propagation_assessment": item.propagation_assessment,
         "name": item.name,
         "route_family": item.route_family,
         "report_kind": item.report_kind,
@@ -1152,6 +1156,7 @@ def _momentum_evidence(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
     }
     selected = []
     from paradigms.evidence_association import countable_evidence
+    from paradigms.propagation import verified_diffusion
     for value in candidate.evidence:
         if not countable_evidence(candidate, value):
             continue
@@ -1159,14 +1164,14 @@ def _momentum_evidence(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
             continue
         if value.raw.get("indexed_discovery_only"):
             continue
-        if value.raw.get("relationship") == "author_self_release":
+        if value.raw.get("relationship") == "author_self_release" and not verified_diffusion(candidate, value):
             continue
         if value.evidence_type in {
             EvidenceType.COMMUNITY_DISCUSSION,
             EvidenceType.SECONDARY_INTERPRETATION,
         } and not is_verified_substantive_discussion(
             value, route_key=candidate.key
-        ):
+        ) and not verified_diffusion(candidate, value):
             continue
         if value.evidence_type in {
             EvidenceType.INDEPENDENT_REPLICATION,
@@ -1211,7 +1216,11 @@ def _audited_momentum_text(
             candidate.trend_interpretation,
         )
     signals = []
+    from paradigms.propagation import verified_diffusion
     for value in evidence:
+        if verified_diffusion(candidate, value):
+            signals.append(f"公开传播 {value.url}；指标 {json.dumps(value.metrics, ensure_ascii=False)}；"
+                           "仅证明当前工作被看见，不证明技术验证或具体子机制获承接")
         if value.evidence_type == EvidenceType.IMPLEMENTATION and value.raw.get(
             "independence"
         ) in {"official", "publisher"}:
@@ -1229,7 +1238,7 @@ def _audited_momentum_text(
             )
     return (
         signals,
-        "本轮尚未核验到非作者主体对当前机制的实质二次讨论；"
+        "本轮已核验的公开传播与采用事实如上；尚未核验到非作者主体对当前机制的实质二次讨论；"
         "标题命中与搜索摘要仅作为继续核验的线索。",
         "目前可确认原点提出及上述有限采用/引用事实，独立社区承接证据仍不足；"
         "平台覆盖边界以本轮检索记录为准。",

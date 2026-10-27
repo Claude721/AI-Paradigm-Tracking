@@ -21,6 +21,8 @@ def inspect_capacity(database: Path, audit_path: Path) -> dict:
     for stage, rows in stages.items():
         timings = [row['elapsed_seconds'] for row in rows if type(row.get('elapsed_seconds')) in (int,float) and math.isfinite(row['elapsed_seconds']) and row['elapsed_seconds'] >= 0]
         value = {"calls": len(rows), "failures": sum(row.get("status") == "failed" for row in rows),
+                 "needs_repair": sum(row.get("status") == "needs_repair" for row in rows),
+                 "truncated_usable": sum(row.get("output_recovery") == "accepted_after_validation" for row in rows),
                  "unknown_usage": sum(row.get("usage_reported") is not True for row in rows),
                  "request_seconds": round(sum(timings),3) if timings else None,
                  "timing_recorded_calls": len(timings)}

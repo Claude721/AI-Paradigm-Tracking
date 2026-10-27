@@ -81,6 +81,7 @@ class RunAudit:
         prompt_details = getattr(usage, "prompt_tokens_details", None)
         choices = getattr(response, "choices", None) or []
         first_choice = choices[0] if choices else None
+        truncated = getattr(first_choice, "finish_reason", None) == "length"
         message = getattr(first_choice, "message", None)
         content = getattr(message, "content", "") or ""
         total = getattr(usage, "total_tokens", None)
@@ -97,7 +98,8 @@ class RunAudit:
                 "role": role,
                 "model": model,
                 "subject": _clean(subject, 180),
-                "status": "failed" if error else "passed",
+                "status": "needs_repair" if error and truncated else "failed" if error else "passed",
+                "output_recovery": ("needs_repair" if error else "accepted_after_validation") if truncated else "",
                 "usage_reported": usage_reported,
                 "prompt_tokens": _integer(getattr(usage, "prompt_tokens", 0)),
                 "completion_tokens": _integer(
@@ -194,6 +196,9 @@ class RunAudit:
             "llm_failed_count": sum(
                 item.get("status") == "failed" for item in self.llm_calls
             ),
+            "llm_truncated_count": sum(item.get("finish_reason") == "length" for item in self.llm_calls),
+            "llm_repair_needed_count": sum(item.get("status") == "needs_repair" for item in self.llm_calls),
+            "llm_truncated_accepted_count": sum(item.get("output_recovery") == "accepted_after_validation" for item in self.llm_calls),
             "llm_prompt_tokens": sum(
                 _integer(item.get("prompt_tokens")) for item in self.llm_calls
             ),
@@ -250,6 +255,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- 恢复待抽取积压：{stats.get('pending_origin_backlog_loaded', 0)}",
         f"- 实际机制抽取：{stats.get('analysis_count', 0)}",
         f"- 资格预筛明确排除：{stats.get('origin_prefilter_rejected_count', 0)}",
+        f"- 当前传播事件召回原点：{stats.get('event_recalled_origins', 0)}；历史召回：{stats.get('history_recall', {})}",
         f"- 进入完整机制 Rubric：{stats.get('origin_full_review_count', 0)}",
         f"- 完成结构化判断：{stats.get('analysis_completed_count', stats.get('analysis_count', 0))}",
         f"- 抽取结构失败、保留待重试：{stats.get('analysis_failed_count', 0)}",
@@ -280,14 +286,33 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- 三类工作耗时（秒）：{(stats.get('research_service') or {}).get('seconds', {})}",
         f"- 首次访问后的修复/人物补充耗时（秒）：{(stats.get('research_service') or {}).get('post_first_visit_seconds', {})}",
         "",
-        "## 信源返回量（取材快照；续跑不代表本次重新请求）",
-        "",
     ]
+    selection = stats.get("origin_selection") or {}
+    if selection:
+        lines.extend([
+            "## 原点选材范围（不是技术淘汰）", "",
+            f"- 发现 {selection.get('discovered', 0)}；选定 {selection.get('selected', 0)}；其中无发布日期 {selection.get('undated_selected', 0)}",
+            f"- 策略：{selection.get('version') or '冻结历史范围'}；有界取材，不代表全量覆盖，未选材料不作技术否定。",
+        ])
+        discovered = selection.get("source_discovered") or {}
+        chosen = selection.get("source_selected") or {}
+        lines.extend(f"- {name}：选定 {chosen.get(name, 0)} / 发现 {count}"
+                     for name, count in sorted(discovered.items()))
+        lines.append("")
+    lines.extend(["## 信源返回量（取材快照；续跑不代表本次重新请求）", ""])
     if source_counts:
         lines.extend(f"- {name}：{count}" for name, count in source_counts.items())
     else:
         lines.append("- 本轮未写入结构化信源计数。")
     coverage = stats.get("frontier_coverage") or {}
+    input_exclusions = coverage.get("origin_input_exclusions") or []
+    if input_exclusions:
+        reasons = defaultdict(int)
+        for item in input_exclusions:
+            reasons[str(item.get("reason", "unknown"))] += 1
+        lines.extend(["", "## 输入内容诊断", "",
+                      f"- 未作为技术原点使用：{len(input_exclusions)} 条；按原因 {dict(reasons)}",
+                      "- 招聘/账户页是取材资格排除；访问挑战是可重试的来源缺口，不是技术否定。逐对象 URL/来源在 JSON pipeline_stats.frontier_coverage.origin_input_exclusions 中保留。"])
     domains = coverage.get("domains") or {}
     lines.extend(["", "## 前沿领域覆盖审计", ""])
     if domains:
@@ -375,7 +400,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
             "",
             "## 模型用量",
             "",
-            f"- 调用：{llm['llm_call_count']} 次；失败 {llm['llm_failed_count']} 次",
+            f"- 调用：{llm['llm_call_count']} 次；失败 {llm['llm_failed_count']} 次；截断待补全 {llm.get('llm_repair_needed_count', 0)} 次；截断但校验可用 {llm.get('llm_truncated_accepted_count', 0)} 次",
             f"- 用量未确认：{llm.get('llm_unreported_usage_count', 0)} 次；不能将缺失用量视为测得零",
             f"- 输入 tokens：{llm['llm_prompt_tokens']}",
             f"- 输出 tokens：{llm['llm_completion_tokens']}",

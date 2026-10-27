@@ -312,6 +312,32 @@ class ProductionExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((stats["delivery_scope"]["deep_planned"], stats["delivery_scope"]["deep_completed"]), (67, 67))
         require_completed_research(stats, candidates=process.pending_delivery)
 
+    async def test_unreadable_length_repair_runs_after_all_first_visits_and_commits_healthy_peers(self):
+        process, _ = execution_fixture.ExecutionDeliveryTests.distinct_process(self, total=3, fail=-1)
+        process.delivery_contract_version = 5
+        subjects, order = [], []
+        async def complete(**kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            name = next(line for line in prompt.splitlines() if line.startswith("暂定名称："))
+            repeated = name in subjects
+            if not repeated:
+                subjects.append(name)
+            order.append(repeated)
+            # First two are unreadable, and only the first can be repaired.
+            if name == subjects[0] and not repeated or len(subjects) > 1 and name == subjects[1]:
+                return SimpleNamespace(choices=[SimpleNamespace(finish_reason="length",
+                    message=SimpleNamespace(content='{"mechanism":"未结束'))], usage=None)
+            return response(synthesis_payload([0]))
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=complete)))
+        process.synthesizer = ParadigmSynthesizer(client=client, model="offline", allow_partial_sources=True)
+        stats = await process.run(reference_time=fixture.NOW)
+        self.assertEqual(order, [False, False, False, True, True])
+        self.assertEqual(stats["delivery_scope"]["deep_completed"], 2)
+        self.assertEqual(stats["delivery_scope"]["deep_failed"], 1)
+        self.assertEqual(len(self.store.load_pending_deep_candidates()), 1)
+        self.assertEqual(len(process.pending_delivery), 2)
+        require_completed_research(stats, candidates=process.pending_delivery)
+
 class ReceiptRecoveryTests(unittest.TestCase):
     def test_recovery_requires_same_revision_failure_inside_that_exact_attempt(self):
         with tempfile.TemporaryDirectory() as directory:

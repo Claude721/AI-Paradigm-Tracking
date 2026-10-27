@@ -29,7 +29,7 @@
 
 - PIPELINE_MODE=paradigm。
 - MAIN/SUB 分别配置能完成 Chat Completions / JSON 的模型 API，各自模型名、地址和 Key 对应；可以使用同一模型和同一 Key。
-- 默认公开来源保持开启；运行时至少 2 个一手发现通道可用。OpenAlex 与 GitHub 推荐，但不是全部信源都必须配置/成功。
+- 默认公开来源保持开启；至少 2 个一手发现通道可用是广度目标，也是默认 Smoke 输入门槛，不是正式 v5 交付的前提。OpenAlex 与 GitHub 推荐，但不是全部信源都必须配置/成功。
 - 如需邮件，SMTP 配置完整；已有发信功能不需要重新设计。
 - 自动续跑、X、未获批 Reddit 和未获批 Semantic Scholar 保持关闭。
 
@@ -79,15 +79,15 @@ Doctor 核对配置完整、URL 格式、请求选项结构，不限定模型 ID
 {"output_limit":"max_completion_tokens","extra_body":{"enable_thinking":false},"omit_parameters":[]}
 ```
 
-旧模型不支持思考参数时可用 `{"output_limit":"max_tokens","extra_body":{}}`；不接受 temperature 或 JSON mode 的兼容接口可配置 `omit_parameters`，但完整 JSON/业务字段/finish_reason 闸门仍保留。修改选项会使对应模型缓存失效；设置这些 Variables 后不用修改代码。非兼容的原生 API 不能仅靠换 URL 接入；不要把密钥放这些 JSON 中。
+旧模型不支持思考参数时可用 `{"output_limit":"max_tokens","extra_body":{}}`；不接受 temperature 或 JSON mode 的兼容接口可配置 `omit_parameters`，但完整 JSON/业务字段与非长度异常闸门仍保留。`finish_reason=length` 不直接拒绝完整有效回答；不可读内容携带原草稿作有界补全，输出上限不自动增加，仍未闭合则只保留该对象待办。修改选项会使对应模型缓存失效；设置这些 Variables 后不用修改代码。非兼容的原生 API 不能仅靠换 URL 接入；不要把密钥放这些 JSON 中。
 
-DeepSeek 官方兼容接口默认启用思考、强度为 high。MAIN 使用该服务时，可将 **Repository Variable `MAIN_AGENT_REQUEST_OPTIONS`** 显式设为：
+DeepSeek 官方兼容接口默认启用思考、强度为 high。当前 MAIN 按用户要求关闭思考，将 **Repository Variable `MAIN_AGENT_REQUEST_OPTIONS`** 显式设为：
 
 ```json
-{"extra_body":{"thinking":{"type":"enabled"},"reasoning_effort":"low"}}
+{"extra_body":{"thinking":{"type":"disabled"}}}
 ```
 
-此配置保留思考但降低强度，只影响 MAIN；SUB 的阿里云配置不变。`low` 是提供方强度档位，不是固定 CoT Token 配额，仍需看实际 `reasoning_tokens`、正文与 `finish_reason`。如需完全关闭，则用 `{"extra_body":{"thinking":{"type":"disabled"},"reasoning_effort":"none"}}`，不要同时设置互相矛盾的开关。共享 `LLM_ENABLE_THINKING=false` 只控制 DashScope 协议，不会关闭其他服务的默认思考。接口与当前枚举见 [DeepSeek 官方参数文档](https://api-docs.deepseek.com/api/create-chat-completion/)。
+此配置只关闭 MAIN 的思考；SUB 的阿里云配置不变，不修改 Key 或提高输出上限。旧的 `reasoning_effort=low` 只是强度档位，不是 CoT Token 硬限额；关闭时移除它，不另外发送非思考模式不需要的 effort 字段。共享 `LLM_ENABLE_THINKING=false` 只控制 DashScope 协议，不会关闭其他服务的默认思考。未来更换厂商时按新接口协议调整本角色 REQUEST_OPTIONS，不能沿用不兼容参数；实际正文、结束原因与用量仍需验收。接口见 [DeepSeek 官方思考模式文档](https://api-docs.deepseek.com/guides/thinking_mode/)。
 
 Run 39209247579 的 MAIN 选项为空，60 次综合全部 `finish_reason=length`，57 次正文为空，思考用了 332,458 / 335,993 个完成 Token。这是模型模式与当前输出预算不匹配，不是最终 Rubric 认为所有技术不成立。控制强度后先做代表性小样本验收，不能据配置保存或 64-Token 的连接探针保证完整研究正常，也不通过无限提高输出上限来掩盖问题。
 
@@ -100,8 +100,8 @@ Run 39209247579 的 MAIN 选项为空，60 次综合全部 `finish_reason=length
 | SOURCING_LOOKBACK_DAYS | 7 | 普通发现与本期发布窗口；Actions 手动用 lookback_days |
 | PARADIGM_RECALL_OVERLAP_DAYS | 14 | 正式报告、重点研究者、官方入口回补 |
 | PARADIGM_BOOTSTRAP_LOOKBACK_DAYS | 14 | 冷启动也保持有界，不引入 60 天积压 |
-| PARADIGM_RESEARCH_ORIGIN_LIMIT | 48 | 本期跨发布者/来源轮转选定原点，1–500 |
-| PARADIGM_RESEARCH_REFRESH_LIMIT | 4 | 最久未检查历史路线，0–50；0 关闭刷新 |
+| PARADIGM_RESEARCH_ORIGIN_LIMIT | 48 | 本期按来源/领域/发布组轮转选定原点，1–500；不是深挖 Top-K |
+| PARADIGM_RESEARCH_REFRESH_LIMIT | 4 | 无当前事件的后台历史轮询数，含旧 pending，0–50；0 只关闭轮询，不关闭当前传播事件召回 |
 | PARADIGM_MIN_PRIMARY_SOURCES | 2 | 一手发现通道广度目标，1–9；正式 v5 仅作诊断，Smoke 仍作入口验收门槛 |
 | PARADIGM_SOURCE_QUERY_LIMIT | 100 | arXiv 每查询原点上限，1–1000，仍保留各车道 |
 | PARADIGM_SOURCE_PAGE_LIMIT | 2 | OpenAlex/OpenReview/已支持官方目录每查询分页上限，1–20；到限不是穷尽成功 |
@@ -112,6 +112,8 @@ Run 39209247579 的 MAIN 选项为空，60 次综合全部 `finish_reason=length
 以下额外熔断默认仍为 0：PARADIGM_DISCOVERY_SAFETY_LIMIT、PARADIGM_ANALYSIS_SAFETY_LIMIT、PARADIGM_REPORT_SAFETY_LIMIT、PARADIGM_REFRESH_SAFETY_LIMIT。熔断/超时/未选不写成 Rubric 淘汰。全部合格候选进入深挖队列，不配置 Top-K；旧 PARADIGM_RESEARCH_DEEP_LIMIT / PARADIGM_DEEP_SAFETY_LIMIT 不生效。v5 不以全部尝试/成功作为交付前提，预算/依赖待办如实留存，不扣住已完成正文。没有新增开关。PARADIGM_MIN_PRIMARY_SOURCES=2 现在是通道广度健康目标，不再作为交付否决票；费用保护仍限制新增调用，不限制成果发表。
 
 PARADIGM_RUBRIC_PATH、FRONTIER_LANDSCAPE_PATH 默认留空使用仓库量表/地图。PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS=2、PARADIGM_MIN_SECONDARY_ENGAGEMENT=50 是客观承接辅助边界，不是模型主观分。PARADIGM_ALLOW_UPDATES=true，相同证据签名不重复交付。
+
+当前技术准入只使用技术题分数；发布者、独立验证、传播和多原点承接按辅助事实留档，不再凭未知机构/低声量否决。无需新增开关或 Key。当前事件可唤醒超出 7 天的旧技术；索引只提供复核线索，已核验帖子/转发与独立复现分开记录。7 天限制事件日期，不限制原技术年龄；已有传播 API 均失败也允许基于可用一手材料做技术判断，失败回执仍为未知。
 
 ## 信源与增强
 
@@ -156,11 +158,13 @@ TAVILY_MONTHLY_CREDIT_LIMIT=1000
 
 正式组合检索由 TAVILY_DISCOVERY_DOMAINS 控制，留空全网索引；SOCIAL_SEARCH_DOMAINS 供 Smoke。结果不是平台全量或独立承接，也没有可用来推断声量的互动数字。
 
-`TAVILY_REQUEST_SAFETY_LIMIT` 是有效的可选次数保护，不是深挖条数。所有选定合格候选仍须完成判断；到限后保留 Tavily 缺口，已有其他健康通道时继续。正常全候选搜索可使用 `0`，但不得顺带关闭月度保护。2026-10-15 已在线将遗留覆盖 `12` 改为 `0`；六项 MAIN/SUB 配置、30 天回补及现有 Secrets 未变。本次未请求 Tavily，配置保存不等于搜索复验。
+查询按真实原点题名及 ID/作者绑定，不需要新增检索配置；泛关键词同名结果不再进入当前工作证据。旧索引中关联未确认的材料保留原记录与输入版本，只作未展开账本，不能作为负判断或承接。原点选材与贡献判定同样无需新增 Variables/Secret；改变的是运行规则，不是接口鉴权。
+
+`TAVILY_REQUEST_SAFETY_LIMIT` 是有效的可选次数保护，不是深挖条数。所有选定合格候选进入深挖队列并尽力逐条尝试；未执行或未完成仍留真实待办，不阻断其他合格路线。到限后保留 Tavily 缺口，已有其他健康通道时继续。正常全候选搜索可使用 `0`，但不得顺带关闭月度保护。线上当前值以仓库设置与实际 run 为准，保存配置不等于搜索复验。
 
 月度保护先核验实际 UTC 账户用量，再在 SQLite 原子预留，未知请求扣费不退款并停止该提供方后续搜索。0 明确关闭月度保护，不表示免费；账本不能锁住其他客户端，提供方 PAYG/硬限额仍需所有者控制。新 V0 epoch 的首个用量观察读取实际账户使用量，不把清库当作供应商额度清零。
 
-独立 NYU/Tavily 验收的 included-only 费用保护更严格；它失败不等于生产 Key 无效。用户已暂不授权追加调用，不能自动复验或充值。见 [Key 指南](SOURCE_API_KEY_VERIFICATION.md)。
+独立 NYU/Tavily 验收的 included-only 费用保护更严格；它失败不等于生产 Key 无效。额外接口验收仍须当次明确授权，历史授权不是自动复验或充值许可。见 [Key 指南](SOURCE_API_KEY_VERIFICATION.md)。
 
 ## 超时、并发与自动续跑
 
@@ -176,7 +180,7 @@ TAVILY_MONTHLY_CREDIT_LIMIT=1000
 | PARADIGM_REPORT_ROUTE_CONCURRENCY | 2 |
 | PARADIGM_REPORT_MAX_RENDER_ATTEMPTS | 3 |
 | PARADIGM_ANALYSIS_BATCH_SIZE / PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE | 6 / 24 |
-| PARADIGM_ORIGIN_PREFILTER_ENABLED | true |
+| PARADIGM_ORIGIN_PREFILTER_ENABLED | true；论文/官方文章/原创思想/原生实现均保守预筛，正式报告另走机制索引 |
 | PARADIGM_TECHNICAL_REPORT_MECHANISM_SLICE | 2 |
 | PARADIGM_DEEP_BATCH_SIZE / PARADIGM_DEEP_CONCURRENCY | 1 / 2 |
 | PARADIGM_RESEARCHER_PROFILE_LIMIT / PARADIGM_KEY_RESEARCHER_LIMIT | 6 / 3 |
@@ -206,7 +210,7 @@ SMTP_USE_STARTTLS=false
 
 应用密码/SMTP 授权码不是登录密码；SSL 与 STARTTLS 不得同时开启。Actions 默认 QQ SSL，SMTP_USERNAME/PASSWORD/TO 为 Secrets。发送失败不提前登记签名，已完成研究和合规报告保留。
 
-本地时区参数 SCHEDULE_DAY_OF_WEEK=fri、SCHEDULE_HOUR=9、SCHEDULE_MINUTE=15、SCHEDULE_TIMEZONE=Asia/Shanghai。它们不改变 GitHub cron；云端要改调度须修改 Workflow 的 schedule。只选一种调度，避免本机/云端重复。
+本地默认 SCHEDULE_DAY_OF_WEEK=mon、SCHEDULE_HOUR=8、SCHEDULE_MINUTE=0、SCHEDULE_TIMEZONE=Asia/Shanghai。它们不改变 GitHub cron；云端按 Workflow 的 schedule 每周一 08:00 运行，修改须部署到默认分支。已有本地 .env 显式值不会自动改写；如使用本地调度，需自行同步。只选一种调度，避免本机/云端重复。
 
 先零网络 Doctor 与离线门，再在获得授权后做 Smoke/正式运行。source_check_only 仅诊断输入，不测模型/SMTP。逐入口缺口不要求全部修完才能正式研究；--v0-readiness 只表示有足够有界输入能力样本，不证明生产 V0。正式验收检查实际研究、报告、邮件、状态和去重，不能只看 Actions 绿色。
 

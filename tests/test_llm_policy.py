@@ -177,6 +177,37 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(original_main, _stage_cache_signature("main", MODEL, "same prompt", "same input"))
             self.assertEqual(original_sub, _stage_cache_signature("sub", MODEL, "same prompt", "same input"))
 
+    async def test_disabled_main_thinking_is_sent_without_effort_or_output_increase(self):
+        captured = []
+        def handle(request):
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, json={
+                "id": "offline", "object": "chat.completion", "created": 0, "model": "configured-main-model",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": '{"ok":true}'}}]})
+        sdk = AsyncOpenAI(api_key="offline-test-only", base_url="https://model.example.invalid/v1",
+                          max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)))
+        resolved = profile(role="main", provider="compatible-service", model="configured-main-model",
+                           request_options='{"extra_body":{"thinking":{"type":"disabled"}}}')
+        try:
+            await ModelPolicyClient(sdk, resolved).create(model=resolved.model,
+                messages=[{"role": "user", "content": 'Return JSON {"ok":true}'}], max_tokens=5600)
+        finally:
+            await sdk.close()
+        self.assertEqual(captured[0]["thinking"], {"type": "disabled"})
+        self.assertEqual(captured[0]["max_tokens"], 5600)
+        self.assertNotIn("reasoning_effort", captured[0])
+        self.assertNotIn("enable_thinking", captured[0])
+
+    def test_disabling_main_thinking_invalidates_main_not_sub_cache(self):
+        with patch.object(config, "MAIN_AGENT_REQUEST_OPTIONS",
+                          '{"extra_body":{"thinking":{"type":"enabled"},"reasoning_effort":"low"}}'):
+            old_main = _stage_cache_signature("main", MODEL, "same prompt", "same input")
+            old_sub = _stage_cache_signature("sub", MODEL, "same prompt", "same input")
+        with patch.object(config, "MAIN_AGENT_REQUEST_OPTIONS", '{"extra_body":{"thinking":{"type":"disabled"}}}'):
+            self.assertNotEqual(old_main, _stage_cache_signature("main", MODEL, "same prompt", "same input"))
+            self.assertEqual(old_sub, _stage_cache_signature("sub", MODEL, "same prompt", "same input"))
+
     async def test_explicit_empty_body_disables_provider_default_extension(self):
         create = AsyncMock()
         client = ModelPolicyClient(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
@@ -253,9 +284,9 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(items[0].rubric_assessment.get("decision"), {"deep_dive", "observe", "reject"})
         self.assertEqual(len(run_audit.llm_calls), 2)
         self.assertTrue(all(item["usage_reported"] and item["finish_reason"] == "length"
-                            and item["status"] == "failed" for item in run_audit.llm_calls))
+                            and item["status"] == "needs_repair" for item in run_audit.llm_calls))
 
-    async def test_truncated_report_is_not_delivered_or_double_accounted(self):
+    async def test_readable_truncated_report_is_forwarded_for_editorial_validation(self):
         from reports.paradigm_generator import ParadigmReportGenerator
         from run_audit import run_audit
         run_audit.reset()
@@ -267,13 +298,13 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
         with tempfile.TemporaryDirectory() as directory:
             generator = ParadigmReportGenerator(output_dir=Path(directory), client=client, model="offline")
-            with self.assertRaises(ValueError):
-                await generator._request_markdown("offline", stage="report_route", subject="离线路线",
-                                                   temperature=0, max_tokens=2200)
+            content = await generator._request_markdown("offline", stage="report_route", subject="离线路线",
+                                                        temperature=0, max_tokens=2200)
+            self.assertEqual(content, "## 完整外观\n中文结论。")
             self.assertEqual(list(Path(directory).iterdir()), [])
-        self.assertEqual(create.await_count, 2)
-        self.assertEqual(len(run_audit.llm_calls), 2)
-        self.assertTrue(all(item["status"] == "failed" and item["usage_reported"] for item in run_audit.llm_calls))
+        self.assertEqual(create.await_count, 1)
+        self.assertEqual(len(run_audit.llm_calls), 1)
+        self.assertTrue(all(item["status"] == "passed" and item["usage_reported"] for item in run_audit.llm_calls))
 
     async def test_smoke_same_label_different_credentials_or_endpoint_not_skipped(self):
         from smokecheck import _check_models

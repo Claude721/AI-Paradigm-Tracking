@@ -21,7 +21,8 @@ def official_detail_policy():
     """Invalidate both source and detail receipts for parser/layout repairs."""
     root = Path(__file__).parent
     files = ("official_detail_queue.py", "priority_research_source.py", "qwen_catalog.py", "meta_catalog.py", "bibliography_resolver.py", "document_limits.py")
-    return hashlib.sha256(b"".join(hashlib.sha256((root / name).read_bytes()).digest() for name in files)).hexdigest()
+    paths = [root / name for name in files] + [root.parent / "paradigms" / "publication.py"]
+    return hashlib.sha256(b"".join(hashlib.sha256(path.read_bytes()).digest() for path in paths)).hexdigest()
 
 
 class OfficialDetailQueue:
@@ -79,14 +80,17 @@ class OfficialDetailQueue:
 
     def _validate_result(self, url, task):
         if task["status"] == "pending":
-            if task.get("evidence") or task.get("detail_parsed") or task.get("detail_outside_window"):
+            if task.get("evidence") or task.get("detail_parsed") or task.get("detail_outside_window") or task.get("detail_excluded"):
                 raise ValueError("Pending official detail contains a completion receipt")
             return
         records = task.get("evidence")
         outside = task.get("detail_outside_window")
+        excluded = task.get("detail_excluded", 0)
         if (not isinstance(records, list) or len(records) > 1 or type(outside) is not int
                 or outside not in (0, 1) or type(task.get("detail_parsed")) is not int
-                or task["detail_parsed"] != 1 or len(records) + outside != 1):
+                or excluded not in (0, 1) or type(excluded) is not int
+                or task["detail_parsed"] != 1 or len(records) + outside + excluded != 1
+                or excluded and task.get("exclusion_reason") not in {"recruitment_page", "account_or_policy_page", "invalid_page_url"}):
             raise ValueError("Official detail completion cardinality mismatch")
         for record in records:
             evidence = technical_evidence_from_dict(record)
@@ -143,11 +147,17 @@ class OfficialDetailQueue:
         records = task["evidence"]
         return (technical_evidence_from_dict(records[0]) if records else None, bool(task["detail_outside_window"]))
 
-    def complete(self, link, evidence, *, outside):
+    @property
+    def exclusions(self):
+        return [{"url": url, "reason": task["exclusion_reason"]} for url, task in self.tasks.items()
+                if task["status"] == "completed" and task.get("detail_excluded") == 1]
+
+    def complete(self, link, evidence, *, outside, exclusion_reason=""):
         task = {"link": self.tasks[link.url]["link"], "status": "completed",
                 "attempts": self.tasks[link.url]["attempts"],
                 "evidence": [evidence.to_dict()] if evidence is not None else [],
-                "detail_parsed": 1, "detail_outside_window": int(outside)}
+                "detail_parsed": 1, "detail_outside_window": int(outside),
+                "detail_excluded": int(bool(exclusion_reason)), "exclusion_reason": exclusion_reason}
         self._validate_result(link.url, task)
         # A source result and its completion receipt are one atomic child row.
         # Never expose completion before the durable downstream save succeeds.

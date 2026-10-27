@@ -246,18 +246,19 @@ def _material_metric_delta_amount(evidence: "TechnicalEvidence") -> bool:
         return (
             amount("comments") >= 5 or amount("replies") >= 5
             or amount("likes") >= 20 or amount("score") >= 20
+            or amount("retweets") >= 5 or amount("reposts") >= 5
         )
     return False
 
 
 def material_metric_event_signature(
-    evidence: "TechnicalEvidence", *, route_key: str
+    evidence: "TechnicalEvidence", *, route_key: str, attention_verified: bool = False
 ) -> tuple:
     """Stable event identity even when two counts lie in the same bucket."""
     if evidence.evidence_type in {
         EvidenceType.COMMUNITY_DISCUSSION,
         EvidenceType.SECONDARY_INTERPRETATION,
-    } and not is_verified_substantive_discussion(evidence, route_key=route_key):
+    } and not attention_verified and not is_verified_substantive_discussion(evidence, route_key=route_key):
         return ()
     if evidence.evidence_type in {
         EvidenceType.IMPLEMENTATION,
@@ -318,6 +319,7 @@ def _qualifying_current_uptake(
     route_key: str,
     reference_time: datetime | None = None,
     window_days: int = 30,
+    candidate=None,
 ) -> tuple[bool, str]:
     """Return whether one secondary record can reactivate an old route.
 
@@ -329,6 +331,13 @@ def _qualifying_current_uptake(
     raw = evidence.raw or {}
     if raw.get("indexed_discovery_only"):
         return False, "仅为搜索索引命中"
+    if candidate is not None:
+        from .propagation import verified_diffusion
+        if verified_diffusion(candidate, evidence):
+            published = _evidence_datetime(evidence.published_at)
+            if published and published > research_now(reference_time):
+                return False, "传播事件晚于当前研究时刻"
+            return True, "已核验当前工作的公开传播事件；不等于独立技术验证"
     relationship = str(raw.get("relationship", "")).casefold()
     independence = str(raw.get("independence", "")).casefold()
     if evidence.evidence_type == EvidenceType.IMPLEMENTATION and independence in {
@@ -439,7 +448,7 @@ def assess_candidate_freshness(
         published = _evidence_datetime(evidence.published_at)
         qualifying, _ = _qualifying_current_uptake(
             evidence, route_key=candidate.key,
-            reference_time=now, window_days=window_days
+            reference_time=now, window_days=window_days, candidate=candidate
         )
         current_date = bool(
             published and cutoff <= published <= now + timedelta(days=1)
@@ -465,17 +474,17 @@ def assess_candidate_freshness(
     elif current_uptake:
         classification = "historical_reactivated"
         decision = "include"
-        reason = "一手材料不是本期新发布，但存在窗口内独立承接或可核验指标增量"
+        reason = "一手材料不是本期新发布，但存在窗口内已核验传播、独立承接或指标增量"
     elif dated_primary:
         classification = "historical_without_current_uptake"
         decision = "defer"
-        reason = "一手材料早于本期窗口，且没有窗口内独立承接"
+        reason = "一手材料早于本期窗口，且没有窗口内已核验传播或承接事件"
     else:
         classification = "unknown_date_without_current_uptake"
         decision = "defer"
         reason = "一手材料发布日期不可核验，且没有窗口内独立承接"
     return {
-        "version": "freshness-v2",
+        "version": "freshness-v3",
         "classification": classification,
         "decision": decision,
         "reason": reason,
@@ -502,7 +511,7 @@ def assess_candidate_freshness(
                 "metric_delta": value.raw.get("metric_delta", {}),
                 "qualification_reason": _qualifying_current_uptake(
                     value, route_key=candidate.key,
-                    reference_time=now, window_days=window_days
+                    reference_time=now, window_days=window_days, candidate=candidate
                 )[1],
             }
             for value in current_uptake
@@ -587,6 +596,7 @@ EPHEMERAL_PERSISTABLE_RAW_KEYS = frozenset({
     "substantive_uptake_route_key",
     "historical", "content_scrubbed", "metric_delta", "metric_baseline",
     "metric_delta_observed_at",
+    "diffusion_receipt",
 })
 _EPHEMERAL_METRIC_DELTA_KEYS = frozenset({
     "citations", "influential_citations", "stars", "forks", "likes",
@@ -983,6 +993,20 @@ class ParadigmCandidate:
         return [*self.evidence, *self.excluded_evidence]
 
     @property
+    def contribution_review(self) -> dict[str, Any]:
+        """A view of the recorded judgment, never a replacement model label."""
+        assessment = self.rubric_assessment
+        row = next((value for value in assessment.get("answers", [])
+                    if isinstance(value, dict) and value.get("criterion_id") == "current_work_intervention"), {})
+        return {"answer": row.get("answer", "unknown"), "evidence": row.get("evidence", ""),
+                "version": assessment.get("version", ""), "stage": assessment.get("stage", "")}
+
+    @property
+    def propagation_assessment(self) -> dict[str, Any]:
+        from .propagation import propagation_summary
+        return propagation_summary(self)
+
+    @property
     def evidence_sources(self) -> set[str]:
         return {item.source for item in self.evidence}
 
@@ -995,13 +1019,15 @@ class ParadigmCandidate:
 
     @property
     def report_signature(self) -> str:
+        from .propagation import verified_diffusion
         payload = {
             "key": self.key,
             "evidence": sorted(
                 (
                     item.fingerprint,
                     material_metric_signature(item.metrics),
-                    material_metric_event_signature(item, route_key=self.key),
+                    material_metric_event_signature(item, route_key=self.key,
+                        attention_verified=verified_diffusion(self, item)),
                     str(item.raw.get("relationship", "")) + (
                         ":route-certified"
                         if is_verified_substantive_discussion(
@@ -1010,6 +1036,8 @@ class ParadigmCandidate:
                         else ""
                     ),
                     str(item.raw.get("independence", "")),
+                    str(item.raw["diffusion_receipt"].get("binding", ""))
+                    if verified_diffusion(self, item) else "",
                 )
                 for item in self.evidence
             ),

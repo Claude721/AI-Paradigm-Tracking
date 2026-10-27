@@ -23,6 +23,7 @@ from paradigms.models import (
 
 logger = logging.getLogger(__name__)
 TAVILY_SEARCH_API = "https://api.tavily.com/search"
+SEARCH_IDENTITY_VERSION = 3
 
 
 class SocialWebSearchClient:
@@ -69,11 +70,9 @@ class SocialWebSearchClient:
                 f"Tavily 额度检查未通过：{reason}；本候选未执行搜索，不代表零讨论"
             )
             return []
-        # A long exact title plus a Boolean expression over-constrains web
-        # recall (and search engines need not interpret OR as expected).
-        # Recall broadly, then require work identity in _parse_results.
-        alias = _clean_query(title.split(":", 1)[0]).strip()
-        query = f"{alias} analysis discussion implementation".strip()
+        # Search the actual work, not its model-invented route name or the
+        # generic text before a colon. Still one basic request per candidate.
+        query = _work_query(candidate, title, identifier)
         search_days = max(
             [
                 config.SOURCING_LOOKBACK_DAYS,
@@ -151,7 +150,7 @@ class SocialWebSearchClient:
             "retained_result_count": len(results),
             "filtered_result_count": len(payload["results"]) - len(results),
             "request_id": str(payload.get("request_id") or "")[:200],
-            "query_kind": "work_identity_broad",
+            "query_kind": "work_identity_bound_v3",
         }
         usage = payload.get("usage")
         if isinstance(usage, dict) and type(usage.get("credits")) is int and usage["credits"] >= 0:
@@ -205,12 +204,16 @@ def _parse_results(
     candidate: ParadigmCandidate,
     work_title: str,
 ) -> list[TechnicalEvidence]:
+    from paradigms.publication import nonresearch_page_reason
+
     results: list[TechnicalEvidence] = []
     for item in payload.get("results", []):
         url = str(item.get("url", "")).strip()
         platform = _platform_from_url(url) or "web"
         title = str(item.get("title", "")).strip() or f"{platform} 公开讨论"
         summary = str(item.get("content", "")).strip()
+        if nonresearch_page_reason(url, title=title):
+            continue
         if not _result_is_related(candidate, work_title, f"{title} {summary} {url}"):
             continue
         evidence_type = (
@@ -288,24 +291,60 @@ def _result_is_related(
     work_title: str,
     text: str,
 ) -> bool:
-    normalized_text = _normalize(text)
-    normalized_title = _normalize(work_title)
-    if len(normalized_title) >= 12 and normalized_title in normalized_text:
-        return True
-    stable_ids = {
-        _normalize(value)
-        for evidence in candidate.evidence
-        for key, value in evidence.identifiers.items()
-        if key in {"arxiv", "doi"} and value
-    }
-    if any(len(value) >= 6 and value in normalized_text for value in stable_ids):
-        return True
-    tokens = {
-        token.casefold()
-        for value in [candidate.name, candidate.route_family, *candidate.keywords]
-        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9-]{3,}", value)
-    }
-    return sum(token in text.casefold() for token in tokens) >= 2
+    return bool(work_reference_reason(candidate, text))
+
+
+_GENERIC_TITLE_WORDS = frozenset({"a", "an", "the", "and", "or", "for", "of", "to", "in", "on",
+    "with", "from", "using", "use", "how", "new", "towards", "toward", "model", "models",
+    "language", "large", "learning", "framework", "system", "systems", "ai", "llm", "llms"})
+
+
+def work_reference_reason(candidate, text):
+    """Bind index leads to a real origin; never two generic route keywords.
+
+    This is discovery relevance, NOT a substantive/independent uptake receipt.
+    It can also screen legacy cached leads without rewriting their originals.
+    """
+    folded, normalized = text.casefold(), _normalize(text)
+    for origin in candidate.evidence:
+        if origin.evidence_type not in ORIGIN_EVIDENCE_TYPES:
+            continue
+        title = _normalize(origin.title)
+        title_words = re.findall(r"[^\W_]+", origin.title, re.UNICODE)
+        exact_title = r"(?<!\w)" + r"[\W_]*".join(re.escape(word) for word in title_words) + r"(?!\w)"
+        if len(title) >= 16 and title_words and re.search(exact_title, text, re.I):
+            return "exact_work_title"
+        if origin.url and re.search(re.escape(origin.url.rstrip("/"))
+                + r'''/?(?=$|[\s?#<>()\[\]{}"']|\.(?=\s|$))''', text, re.I):
+            return "canonical_work_url"
+        for key, value in origin.identifiers.items():
+            value = str(value)
+            if key == "arxiv":
+                value = re.sub(r"v\d+$", "", value)
+                if re.search(r"(?<![\w.])" + re.escape(value) + r"(?:v\d+)?(?![\w.])", text, re.I):
+                    return "stable_work_id"
+            elif key in {"doi", "openreview"} and len(value) >= 6 and re.search(
+                    r"(?<![\w])" + re.escape(value) + r"(?![\w])", text, re.I):
+                return "stable_work_id"
+        terms = {token.casefold() for token in re.findall(r"[A-Za-z][A-Za-z0-9-]{2,}", origin.title)
+                 if token.casefold() not in _GENERIC_TITLE_WORDS}
+        # Require the real author's full name AND at least two discriminating
+        # title terms. An author match by itself is still not work identity.
+        if (sum(bool(re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", folded)) for term in terms) >= 2
+                and any(len(_normalize(name)) >= 8 and _normalize(name) in normalized
+                        for name in origin.authors)):
+            return "author_and_work_terms"
+    return ""
+
+
+def _work_query(candidate, title, identifier):
+    if identifier:
+        return _clean_query(f"{identifier} {title[:160]}")
+    origin = next((item for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES), None)
+    author = origin.authors[0] if origin and origin.authors else ""
+    # Full descriptive title retains identity for essays whose short prefix is
+    # generic (e.g. "Decision Models:"). No provider-specific OR assumptions.
+    return _clean_query(f"{title} {author}")
 
 
 def _time_range(days: int) -> str:

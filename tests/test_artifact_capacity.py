@@ -55,7 +55,7 @@ class CapacityDependencyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(closed['pending_total_count'], 0)
             self.assertEqual(closed['refresh_completed'], 1)
 
-    async def test_interleaved_protected_origins_do_not_fragment_eligibility_calls(self):
+    async def test_priority_origins_share_full_eligibility_batches_without_bypass(self):
         items = [origin(index) for index in range(55)]
         for index,item in enumerate(items):
             if index % 4 == 0:
@@ -67,7 +67,7 @@ class CapacityDependencyTests(unittest.IsolatedAsyncioTestCase):
             return {item.fingerprint: ('full_review', '需完整机制判断') for item in group}
         self.orchestrator.analyzer = SimpleNamespace(run=self.analyze, enable_batch_prefilter=True, stage_cache=object(), prefetch_origin_eligibility=prefetch)
         result = await self.service(items, seconds=1000)
-        self.assertEqual([len(group) for group in calls], [24,17])
+        self.assertEqual([len(group) for group in calls], [24,24,7])
         self.assertEqual(len(result['origin_result'][6]), 55)
         self.assertEqual([event[1] for event in self.events if event[0]=='origin'], [item.title for item in items])
 

@@ -144,7 +144,9 @@ class ExecutionReliabilityTests(unittest.TestCase):
             for key, _, _, default, _ in items
         }
         self.assertEqual(defaults["PARADIGM_RECALL_OVERLAP_DAYS"], "14")
-        self.assertEqual(defaults["SCHEDULE_MINUTE"], "15")
+        self.assertEqual(defaults["SCHEDULE_DAY_OF_WEEK"], "mon")
+        self.assertEqual(defaults["SCHEDULE_HOUR"], "8")
+        self.assertEqual(defaults["SCHEDULE_MINUTE"], "0")
         self.assertEqual(
             defaults["PARADIGM_DISCOVERY_SOURCE_TIMEOUT_SECONDS"], "600"
         )

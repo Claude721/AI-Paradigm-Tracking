@@ -1,4 +1,4 @@
-"""技术质量与发布者/社区势能联合准入的内部评分器。"""
+"""Technical eligibility and advisory public attention are separate judgments."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from .evidence_association import countable_evidence, supported_origins, has_ind
 def score_candidate(candidate: ParadigmCandidate) -> ParadigmCandidate:
     """用版本化 Rubric 计算最终决策；不再读取模型自报的数字分。"""
     candidate.rejection_reason = ""
+    from .propagation import certify_diffusion
+    certify_diffusion(candidate)
     _assess_publisher(candidate)
     candidate.momentum_score = _momentum_score(candidate)
     candidate.researcher_score = _researcher_score(candidate)
@@ -30,8 +32,7 @@ def score_candidate(candidate: ParadigmCandidate) -> ParadigmCandidate:
     assessment = finalize_candidate_rubric(candidate)
     decision = assessment["decision"]
     if decision == "report" and not gate_passed:
-        # 技术 Rubric 与发布者/外部承接是两道不同的门。未知团队不能靠
-        # 技术题高分绕过项目的联合准入边界。
+        # Only unusable primary material is a veto here, not popularity.
         assessment["decision"] = "observe"
         assessment["decision_reason"] = admission_reason
         decision = "observe"
@@ -89,10 +90,12 @@ def effective_solidity_score(candidate: ParadigmCandidate) -> float:
 
 def _momentum_score(candidate: ParadigmCandidate) -> float:
     """跨平台与独立响应优先；使用对数，避免大平台绝对量碾压早期信号。"""
+    from .propagation import verified_diffusion
     countable = [
         item
         for item in candidate.evidence
-        if countable_evidence(candidate, item) and _counts_as_momentum_evidence(item, route_key=candidate.key)
+        if countable_evidence(candidate, item) and (_counts_as_momentum_evidence(item, route_key=candidate.key)
+                                                   or verified_diffusion(candidate, item))
     ]
     sources = {item.source for item in countable}
     types = {item.evidence_type for item in countable}
@@ -227,76 +230,10 @@ def _admission_gate(candidate: ParadigmCandidate) -> tuple[bool, str]:
     primary = [item for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES]
     if primary and all(is_nonresearch_page(item.url) or is_nonresearch_page(str(item.raw.get("canonical_source_url", ""))) for item in primary):
         return False, "原点链接均为账户、登录或政策页面，不能作为技术事实来源，保留观察"
-    signal_count, engagement, sources, independent = substantive_secondary(candidate)
-    origins = supported_origins(candidate)
-    official_uptake = any(
-        item.evidence_type
-        in {EvidenceType.IMPLEMENTATION, EvidenceType.ORIGINAL_IMPLEMENTATION}
-        and item.raw.get("independence") in {"official", "publisher"}
-        and item.raw.get("relationship")
-        in {
-            "paper_linked_repository",
-            "official_release_repository",
-            "publisher_original_implementation",
-        }
-        and (
-            _numeric_value(item.metrics.get("forks", 0)) >= 3
-            or _numeric_value(item.metrics.get("stars", 0)) >= 50
-        )
-        for item in candidate.evidence if countable_evidence(candidate, item)
-    )
-    official_release = any(
-        item.raw.get("publisher_tier") == "established"
-        and item.raw.get("origin_kind")
-        in {"technical_report", "official_research", "official_model_release"}
-        for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES and countable_evidence(candidate, item)
-    )
-    if candidate.is_formal_technical_report and candidate.publisher_tier == "established":
-        return True, "已核验的前沿组织发布正式 Technical Report，进入优先解读"
-    if candidate.publisher_tier == "established" and official_release:
-        return True, "已核验的前沿组织通过官方研究入口发布，进入优先解读"
-    if candidate.publisher_tier == "established" and (
-        independent
-        or signal_count >= 1
-        or engagement >= 10
-        or official_uptake
-    ):
-        return True, "研究团队具有可核验势能，且已出现实质外部响应或代码承接"
-    verified_people = sum(
-        verified_priority_researcher(profile) is not None
-        for profile in candidate.researchers
-        if profile_references_origin(candidate, profile)
-    )
-    if candidate.publisher_tier == "verified" and official_uptake:
-        if verified_people >= 1:
-            return (
-                True,
-                "关键研究者身份已由公开主页/学术 ID 核验，且官方实现已出现实质代码承接",
-            )
-    if (
-        candidate.publisher_tier == "verified"
-        and has_independent_origins(origins)
-    ):
-        return (
-            True,
-            "多个可核验发布者已独立提出可比较机制；技术 Rubric 通过后进入路线解读",
-        )
-    if candidate.publisher_tier == "verified" and verified_people >= 2:
-        return (
-            True,
-            "多位长期前沿研究者的身份与研究方向已核验；技术 Rubric 通过后进入解读",
-        )
-    strong_secondary = independent or (
-        signal_count >= config.PARADIGM_MIN_SUBSTANTIVE_DISCUSSIONS
-        and len(sources) >= 2
-    ) or engagement >= config.PARADIGM_MIN_SECONDARY_ENGAGEMENT
-    if strong_secondary:
-        return True, "发布者势能尚未充分核验，但已有足够的独立讨论或承接"
-    if candidate.publisher_tier == "established":
-        return False, "研究团队背景较强，但尚无外部承接，暂留观察池"
-    if candidate.publisher_tier == "verified":
-        return False, "研究者身份可核验，但尚无足够二次讨论或独立承接，进入观察池"
-    return False, "发布者背景未核验且缺少实质二次讨论，暂不占用周报篇幅"
+    from .propagation import diffusion_items
+    attention = len(diffusion_items(candidate))
+    return True, (f"已核验 {attention} 条当前工作公开传播记录；传播与发布者势能仅作辅助，不代替技术验证"
+                  if attention else "当前传播证据有限或覆盖不足；不因低声量、未知机构或缺少 KOL 转发否决技术资格")
 
 
 def _numeric_value(value: object) -> float:

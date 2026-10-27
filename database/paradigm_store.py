@@ -438,9 +438,31 @@ class ParadigmStore:
                 source = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(getattr(item, "source", "unknown")))[:64]
                 rejected_sources[source] = rejected_sources.get(source, 0) + 1
         with self.transaction():
+            # A new dated propagation event can reopen an unlinked, previously
+            # screened origin without pretending that the source changed.
+            with self._connect() as conn:
+                recall_stale = 0
+                current = []
+                for item in valid:
+                    recall = item.raw.get("event_recall_key", "")
+                    if not isinstance(recall, str) or not re.fullmatch(r"[0-9a-f]{64}", recall):
+                        current.append(item)
+                        continue
+                    state = origin_state.read(conn, item.fingerprint)
+                    if item.source_revision and (state is None or item.source_revision != state[0]):
+                        recall_stale += 1
+                        continue  # A stored recall is not a fresh network observation.
+                    current.append(item)
+                    previous = conn.execute("SELECT payload_json FROM evidence_state WHERE fingerprint=? AND content_signature=?",
+                                            (item.fingerprint, _content_signature(item))).fetchone()
+                    if previous and json.loads(previous[0]).get("raw", {}).get("event_recall_key") != recall:
+                        conn.execute("UPDATE evidence_state SET last_analyzed_at=NULL WHERE fingerprint=? AND content_signature=?",
+                                     (item.fingerprint, _content_signature(item)))
+                valid = current
             selected, stats = self.plan_origins(valid)
             selected_keys = {item.fingerprint for item in selected}
             checkpoint = self.mark_evidence(valid, source_observation=True)
+            checkpoint.stale_revision_count += recall_stale
         for source, count in rejected_sources.items():
             checkpoint.rejection_sources[source] = checkpoint.rejection_sources.get(source, 0) + count
             checkpoint.rejected_count += count
@@ -1180,6 +1202,7 @@ class ParadigmStore:
         self,
         exclude_keys: set[str] | None = None,
         limit: int | None = None,
+        *, include_pending: bool = False, include_rejected: bool = False,
     ) -> list[ParadigmCandidate]:
         """载入观察中/已报告路线，供本周新增讨论重新触发评估。"""
         excluded = exclude_keys or set()
@@ -1190,11 +1213,13 @@ class ParadigmStore:
         params = (
             (target_limit + len(excluded),) if target_limit is not None else ()
         )
+        omitted = (["rejected"] if not include_rejected else []) + (["pending_deep"] if not include_pending else [])
+        status_filter = "status NOT IN (" + ",".join("'" + value + "'" for value in omitted) + ")" if omitted else "1=1"
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT payload_json FROM paradigms
-                WHERE status NOT IN ('rejected', 'pending_deep')
+                WHERE {status_filter}
                 ORDER BY COALESCE(last_refresh_attempt_at, first_seen_at) ASC,
                          first_seen_at ASC
                 {limit_sql}
@@ -1212,6 +1237,37 @@ class ParadigmStore:
             if target_limit is not None and len(candidates) >= target_limit:
                 break
         return candidates
+
+    def load_event_recalled_origins(self, supporting, *, reference_time, window_days):
+        """Revisit raw observations which never formed a durable route.
+
+        A dated exact-work event is scheduling evidence, not a technical pass.
+        Original source versions, past model judgments and delivery history stay.
+        """
+        if not supporting:
+            return []
+        from paradigms.propagation import recent_related_events, event_signature
+        from types import SimpleNamespace
+        with self._connect() as conn:
+            rows = conn.execute("""SELECT o.source_payload_json, e.payload_json, o.source_signature, e.last_analyzed_at FROM evidence_state e
+                JOIN origin_research_state o ON o.fingerprint=e.fingerprint
+                WHERE e.evidence_type IN ('primary_paper','technical_blog','concept_essay','original_implementation')
+                  AND NOT EXISTS (SELECT 1 FROM paradigm_evidence pe WHERE pe.fingerprint=e.fingerprint)
+                ORDER BY e.first_seen_at ASC""").fetchall()
+        result = []
+        for payload, read_view, revision, analyzed in rows:
+            item = technical_evidence_from_dict(json.loads(payload))
+            item.source_revision = revision
+            previous = json.loads(read_view).get("raw", {}).get("event_recall_seen", [])
+            seen = {x for x in previous if isinstance(x, str)} if isinstance(previous, list) else set()
+            events = recent_related_events(SimpleNamespace(evidence=[item]), supporting,
+                reference_time=reference_time, window_days=window_days)
+            tokens = {event_signature(x) for x in events}
+            if tokens and (tokens - seen or not analyzed):
+                item.raw["event_recall_key"] = hashlib.sha256(json.dumps(sorted(tokens)).encode()).hexdigest()
+                item.raw["event_recall_seen"] = sorted(seen | tokens)
+                result.append(item)
+        return result
 
     def mark_refresh_attempted(self, candidates: list[ParadigmCandidate]) -> None:
         """Rotate bounded refresh work fairly without changing research facts."""
@@ -1960,6 +2016,7 @@ def _deep_checkpoint_input_signature(candidate: ParadigmCandidate) -> str:
         "skills/technical-mental-model/SKILL.md",
         "rubrics/paradigm_rubric.json",
         "paradigms/evidence_association.py",
+        "paradigms/propagation.py",
         "paradigms/scoring.py",
         "paradigms/rubric.py",
         "sources/researcher_profile_source.py",

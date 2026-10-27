@@ -13,7 +13,10 @@ import sqlite3
 from dataclasses import fields
 
 import config
-from agents.llm_utils import build_client, parse_json_object, resolve_model, request_policy, completed_content
+from agents.llm_utils import (
+    build_client, parse_json_completion, resolve_model, request_policy,
+    recovery_fragment, repair_messages,
+)
 from agents.sample_budget import SampleBudgetError
 from run_audit import run_audit
 from research_archive import review_archive
@@ -31,6 +34,7 @@ from .models import (
 from .evidence_validation import certify_synthesis_discussion
 from .async_utils import gather_scoped
 from .search_receipts import blocking_searches, search_receipt_summary
+from .publication import nonresearch_page_reason
 from .rubric import (
     evaluate_rubric,
     legacy_dimension_scores,
@@ -42,6 +46,12 @@ from .rubric import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _origin_page_issue(evidence):
+    body = evidence.summary + "\n" + str(evidence.raw.get("document_excerpt", ""))
+    return (nonresearch_page_reason(evidence.url, body, title=evidence.title)
+            or nonresearch_page_reason(str(evidence.raw.get("canonical_source_url", ""))))
 
 
 def _stage_cache_signature(role, model, prompt, identity):
@@ -176,10 +186,24 @@ class ParadigmAnalyzer:
         evidence: list[TechnicalEvidence],
     ) -> dict[str, tuple[str, str]]:
         """Reuse per-origin receipts even if later full reviews time out."""
+        decisions, eligible = {}, []
+        for item in evidence:
+            issue = _origin_page_issue(item)
+            if issue:
+                if issue != "access_challenge":
+                    decisions[item.fingerprint] = ("screen_out", "非技术原点页面：" + issue)
+                run_audit.event("origin_input_quality", "deferred" if issue == "access_challenge" else "excluded",
+                                f"{item.fingerprint}：{issue}；未调用模型")
+                review_archive.judgment("origin_input_quality", {"origins": [item]}, {
+                    "issue": issue, "judgment_source": "deterministic_input_validation",
+                    "decision": None if issue == "access_challenge" else "screen_out"})
+            else:
+                eligible.append(item)
+        evidence = eligible
         cache = getattr(self, "stage_cache", None)
         if cache is None:
-            return await self._screen_uncached_origin_batch(evidence)
-        signatures, decisions, missing = {}, {}, []
+            return {**decisions, **await self._screen_uncached_origin_batch(evidence)}
+        signatures, missing, reused_count = {}, [], 0
         for item in evidence:
             if (item.fingerprint, item.source_revision) in self._eligibility_prefetch_failures:
                 continue
@@ -194,6 +218,7 @@ class ParadigmAnalyzer:
             result = cache.cache_get("origin_eligibility", signature)
             if result is not None and result.get("decision") in {"full_review", "screen_out"} and isinstance(result.get("reason"), str) and (result["decision"] != "screen_out" or result["reason"]):
                 decisions[item.fingerprint] = (result["decision"], result["reason"])
+                reused_count += 1
                 review_archive.judgment("origin_eligibility_cache", {"origins": [item]}, result, signature)
             else:
                 missing.append(item)
@@ -201,8 +226,8 @@ class ParadigmAnalyzer:
             fresh = await self._screen_uncached_origin_batch(missing)
         for fingerprint, (decision, reason) in fresh.items():
             cache.cache_save("origin_eligibility", signatures[fingerprint], {"decision": decision, "reason": reason})
-        if decisions:
-            run_audit.event("origin_eligibility_cache", "reused", f"复用 {len(decisions)} 条同版本资格预筛，不重做已确认判断")
+        if reused_count:
+            run_audit.event("origin_eligibility_cache", "reused", f"复用 {reused_count} 条同版本资格预筛，不重做已确认判断")
         return {**decisions, **fresh}
 
     async def prefetch_origin_eligibility(self, evidence):
@@ -249,6 +274,7 @@ class ParadigmAnalyzer:
         )
         allowed = {item.fingerprint for item in evidence}
         last_error: Exception | None = None
+        fragment = None
         for attempt in range(2):
             response = None
             try:
@@ -261,12 +287,12 @@ class ParadigmAnalyzer:
                 response = await run_audit.chat_completion(client, stage="origin_eligibility", role="sub", subject=f"{len(evidence)} origins",
                     archive_context={"origins": evidence},
                     model=model,
-                    messages=[{"role": "user", "content": prompt + repair_note}],
+                    messages=repair_messages(prompt + repair_note, fragment),
                     temperature=0.0,
                     max_tokens=max(1200, min(4000, 450 * len(evidence))),
                     response_format={"type": "json_object"},
                 )
-                payload = parse_json_object(completed_content(response) or "{}")
+                payload = parse_json_completion(response)
                 rows = payload.get("decisions")
                 if not isinstance(rows, list):
                     raise ValueError("缺少 decisions 数组")
@@ -317,6 +343,7 @@ class ParadigmAnalyzer:
                 return decisions
             except Exception as exc:
                 last_error = exc
+                fragment = recovery_fragment(response)
                 logger.warning(
                     "原点资格预筛第 %s 次失败 [%s 条]: %s",
                     attempt + 1,
@@ -363,9 +390,12 @@ class ParadigmAnalyzer:
         )
 
     async def extract(self, evidence: TechnicalEvidence) -> list[ParadigmExtraction]:
-        from .publication import is_nonresearch_page
-        if is_nonresearch_page(evidence.url) or is_nonresearch_page(str(evidence.raw.get("canonical_source_url", ""))):
-            return [self._eligibility_rejection(evidence, "链接是账户、登录或政策页面，不是可核验的技术原点；不生成机制假说")]
+        if issue := _origin_page_issue(evidence):
+            result = (self._failed_extraction(evidence, "原点访问挑战页，不是技术正文；保留待重新取材")
+                      if issue == "access_challenge" else
+                      self._eligibility_rejection(evidence, "非技术原点页面：" + issue + "；不生成机制假说"))
+            review_archive.extraction(result)
+            return [result]
         if evidence.raw.get("origin_kind") == "technical_report":
             return await self._extract_technical_report(evidence)
 
@@ -400,6 +430,7 @@ class ParadigmAnalyzer:
         )
         last_error: Exception | None = None
         partial_hypothesis = None
+        fragment = None
         for attempt in range(2):
             response = None
             try:
@@ -417,7 +448,7 @@ class ParadigmAnalyzer:
                 response = await run_audit.chat_completion(client, stage="paradigm_extraction", role="sub", subject=evidence.title,
                     archive_context={"origins": [evidence]},
                     model=model,
-                    messages=[{"role": "user", "content": prompt + repair_note}],
+                    messages=repair_messages(prompt + repair_note, fragment),
                     temperature=0.1,
                     max_tokens=(
                         9000
@@ -426,7 +457,7 @@ class ParadigmAnalyzer:
                     ),
                     response_format={"type": "json_object"},
                 )
-                payload = parse_json_object(completed_content(response) or "{}")
+                payload = parse_json_completion(response)
                 hypotheses = payload.get("hypotheses")
                 payloads = hypotheses if isinstance(hypotheses, list) else [payload]
                 if len(payloads) != 1 or not isinstance(payloads[0], dict):
@@ -462,6 +493,7 @@ class ParadigmAnalyzer:
                 return parsed
             except Exception as exc:
                 last_error = exc
+                fragment = recovery_fragment(response)
                 logger.warning(
                     "范式抽取第 %s 次失败 [%s]: %s",
                     attempt + 1,
@@ -710,6 +742,7 @@ class ParadigmAnalyzer:
         prompt: str,
     ) -> tuple[list[dict], str, str]:
         last_error: Exception | None = None
+        fragment = None
         for attempt in range(2):
             response = None
             try:
@@ -724,12 +757,12 @@ class ParadigmAnalyzer:
                 response = await run_audit.chat_completion(client, stage="technical_report_index", role="sub", subject=evidence.title,
                     archive_context={"origins": [evidence]},
                     model=model,
-                    messages=[{"role": "user", "content": prompt + repair_note}],
+                    messages=repair_messages(prompt + repair_note, fragment),
                     temperature=0.1,
                     max_tokens=6000,
                     response_format={"type": "json_object"},
                 )
-                payload = parse_json_object(completed_content(response) or "{}")
+                payload = parse_json_completion(response)
                 raw_mechanisms = payload.get("mechanisms")
                 if not isinstance(raw_mechanisms, list):
                     raise ValueError("缺少 mechanisms 数组")
@@ -775,6 +808,7 @@ class ParadigmAnalyzer:
                 return mechanisms, "", ""
             except Exception as exc:
                 last_error = exc
+                fragment = recovery_fragment(response)
                 logger.warning(
                     "Technical Report 机制索引第 %s 次失败 [%s]: %s",
                     attempt + 1,
@@ -828,6 +862,7 @@ class ParadigmAnalyzer:
             f"{len(json.dumps(seed, ensure_ascii=False))} 字符",
         )
         last_error: Exception | None = None
+        fragment = None
         for attempt in range(2):
             response = None
             try:
@@ -842,12 +877,12 @@ class ParadigmAnalyzer:
                 response = await run_audit.chat_completion(client, stage="technical_report_mechanism", role="sub", subject=f"{evidence.title} / mechanism-{index}",
                     archive_context={"origins": [evidence], "mechanism_id": str(seed.get("mechanism_id") or index)},
                     model=model,
-                    messages=[{"role": "user", "content": prompt + repair_note}],
+                    messages=repair_messages(prompt + repair_note, fragment),
                     temperature=0.1,
                     max_tokens=3500,
                     response_format={"type": "json_object"},
                 )
-                payload = parse_json_object(completed_content(response) or "{}")
+                payload = parse_json_completion(response)
                 assessment_payload = payload.get("assessment")
                 if isinstance(assessment_payload, dict):
                     payload = assessment_payload
@@ -892,6 +927,7 @@ class ParadigmAnalyzer:
                 return parsed, ""
             except Exception as exc:
                 last_error = exc
+                fragment = recovery_fragment(response)
                 logger.warning(
                     "Technical Report 机制 %s 第 %s 次评估失败 [%s]: %s",
                     index,
@@ -1003,21 +1039,13 @@ def _valid_report_seed_identity(seed):
 
 
 def _should_prefilter_origin(evidence: TechnicalEvidence) -> bool:
-    """Only ordinary papers use the cheap gate; high-signal origins bypass it."""
+    """No publisher/seed bypass; formal reports have a separate mechanism index.
 
-    raw = evidence.raw or {}
-    try:
-        origin_priority = int(raw.get("origin_priority", 0) or 0)
-    except (TypeError, ValueError, OverflowError):
-        origin_priority = 0
-    return bool(
-        evidence.evidence_type == EvidenceType.PRIMARY_PAPER
-        and raw.get("origin_kind", "research_paper") == "research_paper"
-        and raw.get("origin_eligibility_decision") != "full_review"
-        and not raw.get("explicit_seed")
-        and origin_priority < 2
-        and not raw.get("priority_researcher_match")
-    )
+    Old raw full_review annotations are not policy-bound cache receipts. Always
+    let the cache layer check the current prompt, source and request strategy.
+    """
+    return (evidence.evidence_type in ORIGIN_EVIDENCE_TYPES
+            and evidence.raw.get("origin_kind") != "technical_report")
 
 
 def unvisited_report_mechanisms(evidence: TechnicalEvidence | dict) -> set[str]:
@@ -1193,16 +1221,16 @@ class ResearcherTrajectoryAnalyzer:
                         model=model, messages=messages, temperature=0.1,
                         max_tokens=1100, response_format={"type": "json_object"},
                     )
-                    content = completed_content(response) or "{}"
                     try:
-                        payload = _validated_trajectory_payload(parse_json_object(content))
+                        payload = _validated_trajectory_payload(parse_json_completion(response))
                     except (TypeError, ValueError) as exc:
                         run_audit.record_llm(stage="researcher_trajectory", role="main", model=model,
                                              subject=f"{candidate.name} / {profile.name}", response=response, error=exc)
                         response_recorded = True
                         if attempt:
                             raise
-                        messages += [{"role": "assistant", "content": content}, {"role": "user", "content":
+                        messages = repair_messages(prompt, recovery_fragment(response))
+                        messages += [{"role": "user", "content":
                             "上一份结果的结构不合规，请只修复 JSON 字段和表示格式，保留原有事实与未知边界，不新增身份或履历。"
                             "必须包含 background_summary、trajectory_summary、key_person_reason、current_role_note 四个中文字符串，"
                             "trajectory_consistency 必须为 0 到 10 的有限 JSON 数字，不可用百分比、分数、null、布尔值或评级。"
@@ -1310,6 +1338,13 @@ class ParadigmSynthesizer:
         return candidates
 
     async def _synthesize_one(self, candidate: ParadigmCandidate) -> None:
+        origins = [item for item in candidate.input_evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES]
+        if origins and all(_origin_page_issue(item) for item in origins):
+            failure = evaluate_rubric(stage="final", innovation_types=candidate.innovation_types or [candidate.novelty_type or "other"], answers=[])
+            failure["failure_reason"] = failure["decision_reason"] = "当前原点均为非研究/挑战页，保留待重新取材；未调用综合模型"
+            candidate.rubric_assessment = failure
+            run_audit.event("synthesis_input_quality", "deferred", candidate.key)
+            return
         if blocking_searches(candidate, allow_partial=self.allow_partial_sources):
             raise RuntimeError("社区查询未闭合，禁止综合为技术判断")
         # A fresh assessment can reconsider earlier exclusions. Cached closed
@@ -1317,7 +1352,7 @@ class ParadigmSynthesizer:
         candidate.evidence = candidate.input_evidence
         candidate.excluded_evidence = []
         candidate.mechanism_origin_support = {}
-        evidence_payload = _bounded_synthesis_evidence(candidate.evidence)
+        evidence_payload = _bounded_synthesis_evidence(candidate.evidence, candidate=candidate)
         visible_evidence_indices = {
             int(record["index"]) for record in evidence_payload["records"]
             if not record.get("detail_deferred_due_to_context")
@@ -1337,12 +1372,7 @@ class ParadigmSynthesizer:
             provisional_name=candidate.name,
             route_family=candidate.route_family,
             provisional_thesis=candidate.thesis,
-            background=candidate.background,
-            problem_shift=candidate.problem_shift,
-            design_philosophy=candidate.design_philosophy,
             mechanism=candidate.mechanism,
-            technical_explanation=candidate.technical_explanation,
-            mental_model=json.dumps(candidate.mental_model, ensure_ascii=False),
             innovation_types=json.dumps(
                 candidate.innovation_types or [candidate.novelty_type or "other"],
                 ensure_ascii=False,
@@ -1366,15 +1396,21 @@ class ParadigmSynthesizer:
             "request_bounded",
             f"{candidate.name[:80]}：输入 {len(prompt)} 字符；"
             f"证据明细 {len(evidence_payload['records'])} 条，"
-            f"折叠 {evidence_payload['overflow']['count']} 条",
+            f"折叠 {evidence_payload['overflow']['count']} 条"
+            f"（其中工作关联未确认 {evidence_payload['overflow']['work_identity_unconfirmed_count']} 条）",
         )
         last_error: Exception | None = None
         partial_payload: dict[str, object] = {}
         validation_error = ""
-        prompt_signature = hashlib.sha256(prompt.encode()).hexdigest()
+        fragment = None
+        prompt_signature = _stage_cache_signature("main", self.model, prompt, {
+            "candidate_key": candidate.key,
+            "sources": [(item.fingerprint, item.source_revision) for item in candidate.input_evidence],
+        })
         deferred = self._deferred_repairs.pop(candidate.key, None)
-        if deferred and deferred[0] == prompt_signature:
-            _, partial_payload, validation_error = deferred
+        resuming_repair = bool(deferred and deferred[0] == prompt_signature)
+        if resuming_repair:
+            _, partial_payload, validation_error, fragment = deferred
         for attempt in range(1 if self.defer_retries else 2):
             response = None
             stage = "paradigm_synthesis"
@@ -1424,12 +1460,12 @@ class ParadigmSynthesizer:
                 response = await run_audit.chat_completion(client, stage=stage, role="main", subject=candidate.name,
                     archive_context={"candidate": candidate},
                     model=model,
-                    messages=[{"role": "user", "content": request_prompt}],
+                    messages=repair_messages(request_prompt, fragment),
                     temperature=0.1,
                     max_tokens=5600,
                     response_format={"type": "json_object"},
                 )
-                payload = parse_json_object(completed_content(response) or "{}")
+                payload = parse_json_completion(response)
                 if partial_payload:
                     payload = _merge_structured_payload(partial_payload, payload)
                 partial_payload = payload
@@ -1461,6 +1497,11 @@ class ParadigmSynthesizer:
                 return
             except Exception as exc:
                 last_error = exc
+                validation_error = str(exc)
+                # A broken JSON envelope (including a reasoning-only answer)
+                # still gets its one repair after all candidates' first visits.
+                # Parsed structural failures retain the smaller field repair.
+                fragment = recovery_fragment(response) if not partial_payload else None
                 logger.warning(
                     "范式综合第 %s 次失败 [%s]: %s",
                     attempt + 1,
@@ -1475,8 +1516,8 @@ class ParadigmSynthesizer:
                     response=response,
                     error=exc,
                 )
-        if self.defer_retries and partial_payload:
-            self._deferred_repairs[candidate.key] = (prompt_signature, partial_payload, validation_error)
+        if self.defer_retries and not resuming_repair and (partial_payload or fragment is not None):
+            self._deferred_repairs[candidate.key] = (prompt_signature, partial_payload, validation_error, fragment)
         failure = evaluate_rubric(
             stage="final",
             innovation_types=candidate.innovation_types
@@ -1518,6 +1559,11 @@ class ParadigmSynthesizer:
         if (not isinstance(raw_excluded, list) or any(type(i) is not int for i in raw_excluded)
                 or not set(raw_excluded) <= visible_evidence_indices or set(raw_excluded) & set(support)):
             raise ValueError("原点机制关联冲突：证据排除清单含未展开/不存在或同时被标为支持的 index")
+        from .propagation import certify_diffusion
+        # Preserve only still-valid legacy work audits before MAIN rewrites
+        # mechanism prose. Mechanism-level support below remains independently
+        # bound to the new wording and the explicitly selected origin versions.
+        certify_diffusion(candidate)
         for field_name in (
             "name",
             "route_family",
@@ -1553,8 +1599,6 @@ class ParadigmSynthesizer:
                 for key, value in mental_model.items()
                 if value not in ("", [], {}, None)
             }
-        _validate_mental_model(candidate.mental_model)
-
         raw_types = payload.get("innovation_types")
         if raw_types is None:
             raw_types = candidate.innovation_types or [
@@ -1572,6 +1616,10 @@ class ParadigmSynthesizer:
         candidate.rubric_assessment = assessment
         if assessment["decision"] == "incomplete":
             raise ValueError(assessment["decision_reason"])
+        contribution = next((row["answer"] for row in assessment["answers"]
+                             if row["criterion_id"] == "current_work_intervention"), "unknown")
+        if contribution not in {"explanation_or_restatement", "non_ai_process"}:
+            _validate_mental_model(candidate.mental_model)
         candidate.mechanism_origin_support = {
             "route_key": candidate.key, "mechanism_digest": mechanism_digest(candidate),
             "origins": {candidate.evidence[i].fingerprint: support_revision(candidate.evidence[i]) for i in support},
@@ -1620,6 +1668,7 @@ class ParadigmSynthesizer:
                 for index, item in enumerate(candidate.evidence)
                 if index not in excluded
             ]
+        certify_diffusion(candidate)
 
 
 def _compact_json(value) -> str:
@@ -1649,6 +1698,7 @@ def _bounded_synthesis_evidence(
     evidence: list[TechnicalEvidence],
     *,
     char_budget: int = 48_000,
+    candidate=None,
 ) -> dict[str, object]:
     """Represent evidence under a hard context budget without a research Top-K.
 
@@ -1659,6 +1709,10 @@ def _bounded_synthesis_evidence(
     """
 
     from sources.arxiv_document_source import _distributed_text_excerpt
+    from sources.social_web_search_source import work_reference_reason
+    from types import SimpleNamespace
+    from .propagation import verified_diffusion
+    identity_context = SimpleNamespace(evidence=evidence)
 
     primary_types = {
         "primary_paper",
@@ -1695,7 +1749,15 @@ def _bounded_synthesis_evidence(
     records: list[dict[str, object]] = []
     used = 0
     overflow_items: list[TechnicalEvidence] = []
+    identity_deferred = 0
     for original_index, item in ordered:
+        if item.raw.get("indexed_discovery_only") and not work_reference_reason(
+                identity_context, item.title + " " + item.summary + " " + item.url):
+            # Keep the original in frozen inputs/CAS and the private archive.
+            # Not expanded means neither technical rejection nor model exclusion.
+            overflow_items.append(item)
+            identity_deferred += 1
+            continue
         primary = item.evidence_type.value in primary_types
         affiliations = item.raw.get("affiliations", [])
         project_urls = item.raw.get("project_urls", [])
@@ -1716,6 +1778,8 @@ def _bounded_synthesis_evidence(
             "source": item.source[:120],
             "title": item.title[:400],
             "url": item.url[:1000],
+            "published_at": item.published_at,
+            **({"verified_work_visibility": True} if candidate and verified_diffusion(candidate, item) else {}),
             "summary": item.summary[: (2400 if primary else 700)],
             "document_excerpt": (
                 _distributed_text_excerpt(str(item.raw.get("document_excerpt", "")), limit=16_000)
@@ -1804,11 +1868,12 @@ def _bounded_synthesis_evidence(
         "records": records,
         "overflow": {
             "count": len(overflow_items),
+            "work_identity_unconfirmed_count": identity_deferred,
             "historical_count": historical_count,
             "type_counts": type_counts,
             "source_counts": source_counts,
             "meaning": (
-                "这些证据因上下文预算只保留统计，不代表被 Rubric 淘汰；"
+                "这些材料因上下文预算或工作关联尚未确认只保留统计，不代表被 Rubric 淘汰或已判无关；"
                 "不得据此断言没有更多讨论。"
                 if overflow_items
                 else "没有折叠证据"

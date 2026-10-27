@@ -56,7 +56,7 @@ def forum_record(
 def model_selects(candidate: ParadigmCandidate, index: int = 1) -> None:
     with patch("paradigms.analyzer._validate_mental_model"), patch(
         "paradigms.analyzer.evaluate_rubric",
-        return_value={"decision": "report", "innovation_types": ["architecture"]},
+        return_value={**rubric_assessment(stage="final"), "decision": "report"},
     ):
         ParadigmSynthesizer._apply_synthesis_payload(
             candidate,
@@ -71,13 +71,13 @@ def model_selects(candidate: ParadigmCandidate, index: int = 1) -> None:
 
 
 class EvidenceValidationTests(unittest.TestCase):
-    def test_title_only_forum_hit_cannot_pass_admission(self):
+    def test_title_only_forum_hit_is_not_independent_validation(self):
         candidate = route()
         baseline_score = _momentum_score(candidate)
         lead = forum_record(body="")
         candidate.evidence.append(lead)
         self.assertEqual(substantive_secondary(candidate)[0], 0)
-        self.assertFalse(_admission_gate(candidate)[0])
+        self.assertTrue(_admission_gate(candidate)[0])  # Attention is not eligibility.
         self.assertEqual(_momentum_score(candidate), baseline_score)
         model_selects(candidate)
         self.assertFalse(is_verified_substantive_discussion(lead, route_key=candidate.key))
@@ -124,7 +124,7 @@ class EvidenceValidationTests(unittest.TestCase):
         self.assertFalse(is_verified_substantive_discussion(
             second.evidence[1], route_key=second.key
         ))
-        self.assertFalse(_admission_gate(second)[0])
+        self.assertTrue(_admission_gate(second)[0])
         self.assertEqual(substantive_secondary(second)[0], 0)
 
     def test_route_binding_survives_sqlite_snapshot(self):
@@ -200,7 +200,7 @@ class EvidenceValidationTests(unittest.TestCase):
         compact.evidence.append(forum_record())
         with patch("paradigms.analyzer._validate_mental_model"), patch(
             "paradigms.analyzer.evaluate_rubric",
-            return_value={"decision": "report", "innovation_types": ["architecture"]},
+            return_value={**rubric_assessment(stage="final"), "decision": "report"},
         ):
             ParadigmSynthesizer._apply_synthesis_payload(
                 compact,
@@ -256,7 +256,7 @@ class EvidenceValidationTests(unittest.TestCase):
         candidate.evidence.append(legacy)
         self.assertFalse(is_verified_substantive_discussion(legacy, route_key=candidate.key))
         self.assertEqual(substantive_secondary(candidate)[0], 0)
-        self.assertFalse(_admission_gate(candidate)[0])
+        self.assertTrue(_admission_gate(candidate)[0])
 
     def test_github_name_match_and_stars_do_not_create_implementation_uptake(self):
         candidate = route()
@@ -272,7 +272,7 @@ class EvidenceValidationTests(unittest.TestCase):
             },
         ))
         self.assertEqual(_momentum_score(candidate), baseline_score)
-        self.assertFalse(_admission_gate(candidate)[0])
+        self.assertTrue(_admission_gate(candidate)[0])
         validation = {
             row["criterion_id"]: row["answer"]
             for row in objective_answers(candidate)
@@ -305,7 +305,7 @@ class EvidenceValidationTests(unittest.TestCase):
                 payload["mechanism"] = mechanism
             with patch("paradigms.analyzer._validate_mental_model"), patch(
                 "paradigms.analyzer.evaluate_rubric",
-                return_value={"decision": "report", "innovation_types": ["architecture"]},
+                return_value={**rubric_assessment(stage="final"), "decision": "report"},
             ):
                 ParadigmSynthesizer._apply_synthesis_payload(
                     candidate, payload, visible_evidence_indices=set()
@@ -332,7 +332,7 @@ class EvidenceValidationTests(unittest.TestCase):
         self.assertTrue(retained.raw["content_scrubbed"])
         with patch("paradigms.analyzer._validate_mental_model"), patch(
             "paradigms.analyzer.evaluate_rubric",
-            return_value={"decision": "report", "innovation_types": ["architecture"]},
+            return_value={**rubric_assessment(stage="final"), "decision": "report"},
         ):
             ParadigmSynthesizer._apply_synthesis_payload(
                 candidate,

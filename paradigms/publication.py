@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from html import unescape
 from dataclasses import dataclass
 from urllib.parse import unquote, urlparse
 
@@ -235,26 +236,49 @@ def report_query_terms() -> tuple[str, ...]:
     return _EXPLICIT_REPORT_MARKERS
 
 
-def is_nonresearch_page(url: str, body: str = "") -> bool:
-    """Reject account/policy/challenge pages, not research about those topics.
+def nonresearch_page_reason(url: str, body: str = "", *, title: str = "") -> str:
+    """Identify page purpose, not a paper's topic or technical eligibility.
 
     An HTTP 200 and an official parent domain do not establish a technical
     origin. Check both the requested URL and final redirect URL at fetch time.
+    Access challenges are retryable source problems, not technical rejections.
     """
     try:
         parsed = urlparse(url)
         host = (parsed.hostname or "").casefold().removeprefix("www.")
         path = unquote(parsed.path).casefold()
     except ValueError:
-        return True
+        return "invalid_page_url"
     if host.split(".")[0] in {"dashboard", "console", "accounts", "account", "auth", "login"}:
-        return True
-    if re.search(r"(?:^|/)(?:login|log-in|signin|sign-in|signup|sign-up|register|api[-_]?keys?|billing|settings|legal|licenses?|privacy|terms|trademarks?|code-of-conduct|support)(?:/|$)", path):
-        return True
-    title = re.search(r"<title[^>]*>(.*?)</title>", body[:16000], re.I | re.S)
-    return bool(title and re.fullmatch(
-        r"\s*(?:log\s*in|sign\s*in|sign\s*up|access denied|attention required!?|just a moment(?:\.\.\.)?)(?:\s*[|·—–-].*)?\s*",
-        title[1], re.I | re.S))
+        return "account_or_policy_page"
+    article_path = re.search(r"/(?:research|papers?|publications?|pubs|blog|articles?)/[^/]+", path)
+    if not article_path and re.search(r"(?:^|/)(?:login|log-in|signin|sign-in|signup|sign-up|register|api[-_]?keys?|billing|settings|legal|licenses?|privacy|terms|trademarks?|code-of-conduct|support)(?:/|$)", path):
+        return "account_or_policy_page"
+    if re.search(r"(?:^|/)(?:careers?|jobs|vacancies|open-positions|join-us)(?:/|$)", path):
+        return "recruitment_page"
+    page_title = re.search(r"<title\b[^>]*>(.*?)</title>", body[:16000], re.I | re.S)
+    headings = [title, page_title[1] if page_title else ""]
+    headings.extend(re.findall(r"<h1\b[^>]*>(.*?)</h1>", body[:16000], re.I | re.S))
+    for value in headings:
+        value = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]*>", " ", value))).strip()
+        if re.fullmatch(
+            r"(?:access denied|attention required!?|just a moment(?:\.{1,3}|…)?|"
+            r"verifying your browser(?:\.{1,3}|…)?|checking your browser(?:\.{1,3}|…)?|"
+            r"verify (?:that )?you are human|security verification|请完成安全验证|正在验证您的浏览器)"
+            r"(?:\s*[|·—–-].*)?", value, re.I,
+        ):
+            return "access_challenge"
+        if re.fullmatch(r"(?:log\s*in|sign\s*in|sign\s*up|privacy policy|terms of service|cookie policy)"
+                        r"(?:\s*[|·—–-].*)?", value, re.I):
+            return "account_or_policy_page"
+        if re.fullmatch(r"(?:research careers|careers|job openings|open positions|加入我们|招聘)"
+                        r"(?:\s*[|·—–-].*)?", value, re.I):
+            return "recruitment_page"
+    return ""
+
+
+def is_nonresearch_page(url: str, body: str = "", *, title: str = "") -> bool:
+    return bool(nonresearch_page_reason(url, body, title=title))
 
 
 def looks_like_linked_research_document(label: str, url: str) -> bool:

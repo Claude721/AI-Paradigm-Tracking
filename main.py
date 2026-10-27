@@ -7,7 +7,7 @@ Usage:
     python main.py --setup      # 交互式配置环境变量（首次使用推荐）
     python main.py --status     # 查看当前配置状态
     python main.py --inspect-state # 查看研究/交付队列健康度；不请求外部服务
-    python main.py --schedule   # 启动定时任务模式（默认每周五 09:15）
+    python main.py --schedule   # 启动定时任务模式（默认每周一 08:00）
     python main.py --report     # 续投或重建已闭合历史报告（不重新拉取数据）
     python main.py --resume-research # 只续跑原窗口的未完成批次，不启动新发现
     python main.py --doctor     # 零网络静态配置检查
@@ -765,7 +765,7 @@ def main() -> None:
     parser.add_argument(
         "--schedule",
         action="store_true",
-        help="启动定时任务模式（默认每周五 09:15 自动执行）",
+        help="启动定时任务模式（默认每周一 08:00 自动执行）",
     )
     parser.add_argument(
         "--inspect-state",
