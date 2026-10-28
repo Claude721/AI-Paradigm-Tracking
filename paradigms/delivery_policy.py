@@ -91,6 +91,7 @@ def bounded_origins(origins, *, limit, reference_time, days, ordinary_days=7):
     seen = set()
     # Recency first. A priority tag breaks ties, not every new unknown paper.
     for item in sorted(origins, key=lambda value: (
+        value.raw.get("origin_kind") == "technical_report",
         _evidence_datetime(value.published_at) or reference_time - timedelta(days=days + 1),
         nonnegative_number(value.raw.get("origin_priority", 0)), value.fingerprint,
     ), reverse=True):
@@ -120,7 +121,7 @@ def origin_selection_summary(origins, selected):
         for item in values:
             result[field(item)] += 1
         return dict(sorted(result.items()))
-    return {"version": 2, "discovered": len(origins), "selected": len(selected),
+    return {"version": 3, "discovered": len(origins), "selected": len(selected),
             "source_discovered": counts(origins, lambda item: item.source),
             "source_selected": counts(selected, lambda item: item.source),
             "undated_selected": sum(not _evidence_datetime(item.published_at) for item in selected),

@@ -100,7 +100,7 @@ Run 39209247579 的 MAIN 选项为空，60 次综合全部 `finish_reason=length
 | SOURCING_LOOKBACK_DAYS | 7 | 普通发现与本期发布窗口；Actions 手动用 lookback_days |
 | PARADIGM_RECALL_OVERLAP_DAYS | 14 | 正式报告、重点研究者、官方入口回补 |
 | PARADIGM_BOOTSTRAP_LOOKBACK_DAYS | 14 | 冷启动也保持有界，不引入 60 天积压 |
-| PARADIGM_RESEARCH_ORIGIN_LIMIT | 48 | 本期按来源/领域/发布组轮转选定原点，1–500；不是深挖 Top-K |
+| PARADIGM_RESEARCH_ORIGIN_LIMIT | 48 | 完整原点研究名额，1–500；先保守预筛最多 4 倍名额/120 秒，再多来源轮转。预筛仍计 SUB 用量；已选路线的修订上游独立补审，不是深挖 Top-K |
 | PARADIGM_RESEARCH_REFRESH_LIMIT | 4 | 无当前事件的后台历史轮询数，含旧 pending，0–50；0 只关闭轮询，不关闭当前传播事件召回 |
 | PARADIGM_MIN_PRIMARY_SOURCES | 2 | 一手发现通道广度目标，1–9；正式 v5 仅作诊断，Smoke 仍作入口验收门槛 |
 | PARADIGM_SOURCE_QUERY_LIMIT | 100 | arXiv 每查询原点上限，1–1000，仍保留各车道 |

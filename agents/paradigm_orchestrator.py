@@ -452,7 +452,7 @@ class ParadigmOrchestrator:
         )
         bounded = getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5}
         if bounded:
-            from paradigms.delivery_policy import bounded_origins, origin_selection_summary
+            from paradigms.delivery_policy import origin_selection_summary
             campaign_stats = self.store.campaigns.get(self.campaign.campaign_id, load_discovery=False).stats
             if "origin_scope" in campaign_stats:
                 scope = set(campaign_stats["origin_scope"])
@@ -462,12 +462,25 @@ class ParadigmOrchestrator:
                     "version": None, "policy": "frozen_legacy_scope",
                 }
             else:
-                event_origins = [item for item in batch.origins if item.raw.get("event_recall_key")]
-                regular = bounded_origins(batch.origins, limit=config.PARADIGM_RESEARCH_ORIGIN_LIMIT,
-                    reference_time=research_now(), days=self.high_signal_discovery_lookback_days,
-                    ordinary_days=self.ordinary_discovery_lookback_days)
-                selected = list({item.fingerprint: item for item in [*event_origins, *regular]}.values())[:config.PARADIGM_RESEARCH_ORIGIN_LIMIT]
+                # Qualification itself can spend/fail. Save its unacknowledged
+                # inputs first so interruption/resume keeps the discovery, not
+                # an empty receipt or a second full fetch.
+                if getattr(self, "delivery_contract_version", None) == 5:
+                    self.store.campaigns.save_discovery(self.campaign.campaign_id, batch)
+                selected = await self._select_origin_scope(batch.origins, deep_deadline, stats)
+                # Resolve original dates before binding the source revision.
+                # Never "repair" a date inside a paid deep stage/CAS envelope.
+                if isinstance(self.discovery, ParadigmDiscovery):
+                    from sources.publication_dates import resolve_origin_dates
+                    try:
+                        stats["publication_date_resolution"] = await asyncio.wait_for(
+                            resolve_origin_dates(selected), timeout=min(90, max(_remaining_seconds(deep_deadline), 0.01)))
+                    except asyncio.TimeoutError:
+                        stats["publication_date_resolution"] = {"status": "timed_out"}
+                    except Exception as exc:
+                        stats["publication_date_resolution"] = {"status": "failed", "error": type(exc).__name__}
                 stats["origin_selection"] = origin_selection_summary(batch.origins, selected)
+                stats["origin_selection"]["qualification"] = stats.get("origin_scope_qualification", {})
         with self.store.transaction():
             # Persist the downstream campaign snapshot before the upstream
             # discovery records are acknowledged. A crash commits both or none.
@@ -479,9 +492,10 @@ class ParadigmOrchestrator:
             origins, incremental, origin_checkpoint = self.store.observe_origins(batch.origins)
             self.store.campaigns.reconcile(self.campaign.campaign_id)
         if bounded:
-            scope = set(self.store.campaigns.get(self.campaign.campaign_id, load_discovery=False).stats["origin_scope"])
+            current_scope = self.store.campaigns.get(self.campaign.campaign_id, load_discovery=False).stats
+            scope = set(current_scope["origin_scope"]) | set(current_scope.get("origin_dependency_scope", []))
             stats["research_scope_origin_count"] = len(scope)
-            stats["unselected_origin_count"] = len(batch.origins) - len(scope)
+            stats["unselected_origin_count"] = sum(item.fingerprint not in scope for item in batch.origins)
         stats.update({f"origin_{key}": value for key, value in incremental.items()})
         # 发现和分析必须是两个独立检查点。先把本轮所有新原点写成 pending，
         # 即使后续只处理其中一部分，也不会把运行预算误写成研究淘汰。
@@ -544,7 +558,15 @@ class ParadigmOrchestrator:
             candidate_keys=new_candidate_keys, stats=stats,
         )
         stats["research_service"] = service["research_service"]
-        if origins:
+        if service.get("dependency_origin_count"):
+            added = service["dependency_origin_count"]
+            stats["planned_analysis_count"] += added
+            saved_scope = self.store.campaigns.get(self.campaign.campaign_id, load_discovery=False).stats
+            all_scope = set(saved_scope.get("origin_scope", [])) | set(saved_scope.get("origin_dependency_scope", []))
+            stats["research_scope_origin_count"] = len(all_scope)
+            stats["unselected_origin_count"] = sum(item.fingerprint not in all_scope for item in batch.origins)
+            stats["dependency_origin_count"] = added
+        if origins or service.get("dependency_origin_count"):
             (
                 extractions,
                 analyzed_origin_count,
@@ -1218,6 +1240,60 @@ class ParadigmOrchestrator:
                     summary["campaign_pending_count"])
         return stats
 
+    async def _select_origin_scope(self, origins, deadline, stats):
+        """Cheap qualification precedes the expensive-review quota.
+
+        Inspect at most four diverse acquisition pages per review slot. Unknown
+        or missing answers are NOT negative verdicts; all unselected originals
+        remain in discovery/state. Freeze only the resulting review scope.
+        """
+        from database.origin_state import source_signature
+        from paradigms.delivery_policy import bounded_origins
+        limit = config.PARADIGM_RESEARCH_ORIGIN_LIMIT
+        pool = bounded_origins(origins, limit=limit * 4, reference_time=research_now(),
+            days=self.high_signal_discovery_lookback_days, ordinary_days=self.ordinary_discovery_lookback_days)
+        decisions = {}
+        prefetch = getattr(self.analyzer, "prefetch_origin_eligibility", None)
+        can_screen = getattr(self.analyzer, "enable_batch_prefilter", False) and callable(prefetch)
+        screening_deadline = time.monotonic() + min(120, max(_remaining_seconds(deadline) / 10, 0))
+        ordinary = [copy.deepcopy(item) for item in pool if _should_prefilter_origin(item)]
+        for item in ordinary:
+            # Same source signature as persistence; do not write speculative
+            # cache identities onto discovery records or bypass CAS protection.
+            item.source_revision = source_signature(item)
+        if can_screen:
+            size = max(config.PARADIGM_ORIGIN_PREFILTER_BATCH_SIZE, 1)
+            for offset in range(0, len(ordinary), size):
+                remaining = min(_remaining_seconds(deadline), screening_deadline - time.monotonic())
+                if remaining <= 0:
+                    break
+                try:
+                    rows = await asyncio.wait_for(prefetch(ordinary[offset:offset + size]), timeout=remaining)
+                    decisions.update(rows)
+                except SampleBudgetError:
+                    raise
+                except Exception as exc:
+                    run_audit.event("origin_scope_qualification", "deferred", type(exc).__name__)
+                    break
+        eligible = [item for item in pool if decisions.get(item.fingerprint, ("", ""))[0] != "screen_out"]
+        # Formal reports use their own mechanism index. A failed qualification
+        # is kept unknown; it does not outrank a positively qualified original.
+        known = [item for item in eligible if not _should_prefilter_origin(item)
+                 or decisions.get(item.fingerprint, ("", ""))[0] == "full_review"]
+        known_keys = {item.fingerprint for item in known}
+        unknown = [item for item in eligible if item.fingerprint not in known_keys]
+        regular = bounded_origins([*known] if can_screen else eligible, limit=limit,
+            reference_time=research_now(), days=self.high_signal_discovery_lookback_days,
+            ordinary_days=self.ordinary_discovery_lookback_days)
+        if can_screen and len(regular) < limit:
+            regular.extend(unknown[:limit - len(regular)])
+        event_origins = [item for item in origins if item.raw.get("event_recall_key")]
+        selected = list({item.fingerprint: item for item in [*event_origins, *regular]}.values())[:limit]
+        stats["origin_scope_qualification"] = {"pool": len(pool), "answered": len(decisions),
+            "screened_out": sum(value[0] == "screen_out" for value in decisions.values()),
+            "unknown": len(ordinary) - len(decisions), "enabled": bool(can_screen)}
+        return selected
+
     async def _service_research_lanes(
         self, origins: list, supporting: list, deadline: float,
         reserve: int, *, candidate_keys: set[str], stats: dict, clock=None,
@@ -1330,6 +1406,8 @@ class ParadigmOrchestrator:
         analyzed = failed = partial = 0
         hydration = _empty_hydration_stats()
         completed_deep, deep_budget, deep_failed, deep_blocked = {}, {}, {}, {}
+        dependency_seen = {item.fingerprint for item in origins}
+        dependency_origins = set()
         refreshed, unchanged, refresh_failed = {}, {}, {}
         refresh_budget = []
         refresh_attempted = 0
@@ -1521,6 +1599,13 @@ class ParadigmOrchestrator:
                     key = deep_queues[lane].popleft()
                     if key not in deep_tasks or deep_lanes.get(key) != lane:
                         continue
+                    # Reconcile/origin commits may have replaced a queued base
+                    # before it gets a turn. Reload BEFORE recording/paying for
+                    # this visit, not after a failed CAS with new derived prose.
+                    latest = self.store.load_candidate_snapshots([key])
+                    if latest and latest[0].status == "pending_deep":
+                        deep_tasks[key] = latest[0]
+                        deep_plan[key] = latest[0]
                     if not self.store.candidate_inputs_current(deep_tasks[key]):
                         rebased = self.store.rebase_analyzed_candidate_inputs(key)
                         if rebased is None:
@@ -1528,6 +1613,23 @@ class ParadigmOrchestrator:
                             deep_blocked[key] = snapshot
                             deep_lanes.pop(key, None)
                             self.store.save_candidates([snapshot])
+                            # A selected historical hypothesis must have a real
+                            # path to review its changed prerequisite, even when
+                            # that origin missed this week's acquisition quota.
+                            expected = {e.fingerprint: e.source_revision for e in snapshot.input_evidence
+                                        if e.evidence_type in ORIGIN_EVIDENCE_TYPES}
+                            dependencies = [item for item in self.store.load_origin_snapshots(expected)
+                                            if item.fingerprint not in dependency_seen
+                                            and item.source_revision != expected[item.fingerprint]
+                                            and getattr(self, "delivery_contract_version", None) == 5]
+                            if dependencies:
+                                if campaign_key:
+                                    self.store.campaigns.include_origin_dependencies(campaign_key, dependencies)
+                                for item in dependencies:
+                                    dependency_seen.add(item.fingerprint)
+                                    dependency_origins.add(item.fingerprint)
+                                    origin_queues["current" if _origin_is_in_delivery_window(item, reference_time=now, window_days=window) else "backfill"].append(item)
+                                run_audit.event("origin_dependency", "queued", f"为已入队路线补审 {len(dependencies)} 条已修订上游；保留原始取材范围与独立依赖账本")
                             continue
                         deep_tasks[key] = rebased
                         deep_plan[key] = rebased
@@ -1620,12 +1722,14 @@ class ParadigmOrchestrator:
 
         # No repair or biography may take the first research turn away from a
         # remaining candidate. Failures remain real pending objects throughout.
-        mandatory_visited = not (any(origin_queues.values()) or deep_tasks
-                                 or deep_blocked or refresh_keys)
+        mandatory_visited = not (any(origin_queues.values()) or deep_tasks or refresh_keys)
         if bounded and campaign_key and mandatory_visited:
             attempt_ledger = self.store.campaigns.snapshot(campaign_key)
-            mandatory_visited = all(attempt_ledger.get(kind + "_unattempted") == 0
-                                    for kind in ("origin", "deep", "refresh"))
+            visited = {row["key"] for row in attempt_ledger.get("execution_receipts", [])
+                       if row["kind"] == "deep" and row["outcome"] != "unattempted"}
+            untouched = set(attempt_ledger.get("deep_scope_keys", [])) - visited
+            mandatory_visited = (all(attempt_ledger.get(kind + "_unattempted") == 0 for kind in ("origin", "refresh"))
+                                 and untouched <= set(deep_blocked))
         post_phase_seconds = {"synthesis_repair": 0.0, "researcher_attribution": 0.0}
         if getattr(self, "_defer_person_enrichment", False) and mandatory_visited and _remaining_seconds(deadline) > 0:
             post_started = monotonic()
@@ -1658,7 +1762,7 @@ class ParadigmOrchestrator:
                 self._defer_person_enrichment = True
             post_phase_seconds["researcher_attribution"] = round(max(monotonic() - post_started, 0), 3)
             run_audit.event("research_service_order", "observed",
-                "全部首次技术访问结束后才执行结构修复和可选人物补充；未补充人物不改变技术判断")
+                "全部可运行候选首次访问后执行独立结构修复和可选人物补充；上游阻塞对象保留真实待办，不扣住其他对象")
 
         for queue in origin_queues.values():
             origin_budget_by_key.update((item.fingerprint, item) for item in queue)
@@ -1703,6 +1807,7 @@ class ParadigmOrchestrator:
             "refresh_safety_deferred": [item for item in refresh_safety if item.key not in deep_plan],
             "refresh_input_redirected_count": len(refresh_input_redirected),
             "research_service": service,
+            "dependency_origin_count": len(dependency_origins),
         }
 
     async def _repair_syntheses_after_first_visits(self, completed, refreshed, supporting, deadline):

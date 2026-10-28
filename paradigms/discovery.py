@@ -163,6 +163,10 @@ class ParadigmDiscovery:
             value = {field: getattr(source, field) for field in ("lookback_days", "high_signal_lookback_days", "seed_arxiv_ids", "venues", "searches", "pages", "organizations", "feed_base_url") if hasattr(source, field)}
             if include_adapters:
                 value["origin_input_policy"] = hashlib.sha256(Path(__file__).with_name("publication.py").read_bytes()).hexdigest()
+                if isinstance(source, OfficialRepositoryReleaseSource):
+                    root = Path(__file__).parent.parent / "sources"
+                    value["publication_metadata_policy"] = hashlib.sha256(b"".join(
+                        (root / name).read_bytes() for name in ("official_repository_release_source.py", "publication_dates.py", "document_limits.py"))).hexdigest()
                 if isinstance(source, ResearchFeedSource):
                     root = Path(__file__).parent.parent / "sources"
                     value["html_body_policy"] = hashlib.sha256(b"".join(
@@ -611,10 +615,12 @@ def _within_lookback(item: RawProject, lookback_days: int) -> bool:
 
 
 def _merge_origins(items: list[TechnicalEvidence]) -> list[TechnicalEvidence]:
+    from sources.publication_dates import arxiv_identifier, publication_date_rank
     by_key: dict[str, TechnicalEvidence] = {}
     title_keys: dict[str, str] = {}
     for item in items:
-        key = item.identifiers.get("doi") or item.identifiers.get("arxiv") or item.fingerprint
+        arxiv = arxiv_identifier(item)
+        key = "arxiv:" + arxiv if arxiv else item.identifiers.get("doi") or item.fingerprint
         title_key = _safe_title_dedupe_key(item.title)
         if title_key and title_key in title_keys:
             key = title_keys[title_key]
@@ -624,6 +630,15 @@ def _merge_origins(items: list[TechnicalEvidence]) -> list[TechnicalEvidence]:
                 title_keys[title_key] = key
             continue
         current = by_key[key]
+        preferred_date = item if publication_date_rank(item) > publication_date_rank(current) else current
+        date_metadata = {key: preferred_date.raw[key] for key in (
+            "publication_date_source", "publication_date_precision", "publication_date_status",
+            "arxiv_last_revised_at", "source_published_at",
+        ) if key in preferred_date.raw}
+        if preferred_date is item:
+            current.published_at = item.published_at
+        date_metadata.setdefault("publication_date_source", "arxiv_api" if preferred_date.source == "arxiv" else preferred_date.source)
+        date_metadata.setdefault("publication_date_precision", "day" if len(current.published_at) == 10 else "second" if current.published_at else "unknown")
         if len(item.summary) > len(current.summary):
             current.summary = item.summary
         if _primary_url_rank(item.url) > _primary_url_rank(current.url):
@@ -631,6 +646,7 @@ def _merge_origins(items: list[TechnicalEvidence]) -> list[TechnicalEvidence]:
         current.metrics.update(item.metrics)
         current.identifiers.update(item.identifiers)
         _merge_origin_raw(current.raw, item.raw)
+        current.raw.update(date_metadata)
         if item.organization and not current.organization:
             current.organization = item.organization
         current.authors = list(dict.fromkeys(current.authors + item.authors))

@@ -876,6 +876,12 @@ class _ArticleParser(HTMLParser):
         attributes = {key.casefold(): value or "" for key, value in attrs}
         container_names = set((attributes.get("class", "") + " " + attributes.get("id", "")).casefold().split())
         excluded = self._excluded() or _auxiliary_html(lowered, attributes, in_body=self._in_body())
+        # Related-post cards can be <article> elements outside the actual post
+        # (IBM uses data-testid=blog-post-card). They are navigation, not the
+        # narrowest article body. Do not apply this to index-link discovery.
+        test_id = attributes.get("data-testid", "").casefold()
+        if lowered == "article" and test_id.endswith(("post-card", "article-card", "publication-card")):
+            excluded = True
         in_body = not excluded and (
             lowered in {"main", "article"} or attributes.get("role", "").casefold() == "main" or self._in_body()
         )
@@ -1473,6 +1479,23 @@ def _discover_embedded_publications(
             continue
         for item in _walk_structured_publications(payload, base_url):
             results[item.url.rstrip("/")] = item
+    # Cards may contain nested image/author objects. A flat-brace regex drops
+    # exactly those cards (e.g. current Anthropic research). Decode JSON data,
+    # never execute the surrounding hydration JavaScript.
+    decoder, offset, objects = json.JSONDecoder(), 0, 0
+    while objects < 20000:
+        start = normalized.find("{", offset)
+        if start < 0:
+            break
+        try:
+            payload, end = decoder.raw_decode(normalized, start)
+        except (ValueError, RecursionError):
+            offset = start + 1
+            continue
+        offset, objects = end, objects + 1
+        for item in _walk_structured_publications(payload, base_url):
+            if not path_cards or re.fullmatch(r"/research/(?:en|zh)/[^/]+/?", urlparse(item.url).path):
+                results[item.url.rstrip("/")] = item
     for chunk in re.findall(r"\{[^{}]{0,5000}\}", normalized):
         title_match = re.search(
             r'"(?:title|name)"\s*:\s*"((?:\\.|[^"])*)"',
@@ -1495,7 +1518,7 @@ def _discover_embedded_publications(
         url = urljoin(base_url, href_match.group(1))
         if path_cards and not re.fullmatch(r"/research/(?:en|zh)/[^/]+/?", urlparse(url).path):
             continue
-        date = _normalize_date(date_match.group(1)) if date_match else ""
+        date = (_date_from_text(date_match.group(1)) or _normalize_date(date_match.group(1))) if date_match else ""
         if not title or not url.startswith(("http://", "https://")):
             continue
         results[url.rstrip("/")] = _ResearchLink(
@@ -1509,11 +1532,14 @@ def _discover_embedded_publications(
 def _walk_structured_publications(
     payload: object,
     base_url: str,
+    _depth: int = 0,
 ) -> list[_ResearchLink]:
     results: list[_ResearchLink] = []
+    if _depth > 50:
+        return results
     if isinstance(payload, list):
         for item in payload:
-            results.extend(_walk_structured_publications(item, base_url))
+            results.extend(_walk_structured_publications(item, base_url, _depth + 1))
         return results
     if not isinstance(payload, dict):
         return results
@@ -1525,6 +1551,7 @@ def _walk_structured_publications(
     )
     url_value = (
         payload.get("url")
+        or payload.get("href")
         or payload.get("contentUrl")
         or payload.get("mainEntityOfPage")
     )
@@ -1535,18 +1562,19 @@ def _walk_structured_publications(
         payload.get("datePublished")
         or payload.get("dateCreated")
         or payload.get("uploadDate")
+        or payload.get("date")
     )
-    if title and url.startswith(("http://", "https://")):
+    if title and _structured_scalar(url_value) and url.startswith(("http://", "https://")):
         results.append(
             _ResearchLink(
                 title=title,
                 url=url,
-                published_at=_normalize_date(published),
+                published_at=_date_from_text(published) or _normalize_date(published),
             )
         )
     for value in payload.values():
         if isinstance(value, (dict, list)):
-            results.extend(_walk_structured_publications(value, base_url))
+            results.extend(_walk_structured_publications(value, base_url, _depth + 1))
     return results
 
 
@@ -1652,7 +1680,8 @@ def _date_from_text(value: str) -> str:
     # Publication cards can contain an explicit day/month/year (e.g. TRI).
     # A conference year or a bare year remains unknown. No locale dependency.
     months = {name: i for i, name in enumerate(("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"), 1)}
-    names = "|".join(months)
+    months.update({name[:3]: number for name, number in list(months.items())})
+    names = "|".join(sorted(months, key=len, reverse=True))
     match = re.search(r"\b(\d{1,2})\s+(" + names + r")\s+(20\d{2})\b", value, re.I)
     if match:
         day, month, year = match.groups()

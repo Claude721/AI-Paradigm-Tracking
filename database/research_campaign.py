@@ -296,6 +296,20 @@ class CampaignStore:
         with self.store._connect() as conn:
             conn.execute("UPDATE research_campaigns SET discovery_json=?, status='researching', updated_at=? WHERE campaign_id=? AND status != 'delivered'", (payload, _now(), key))
 
+    def include_origin_dependencies(self, key, origins):
+        """Explicit prerequisites, not a re-ranked/expanded acquisition sample."""
+        with self.store.transaction():
+            campaign = self.get(key, load_discovery=False)
+            dependencies = set(campaign.stats.get("origin_dependency_scope", []))
+            initial = set(campaign.stats.get("origin_scope", []))
+            dependencies.update(item.fingerprint for item in origins if item.fingerprint not in initial)
+            stats = {**campaign.stats, "origin_dependency_scope": sorted(dependencies),
+                     "research_scope_origin_count": len(initial | dependencies)}
+            with self.store._connect() as conn:
+                conn.execute("UPDATE research_campaigns SET stats_json=?, updated_at=? WHERE campaign_id=?",
+                             (_encode(stats), _now(), key))
+            self.include(key, "origin", [(item.fingerprint, item.source_revision, item.to_dict()) for item in origins])
+
     def include(self, key, kind, objects):
         if kind not in {"origin", "deep", "refresh"}:
             raise ValueError("未知研究任务类型")
@@ -377,7 +391,7 @@ class CampaignStore:
         with self.store.transaction():
             campaign = self.get(key, load_discovery=False)
             bounded = campaign.stats.get("delivery_contract_version") in {2, 3, 4, 5}
-            scope = set(campaign.stats.get("origin_scope", []))
+            scope = set(campaign.stats.get("origin_scope", [])) | set(campaign.stats.get("origin_dependency_scope", []))
             with self.store._connect() as conn:
                 origins = conn.execute("""SELECT e.fingerprint, o.source_signature, e.last_analyzed_at
                     FROM evidence_state e JOIN origin_research_state o ON e.fingerprint=o.fingerprint
@@ -519,7 +533,7 @@ class CampaignStore:
             if len(saved) != len(expected) or any(not self.store.candidate_inputs_current(item) for item in saved):
                 raise ResearchNotCompleteError(["交付路线检查点丢失或一手输入已换版"])
             actual = delivery_proof({"frontier_coverage": campaign.discovery.coverage,
-                                    "research_scope_origin_count": len(campaign.stats.get("origin_scope", [])),
+                                    "research_scope_origin_count": len(set(campaign.stats.get("origin_scope", [])) | set(campaign.stats.get("origin_dependency_scope", []))),
                                     "discovery_rejected_origins": campaign.stats.get("discovery_rejected_origins", 0),
                                     "delivery_contract_version": campaign.stats.get("delivery_contract_version")}, saved,
                                     self.reconcile(key), minimum_sources=campaign.stats["delivery_scope"]["minimum_primary_sources"])

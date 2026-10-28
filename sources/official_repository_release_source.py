@@ -31,6 +31,8 @@ from research_watchlist import (
 )
 
 from runtime_clock import research_now
+from sources.publication_dates import arxiv_publication_dates
+from sources.document_limits import bounded_document_get
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +189,8 @@ class OfficialRepositoryReleaseSource:
                     return item, repositories, page, ""
                 page += 1
 
-        async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True,
+                headers={"User-Agent": "AI-Paradigm-Radar/3.2"}) as client:
             raw_batches = await asyncio.gather(
                 *(get_repositories(client, item) for item in self.organizations),
                 return_exceptions=True,
@@ -252,13 +255,9 @@ class OfficialRepositoryReleaseSource:
             ) -> tuple[str, bool, str, str, str]:
                 try:
                     async with semaphore:
-                        response = await client.get(
-                            url,
-                            headers={
-                                "User-Agent": "AI-Paradigm-Radar/3.2",
-                                "Range": "bytes=0-4095",
-                            },
-                        )
+                        # A 4KB range often omits submission history and even
+                        # publication meta tags. Read a bounded public document.
+                        response = await bounded_document_get(client, url)
                     response.raise_for_status()
                     if is_nonresearch_page(str(response.url), response.text):
                         raise ValueError("External primary target is an account or challenge page")
@@ -666,6 +665,8 @@ def _primary_publication_date(url: str, body: str) -> str:
     """Read a material date without borrowing the surrounding release event."""
 
     text = unescape(body or "")[:200_000]
+    if (urlparse(url).hostname or "").casefold() in {"arxiv.org", "export.arxiv.org"}:
+        return arxiv_publication_dates(text)["published_at"]
     patterns = (
         r'["\']datePublished["\']\s*[:=]\s*["\']([^"\']+)',
         r'(?:article:published_time|citation_publication_date|citation_date)["\']?\s+(?:content=)?["\']([^"\']+)',
@@ -679,18 +680,6 @@ def _primary_publication_date(url: str, body: str) -> str:
         if parsed:
             return parsed.isoformat()
 
-    arxiv = re.search(
-        r"arxiv\.org/(?:abs|pdf)/([0-9]{2})([0-9]{2})\.[0-9]{4,5}(?:v\d+)?",
-        url,
-        re.IGNORECASE,
-    )
-    if arxiv:
-        year = 2000 + int(arxiv.group(1))
-        month = int(arxiv.group(2))
-        if 1 <= month <= 12:
-            # arXiv identifiers expose month but not day. First-of-month is a
-            # conservative, stable approximation used only for window checks.
-            return datetime(year, month, 1, tzinfo=timezone.utc).isoformat()
     return ""
 
 

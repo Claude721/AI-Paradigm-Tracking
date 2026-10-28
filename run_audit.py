@@ -298,6 +298,14 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         chosen = selection.get("source_selected") or {}
         lines.extend(f"- {name}：选定 {chosen.get(name, 0)} / 发现 {count}"
                      for name, count in sorted(discovered.items()))
+        qualification = selection.get("qualification") or {}
+        if qualification:
+            lines.append(f"- 名额前资格预筛：候选池 {qualification.get('pool', 0)}；有效回答 {qualification.get('answered', 0)}；明确排除 {qualification.get('screened_out', 0)}；未知/未审 {qualification.get('unknown', 0)}（不作技术否定）")
+        dates = stats.get("publication_date_resolution") or {}
+        if dates:
+            lines.append(f"- 原文首发日期核对：{dates}；发生在来源版本绑定之前，失败不伪装为旧材料或技术淘汰。")
+        if stats.get("dependency_origin_count"):
+            lines.append(f"- 已选路线新增上游补审：{stats['dependency_origin_count']}；独立依赖账本，不重排初始冻结取材范围。")
         lines.append("")
     lines.extend(["## 信源返回量（取材快照；续跑不代表本次重新请求）", ""])
     if source_counts:

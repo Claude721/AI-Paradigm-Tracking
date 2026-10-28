@@ -431,6 +431,7 @@ def assess_candidate_freshness(
     }
     dated_primary: list[tuple[datetime, TechnicalEvidence]] = []
     undated_primary: list[TechnicalEvidence] = []
+    imprecise_primary: list[TechnicalEvidence] = []
     current_uptake: list[TechnicalEvidence] = []
     from .evidence_association import countable_evidence
     for evidence in candidate.evidence:
@@ -438,8 +439,15 @@ def assess_candidate_freshness(
             continue
         if evidence.evidence_type in primary_types:
             published = _evidence_datetime(evidence.published_at)
-            if published:
+            if evidence.source == "huggingface-papers" and str(evidence.raw.get("publication_date_status", "")).startswith("unresolved_"):
+                undated_primary.append(evidence)
+            elif published:
                 dated_primary.append((published, evidence))
+                day_precision = (len(evidence.published_at) == 10
+                    or evidence.raw.get("publication_date_precision") == "day"
+                    or bool(re.fullmatch(r"\d{4}[-/]\d{2}[-/]\d{2}", str(evidence.raw.get("source_published_at", "")))))
+                if day_precision and published < cutoff < published + timedelta(days=1):
+                    imprecise_primary.append(evidence)
             else:
                 undated_primary.append(evidence)
             continue
@@ -475,6 +483,10 @@ def assess_candidate_freshness(
         classification = "historical_reactivated"
         decision = "include"
         reason = "一手材料不是本期新发布，但存在窗口内已核验传播、独立承接或指标增量"
+    elif imprecise_primary:
+        classification = "date_precision_unresolved"
+        decision = "defer"
+        reason = "一手日期仅精确到天且跨越本期边界，待核验精确首发；不判定为旧材料"
     elif dated_primary:
         classification = "historical_without_current_uptake"
         decision = "defer"

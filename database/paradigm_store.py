@@ -1520,9 +1520,12 @@ class ParadigmStore:
             raise ValueError("增强检查点身份或一手输入版本不一致")
         with self.transaction(), self._connect() as conn:
             row = conn.execute("SELECT status, payload_json FROM paradigms WHERE paradigm_key=?", (original.key,)).fetchone()
-            if (row is None or row[0] != "pending_deep" or json.loads(row[1]) != original.to_dict()
-                    or not _deep_origin_revisions_current(conn, original)):
-                raise ValueError("增强检查点与当前候选或一手版本冲突")
+            reason = ("candidate_missing" if row is None else
+                      "candidate_status_changed" if row[0] != "pending_deep" else
+                      "candidate_snapshot_changed" if json.loads(row[1]) != original.to_dict() else
+                      "origin_revision_changed" if not _deep_origin_revisions_current(conn, original) else "")
+            if reason:
+                raise ValueError("增强检查点与当前候选或一手版本冲突：" + reason)
             self.save_candidates([snapshot])
         return snapshot
 

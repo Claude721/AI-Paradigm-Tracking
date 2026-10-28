@@ -2911,13 +2911,13 @@ class ParadigmPipelineTests(unittest.TestCase):
             "https://arxiv.org/abs/2608.00003",
         )
 
-    def test_repository_primary_date_prefers_exact_metadata_over_arxiv_month(self) -> None:
+    def test_repository_primary_date_preserves_day_metadata_without_inventing_midnight(self) -> None:
         self.assertEqual(
             _primary_publication_date(
                 "https://arxiv.org/abs/2608.00003",
                 '<meta name="citation_date" content="2026-08-27">',
             ),
-            "2026-08-27T00:00:00+00:00",
+            "2026-08-27",
         )
 
     def test_arxiv_report_query_failure_does_not_drop_regular_feed(self) -> None:
