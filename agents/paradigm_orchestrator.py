@@ -1722,16 +1722,12 @@ class ParadigmOrchestrator:
 
         # No repair or biography may take the first research turn away from a
         # remaining candidate. Failures remain real pending objects throughout.
-        mandatory_visited = not (any(origin_queues.values()) or deep_tasks or refresh_keys)
-        if bounded and campaign_key and mandatory_visited:
-            attempt_ledger = self.store.campaigns.snapshot(campaign_key)
-            visited = {row["key"] for row in attempt_ledger.get("execution_receipts", [])
-                       if row["kind"] == "deep" and row["outcome"] != "unattempted"}
-            untouched = set(attempt_ledger.get("deep_scope_keys", [])) - visited
-            mandatory_visited = (all(attempt_ledger.get(kind + "_unattempted") == 0 for kind in ("origin", "refresh"))
-                                 and untouched <= set(deep_blocked))
         post_phase_seconds = {"synthesis_repair": 0.0, "researcher_attribution": 0.0}
-        if getattr(self, "_defer_person_enrichment", False) and mandatory_visited and _remaining_seconds(deadline) > 0:
+        # The scheduler has drained its runnable first visits (or its time).
+        # Durable scope can also contain blocked, failed or newly reconciled
+        # tasks without a runnable input. They must not veto healthy peers'
+        # independent repair/biography. Pending receipts stay unchanged.
+        if getattr(self, "_defer_person_enrichment", False) and _remaining_seconds(deadline) > 0:
             post_started = monotonic()
             await self._repair_syntheses_after_first_visits(
                 completed_deep, refreshed, supporting, deadline,

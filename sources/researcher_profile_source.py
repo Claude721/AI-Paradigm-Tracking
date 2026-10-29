@@ -25,6 +25,7 @@ from paradigms.researcher_identity import (
 )
 from paradigms.reputation import resolve_organization
 from paradigms.async_utils import gather_scoped
+from paradigms.authorship import source_authorship
 
 logger = logging.getLogger(__name__)
 OPENALEX_AUTHORS = "https://api.openalex.org/authors"
@@ -435,11 +436,8 @@ def _seed_profiles(
     # historical person's verified contact or identifier. Build fresh seeds,
     # then reconcile only on a shared public identity claim.
     by_name: dict[str, ResearcherProfile] = {}
-    roles = {
-        str(name): str(role)
-        for name, role in (evidence.raw.get("author_roles") or {}).items()
-        if name and role
-    }
+    authorship = source_authorship(evidence)
+    roles = {fact.name: fact.role for fact in authorship}
     profile_urls = {
         str(name): str(url)
         for name, url in (evidence.raw.get("author_profile_urls") or {}).items()
@@ -466,16 +464,8 @@ def _seed_profiles(
         for name, identifier in (evidence.raw.get("author_openalex_map") or {}).items()
         if name and identifier
     }
-    affiliation_map = {
-        str(name): [str(value) for value in values if value]
-        for name, values in (evidence.raw.get("author_affiliations") or {}).items()
-        if name and isinstance(values, list)
-    }
-    individual_authors = [
-        name
-        for name in evidence.authors
-        if plausible_researcher_name(name) and not _is_collective_author(name)
-    ]
+    affiliation_map = {fact.name: list(fact.affiliations) for fact in authorship}
+    individual_authors = [fact.name for fact in authorship]
     has_collective_signature = len(individual_authors) != len(evidence.authors)
     selected: list[str] = []
     # 研究负责人选择是分层配额，不是论文作者列表的机械截断：第一位具名
@@ -521,11 +511,9 @@ def _seed_profiles(
         )
     )
     selected.extend(individual_authors[1:3])
-    selected.extend(
-        name
-        for name in roles
-        if plausible_researcher_name(name) and not _is_collective_author(name)
-    )
+    # Source facts include ordinary coauthors too. Do not turn their presence
+    # into a new lookup quota or select a collective report's last author just
+    # because every byline now has a deterministic display role.
     selected = list(
         dict.fromkeys(name for name in selected if plausible_researcher_name(name))
     )[:limit]
@@ -564,7 +552,9 @@ def _seed_profiles(
             ResearcherProfile(
                 name=name,
                 role=role,
-                current_affiliation=evidence.organization if evidence.evidence_type == EvidenceType.PRIMARY_PAPER else "",
+                # Paper affiliation and publisher are not current employment.
+                # Only the optional identity lookup may establish that field.
+                current_affiliation="",
             ),
         )
         if role and not profile.role:
@@ -603,10 +593,7 @@ def _seed_profiles(
             [],
         )
         if affiliations:
-            profile.current_affiliation = affiliations[0]
-            for affiliation in affiliations[1:]:
-                if affiliation not in profile.prior_affiliations:
-                    profile.prior_affiliations.append(affiliation)
+            _note(profile, "本工作署名机构（不代表当前任职）：" + "；".join(affiliations))
         homepage = next(
             (
                 url

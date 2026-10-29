@@ -3261,7 +3261,8 @@ class ParadigmPipelineTests(unittest.TestCase):
                 ResearcherProfileClient().enrich(evidence, existing=[])
             )
         self.assertEqual(profiles[0].name, "A. Researcher")
-        self.assertEqual(profiles[0].current_affiliation, "Example Robotics Lab")
+        # The paper-level publisher is not this person's current employer.
+        self.assertEqual(profiles[0].current_affiliation, "")
         self.assertTrue(profiles[0].contact_search_notes)
 
     def test_researcher_lookup_failure_degrades_to_search_trace(self) -> None:

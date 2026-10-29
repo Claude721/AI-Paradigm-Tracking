@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from paradigms.models import TechnicalEvidence, nonnegative_number
+from paradigms.authorship import parse_authorship_html
 from paradigms.publication import classify_publication, nonresearch_page_reason
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,10 @@ class ArxivDocumentClient:
         if parsed["document_excerpt"]:
             evidence.raw["document_excerpt"] = parsed["document_excerpt"]
             evidence.raw["document_source_url"] = str(response.url)
+        if parsed["authors"]:
+            evidence.authors = parsed["authors"]
+        if parsed["author_affiliations"]:
+            evidence.raw["author_affiliations"] = parsed["author_affiliations"]
         if parsed["affiliations"]:
             evidence.raw["affiliations"] = parsed["affiliations"]
             if not evidence.organization:
@@ -333,8 +338,12 @@ def parse_arxiv_html(
         and urlparse(url).path.split("/")[1].casefold() != "arxiv"
         and urlparse(url).path.split("/")[2].casefold() != "latexml"
     ]
-    author_roles = _infer_author_roles(parser.authors, parser.equal_contribution_names)
+    authorship = parse_authorship_html(html_text)
+    author_roles = _infer_author_roles(authorship["authors"], parser.equal_contribution_names)
+    author_roles.update(authorship["author_roles"])
     return {
+        "authors": authorship["authors"],
+        "author_affiliations": authorship["author_affiliations"],
         "document_excerpt": excerpt,
         "affiliations": _unique(parser.affiliations),
         "author_profile_urls": author_profiles,
@@ -420,7 +429,7 @@ class _ArxivHTMLParser(HTMLParser):
                 self._ignored_depth += 1
         if tag in {"article", "section", "p", "figcaption"}:
             self._capture_document += 1
-        if "ltx_affiliation" in classes:
+        if classes & {"ltx_affiliation", "ltx_role_affiliation"}:
             self._capture_affiliation += 1
         if "ltx_personname" in classes:
             self._capture_author += 1

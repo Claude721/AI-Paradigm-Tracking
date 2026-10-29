@@ -203,7 +203,9 @@ class ProductionExecutionTests(unittest.IsolatedAsyncioTestCase):
         stats = await process.run(reference_time=fixture.NOW)
         proof = stats["delivery_scope"]
         self.assertEqual((proof["origin_failed"], proof["origin_unattempted"]), (0, 1))
-        process.trajectory.run.assert_not_awaited()
+        # The origin remains unattempted, but cannot veto healthy peers'
+        # optional biography once runnable first visits are drained.
+        self.assertTrue(process.trajectory.run.await_count)
         with self.assertRaises(ResearchNotCompleteError):
             require_completed_research(stats, candidates=process.pending_delivery)
 

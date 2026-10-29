@@ -35,6 +35,7 @@ from .evidence_validation import certify_synthesis_discussion
 from .async_utils import gather_scoped
 from .search_receipts import blocking_searches, search_receipt_summary
 from .publication import nonresearch_page_reason
+from .authorship import candidate_authorship
 from .rubric import (
     evaluate_rubric,
     legacy_dimension_scores,
@@ -1172,9 +1173,11 @@ class ResearcherTrajectoryAnalyzer:
     async def _analyze_one(
         self, candidate: ParadigmCandidate, profile: ResearcherProfile
     ) -> None:
+        authored_facts = candidate_authorship(candidate, limit=None)
         if not profile.representative_works and not profile.public_bio_excerpt:
             public_origins = [item for item in candidate.evidence
-                if item.evidence_type in ORIGIN_EVIDENCE_TYPES and (item.summary.strip() or item.authors)]
+                if item.evidence_type in ORIGIN_EVIDENCE_TYPES and
+                (item.summary.strip() or item.authors or item.raw.get("document_excerpt"))]
             if not public_origins:
                 profile.attribution_analysis_status = "insufficient_material"
                 profile.research_trajectory = "公开资料不足，未能可靠归因研究连续性。"
@@ -1193,7 +1196,9 @@ class ResearcherTrajectoryAnalyzer:
             prior_affiliations=profile.prior_affiliations,
             current_work_context=[{"title": item.title, "url": item.url,
                 "authors": item.authors, "excerpt": str(item.raw.get("document_excerpt") or item.summary)[:6000],
-                "name_is_public_byline": any(name.casefold().strip() == profile.name.casefold().strip() for name in item.authors)}
+                "source_authorship": [fact.to_dict() for fact in authored_facts
+                                      if fact.source_fingerprint == item.fingerprint and fact.name == profile.name],
+                "name_is_public_byline": any(fact.source_fingerprint == item.fingerprint and fact.name == profile.name for fact in authored_facts)}
                 for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES],
         )
         response = None

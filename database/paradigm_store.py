@@ -2084,6 +2084,7 @@ def _trajectory_checkpoint_policy_signature() -> str:
     policy.update(str(DEEP_TRAJECTORY_CHECKPOINT_VERSION).encode("ascii"))
     for relative in (
         "skills/researcher_trajectory/SKILL.md",
+        "paradigms/authorship.py",
         "rubrics/paradigm_rubric.json",
     ):
         policy.update(relative.encode("utf-8"))

@@ -156,8 +156,9 @@ class SoftAttributionTests(unittest.IsolatedAsyncioTestCase):
         reports = list(self.path.glob("paradigm_radar_*.md"))
         self.assertEqual(len(reports), 1)
         content = reports[0].read_text()
-        self.assertIn("未能可靠归因到关键自然人", content)
-        self.assertIn("不影响技术判断", content)
+        self.assertIn("原文署名：A. Researcher", content)
+        self.assertIn("人物身份、当前任职和履历补充未执行或未完成", content)
+        self.assertNotIn("现有材料未能可靠归因到关键自然人", content)
 
     async def test_profile_failure_does_not_lose_technical_result_or_prevent_outbox(self):
         process = self.process(accepted=True)
@@ -200,6 +201,21 @@ class SoftAttributionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(primary.summary, call.await_args.kwargs["messages"][0]["content"])
         self.assertEqual(person.public_contacts, {})
         self.assertIn("未能可靠归因", _attribution_boundary(value))
+
+        # Old HTML-only snapshots have a real document/role but no summary or
+        # authors array. The recovered byline must reach the optional model,
+        # not be mislabeled insufficient material before the prompt is built.
+        primary.summary = ""
+        primary.authors = []
+        primary.raw.update(author_roles={person.name: "第一作者"},
+                           document_excerpt=f"Technical Paper {person.name} Affiliation: Example University Abstract 原文机制。")
+        person.attribution_analysis_status = ""
+        await ResearcherTrajectoryAnalyzer(client=client, model="offline").run([value])
+        self.assertEqual(call.await_count, 2)
+        self.assertEqual(person.attribution_analysis_status, "completed")
+        prompt = call.await_args.kwargs["messages"][0]["content"]
+        self.assertIn("Example University", prompt)
+        self.assertIn("'name_is_public_byline': True", prompt)
 
     async def test_spend_stop_is_not_reclassified_as_person_not_found(self):
         call = AsyncMock(side_effect=SampleBudgetError("confirmed spend stop"))

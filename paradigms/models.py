@@ -670,6 +670,21 @@ def scrub_ephemeral_evidence(evidence: TechnicalEvidence) -> None:
     evidence.raw["content_scrubbed"] = True
 
 
+@dataclass(frozen=True)
+class SourceAuthorship:
+    """Work-scoped byline facts, not a verified biography or current job."""
+
+    name: str
+    role: str
+    affiliations: tuple[str, ...]
+    source_url: str
+    source_fingerprint: str
+    source_revision: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class ResearcherProfile:
     name: str
@@ -778,6 +793,8 @@ def key_researcher_profiles(
     target = max(int(limit or 0), 1)
     primary_markers = (
         "第一作者",
+        "署名首位作者",
+        "第一位具名作者",
         "共同第一",
         "共同一作",
         "first author",

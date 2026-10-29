@@ -170,7 +170,11 @@ class OfficialBylineTests(unittest.TestCase):
         origin = TechnicalEvidence(source="priority-research-page", evidence_type=EvidenceType.TECHNICAL_BLOG,
             title="Official article", url=ARTICLE, authors=["William Zhou"], organization="Publisher",
             raw={"author_affiliations": {"William Zhou": ["Verified employer"]}})
-        self.assertEqual(_seed_profiles(origin, [], 3)[0].current_affiliation, "Verified employer")
+        from paradigms.authorship import source_authorship
+        self.assertEqual(source_authorship(origin)[0].affiliations, ("Verified employer",))
+        profile = _seed_profiles(origin, [], 3)[0]
+        self.assertEqual(profile.current_affiliation, "")
+        self.assertTrue(any("本工作署名机构" in note and "Verified employer" in note for note in profile.contact_search_notes))
 
 
 class SampleDeliveryGateTests(unittest.TestCase):

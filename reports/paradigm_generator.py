@@ -30,6 +30,7 @@ from paradigms.models import (
 )
 from paradigms.researcher_identity import same_verified_researcher
 from paradigms.evidence_association import countable_evidence, profile_references_origin
+from paradigms.authorship import candidate_authorship
 from paradigms.completion import require_completed_research, partial_report_violations
 from run_audit import run_audit
 from runtime_clock import scheduled_date
@@ -614,6 +615,7 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
             for value in _report_researchers(item)
         ],
         "researcher_attribution": _attribution_boundary(item),
+        "source_authorship": [fact.to_dict() for fact in candidate_authorship(item)],
     }
 
 
@@ -707,6 +709,7 @@ def _compact_route_dossier(item: ParadigmCandidate) -> dict:
             for value in _report_researchers(item)
         ],
         "researcher_attribution": _attribution_boundary(item),
+        "source_authorship": [fact.to_dict() for fact in candidate_authorship(item)],
     }
 
 
@@ -1366,6 +1369,8 @@ def _attribution_boundary(candidate: ParadigmCandidate) -> str:
     if people and len(ready) == len(people):
         return "已核验关键人物的公开职业资料；不据此推断未公开贡献。"
     if not people:
+        if candidate_authorship(candidate):
+            return "已保留原文署名与可对应的本工作机构；人物身份、当前任职和履历补充未执行或未完成，不据此推断负责人。"
         return "现有材料未能可靠归因到关键自然人，不猜测负责人；不影响技术判断。"
     pending = [p for p in people if p not in ready]
     outcomes = []
@@ -1376,7 +1381,7 @@ def _attribution_boundary(candidate: ParadigmCandidate) -> str:
     if any(p.identity_search_status in {"", "not_configured", "not_executed"} for p in pending):
         outcomes.append("部分补充身份检索未执行或未配置")
     if any(p.attribution_analysis_status == "not_executed" for p in pending):
-        outcomes.append("本次剩余时间不足，人物模型补充未执行")
+        outcomes.append("人物履历补充未执行，具体原因保留在检索记录中")
     return "未能可靠归因全部关键人物；" + "；".join(outcomes) + "。保留未知，不影响技术判断。"
 
 
@@ -1389,11 +1394,16 @@ def _attach_researcher_index(
         return content
     value = _without_researcher_index(content).strip()
     grouped: OrderedDict[str, list[ResearcherProfile]] = OrderedDict()
+    authorship = {}
     organizations: dict[str, list[dict[str, str]]] = {}
     boundaries: dict[str, list[str]] = {}
     for candidate in candidates:
         route = candidate.route_family or candidate.lineage_parent or candidate.name
         boundaries.setdefault(route, []).append(_attribution_boundary(candidate))
+        bucket_facts = authorship.setdefault(route, [])
+        for fact in candidate_authorship(candidate):
+            if fact not in bucket_facts:
+                bucket_facts.append(fact)
         bucket = grouped.setdefault(route, [])
         for profile in _report_researchers(candidate):
             if profile.name and not any(
@@ -1414,15 +1424,22 @@ def _attach_researcher_index(
     lines = [
         "## 关键人物与公开联系入口",
         "",
-        "以下信息由已核验人物档案确定性生成；只列公开职业信息，不猜测邮箱。",
+        "原文署名与本工作机构独立于人物履历核验；署名机构不等于当前任职，署名顺序不等于项目负责人。职业背景与联系入口仅列已核验资料，不猜测邮箱。",
         "",
     ]
     for route, profiles in grouped.items():
         lines.append(f"### {_markdown_label(route)}")
         lines.append("")
+        for fact in authorship.get(route, []):
+            affiliation = "；".join(fact.affiliations) or "原文尚未可靠对应到此作者"
+            lines.append(
+                f"- 原文署名：{_markdown_label(fact.name)}（{_markdown_label(fact.role)}）；"
+                f"本工作署名机构：{_markdown_label(affiliation)}；"
+                f"[署名来源](<{fact.source_url}>)。"
+            )
         if not profiles:
             organization_entries = organizations.get(route, [])
-            if organization_entries:
+            if organization_entries and not authorship.get(route):
                 for organization in organization_entries:
                     lines.append(
                         f"- **{_markdown_label(organization['name'])}**（组织发布）："
