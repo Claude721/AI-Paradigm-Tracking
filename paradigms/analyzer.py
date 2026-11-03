@@ -87,6 +87,7 @@ class ParadigmAnalyzer:
         self.stage_cache = stage_cache
         self.checkpoint_callback = checkpoint_callback
         self._eligibility_prefetch_failures = set()
+        self.origin_benefits = {}
 
     def _get_client(self):
         if self.client is None:
@@ -219,6 +220,10 @@ class ParadigmAnalyzer:
             result = cache.cache_get("origin_eligibility", signature)
             if result is not None and result.get("decision") in {"full_review", "screen_out"} and isinstance(result.get("reason"), str) and (result["decision"] != "screen_out" or result["reason"]):
                 decisions[item.fingerprint] = (result["decision"], result["reason"])
+                from .research_focus import benefit_receipt
+                benefit = benefit_receipt(result.get("tested_benefit"), item)
+                if benefit:
+                    self.origin_benefits[item.fingerprint] = benefit
                 reused_count += 1
                 review_archive.judgment("origin_eligibility_cache", {"origins": [item]}, result, signature)
             else:
@@ -226,7 +231,9 @@ class ParadigmAnalyzer:
         with review_archive.bind_cache(signatures):
             fresh = await self._screen_uncached_origin_batch(missing)
         for fingerprint, (decision, reason) in fresh.items():
-            cache.cache_save("origin_eligibility", signatures[fingerprint], {"decision": decision, "reason": reason})
+            cache.cache_save("origin_eligibility", signatures[fingerprint], {"decision": decision, "reason": reason,
+                "tested_benefit": self.origin_benefits.get(fingerprint, {}) | (
+                    {"kind": "measured_comparison"} if fingerprint in self.origin_benefits else {})})
         if reused_count:
             run_audit.event("origin_eligibility_cache", "reused", f"复用 {reused_count} 条同版本资格预筛，不重做已确认判断")
         return {**decisions, **fresh}
@@ -320,6 +327,17 @@ class ParadigmAnalyzer:
                     decisions[fingerprint] = (verdict, reason)
                 for fingerprint in duplicate:
                     decisions.pop(fingerprint, None)
+                from .research_focus import benefit_receipt
+                inputs = {item.fingerprint: item for item in evidence}
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    fingerprint = str(row.get("fingerprint", "")).strip()
+                    if fingerprint not in decisions:
+                        continue
+                    benefit = benefit_receipt(row.get("tested_benefit"), inputs[fingerprint])
+                    if benefit:
+                        self.origin_benefits[fingerprint] = benefit
                 if foreign:
                     run_audit.event(
                         "origin_eligibility_contract",
@@ -1383,7 +1401,8 @@ class ParadigmSynthesizer:
                 ensure_ascii=False,
             ),
             screening_rubric=_compact_json(_screening_prompt_context(candidate.screening_rubric)),
-            mental_model_method=self.skill_loader.load("technical-mental-model"),
+            mental_model_method=self.skill_loader.mental_model_method(),
+            momentum_method=self.skill_loader.load("direction-momentum"),
             lineage_parent=candidate.lineage_parent,
             evidence=_compact_json(evidence_payload),
             evidence_index_contract=json.dumps(association_contract, ensure_ascii=False),
@@ -1541,6 +1560,8 @@ class ParadigmSynthesizer:
         visible_evidence_indices: set[int],
     ) -> None:
         previous_mechanism = candidate.mechanism.strip()
+        # direction_context is a collector-owned editorial side channel;
+        # model output cannot replace its receipts or use it as a Rubric fact.
         from .evidence_association import distinct_origins, mechanism_digest, support_revision
         visible_origins = {i for i in visible_evidence_indices
                            if 0 <= i < len(candidate.evidence)
@@ -1785,7 +1806,7 @@ def _bounded_synthesis_evidence(
             "url": item.url[:1000],
             "published_at": item.published_at,
             **({"verified_work_visibility": True} if candidate and verified_diffusion(candidate, item) else {}),
-            "summary": item.summary[: (2400 if primary else 700)],
+            "summary": item.summary[: (6000 if item.source == "read-web-article" else 2400 if primary else 700)],
             "document_excerpt": (
                 _distributed_text_excerpt(str(item.raw.get("document_excerpt", "")), limit=16_000)
                 if primary

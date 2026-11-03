@@ -8,6 +8,7 @@ against the current route and a distinct public actor.
 from __future__ import annotations
 
 import re
+import hashlib
 from urllib.parse import urlparse
 
 from .models import (
@@ -71,16 +72,26 @@ def certify_synthesis_discussion(
         # but still need a directly attributable public article rather than
         # a copied search snippet or an unowned URL.
         parsed = urlparse(item.url)
+        read_receipt = raw.get("secondary_read_receipt", {})
+        from .evidence_association import countable_evidence, support_revision
+        read_article = (item.source == "read-web-article" and isinstance(read_receipt, dict)
+            and read_receipt.get("version") == 1 and read_receipt.get("url") == item.url
+            and read_receipt.get("route_key") == candidate.key
+            and isinstance(read_receipt.get("origins"), dict)
+            and any(read_receipt["origins"].get(origin.fingerprint) == support_revision(origin)
+                    for origin in candidate.evidence if origin.evidence_type in ORIGIN_EVIDENCE_TYPES
+                    and countable_evidence(candidate, origin))
+            and read_receipt.get("body_sha256") == hashlib.sha256(item.summary.encode()).hexdigest())
         if (
-            item.source not in {"curated-kol-blog", "curated-kol-x"}
+            (item.source not in {"curated-kol-blog", "curated-kol-x"} and not read_article)
             or parsed.scheme not in {"http", "https"}
             or not parsed.hostname
             or not any(str(author).strip() for author in item.authors)
         ):
             return False
-        if raw.get("independence") != "independent":
+        if not read_article and raw.get("independence") != "independent":
             return False
-        if raw.get("relationship") != "independent_commentary":
+        if not read_article and raw.get("relationship") != "independent_commentary":
             return False
 
     raw["independence"] = "independent"

@@ -69,6 +69,8 @@ def _safe_environment() -> dict[str, str]:
         {
             "AI_RADAR_SKIP_DOTENV": "true",
             "RESEARCH_ARCHIVE_ENABLED": "false",
+            "PARADIGM_DIRECTION_SIGNALS_ENABLED": "false",
+            "PARADIGM_RESEARCH_FOCUS_ENABLED": "false",
             "PIPELINE_MODE": "paradigm",
             "PYTHONHASHSEED": "0",
             "TZ": "UTC",

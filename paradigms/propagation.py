@@ -107,6 +107,39 @@ def certify_diffusion(candidate):
             "association": reason, "meaning": "public_attention_not_technical_validation"}
 
 
+def transfer_work_visibility(source, target, item):
+    """Rebind only verified same-work attention, never technical endorsement.
+
+    Useful after private post text was scrubbed. No receipt is invented from a
+    topic match, missing body, source revision change or an excluded origin.
+    """
+    if not verified_diffusion(source, item):
+        return False
+    receipt = item.raw["diffusion_receipt"]
+    origins = receipt.get("origins", _origin_versions(source))
+    current = _origin_versions(target)
+    rebound = {}
+    for key, revision in origins.items():
+        if current.get(key) == revision:
+            rebound[key] = revision
+            continue
+        # A not-yet-observed discovery object has no database revision. Permit
+        # only an exact source-content match, never replace a real store version.
+        from database.origin_state import source_signature
+        old = next((x for x in source.evidence if x.fingerprint == key), None)
+        new = next((x for x in target.evidence if x.fingerprint == key
+                    and countable_evidence(target, x)), None)
+        if (old is None or new is None or new.source_revision
+                or source_signature(old) != source_signature(new)):
+            return False
+        rebound[key] = support_revision(new)
+    if not rebound:
+        return False
+    item.raw["diffusion_receipt"] = {**receipt, "version": 2,
+        "origins": rebound, "binding": _binding_digest(target, rebound)}
+    return True
+
+
 def diffusion_items(candidate):
     return [item for item in candidate.evidence if verified_diffusion(candidate, item)]
 

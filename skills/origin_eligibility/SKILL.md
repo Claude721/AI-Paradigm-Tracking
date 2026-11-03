@@ -29,6 +29,8 @@ description: 对论文、官方文章、原创思想和原生实现做保守资�
 
 `screen_out` 的 `reason` 必须用中文指出材料自身显示的具体边界，不能只写“创新不足”“分数低”或引用作者名气。`full_review` 可以简短说明需要检查的 intervention。不要输出分数。
 
+同一次便宜预筛还为研究前选材提取 `tested_benefit`，但不改变上面的技术资格结论。只有本次摘要明确报告**已执行的正向收益对照**，且能同时定位基线与量化结果时，kind才是measured_comparison；baseline_quote和result_quote必须逐字复制本次summary中的短片段，各8–300字符，不能中文改写英文原句。仅“有实验/更好/有潜力”、未来预测、预计加速、负面结果、没有对照或纯概念文章返回空对象。这里只保留作者声称，完整实证核验由后续研究完成，不能称为独立验证。不得为让材料入选而补数字。
+
 只返回一个 JSON 对象，严格包含与输入等长的 `decisions` 数组：
 
 {{
@@ -36,7 +38,8 @@ description: 对论文、官方文章、原创思想和原生实现做保守资�
     {{
       "fingerprint": "原样复制输入 fingerprint",
       "decision": "full_review",
-      "reason": "需要完整 Rubric 核验的具体原因"
+      "reason": "需要完整 Rubric 核验的具体原因",
+      "tested_benefit": {{}}
     }}
   ]
 }}

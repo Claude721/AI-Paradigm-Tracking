@@ -38,12 +38,16 @@ class CommunityEvidenceClient:
         self._github_circuit_open = False
         self._github_failure_logged = False
 
-    async def search(self, candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
+    async def search_work(self, candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
+        """Resume provider metadata without repurchasing scrubbed post bodies."""
+        return await self.search(candidate, allow_scrubbed=True)
+
+    async def search(self, candidate: ParadigmCandidate, *, allow_scrubbed=False) -> list[TechnicalEvidence]:
         candidate.community_search_receipts.pop("community_runtime", None)
         candidate.community_coverage.pop("community_runtime", None)
         async def execute(provider, operation, client):
             signature = search_signature(candidate, provider)
-            if reusable_search(candidate, provider, signature):
+            if reusable_search(candidate, provider, signature, allow_scrubbed=allow_scrubbed):
                 return []  # Evidence already belongs to the candidate snapshot.
             previous = candidate.community_search_receipts.get(provider, {})
             history = list(previous.get("failure_history", []))

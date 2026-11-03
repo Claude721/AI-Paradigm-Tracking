@@ -185,10 +185,14 @@ TAVILY_MONTHLY_CREDIT_LIMIT=1000
 | PARADIGM_DEEP_BATCH_SIZE / PARADIGM_DEEP_CONCURRENCY | 1 / 2 |
 | PARADIGM_RESEARCHER_PROFILE_LIMIT / PARADIGM_KEY_RESEARCHER_LIMIT | 6 / 3 |
 | PARADIGM_PRIORITY_AUTHOR_SWEEP_ENABLED | true |
+| PARADIGM_DIRECTION_SIGNALS_ENABLED | true；免费媒体/公开招聘/arXiv方向背景，独立于技术资格；不需要Key，入口失败不阻断交付 |
+| PARADIGM_RESEARCH_FOCUS_ENABLED | true；有界工作查询前移、同工作缓存供深挖复用，再按关注/投入或收益选材；无信号观察、执行错误pending，不是技术淘汰，无需新Secret |
 | PARADIGM_AUTO_RESUME_ENABLED | false |
 | PARADIGM_AUTO_RESUME_MAX_RUNS / TOTAL_BUDGET_SECONDS / MAX_TOKENS | 4 / 14400 / 4000000 |
 
 最后一行分别为 PARADIGM_AUTO_RESUME_MAX_RUNS、PARADIGM_AUTO_RESUME_TOTAL_BUDGET_SECONDS、PARADIGM_AUTO_RESUME_MAX_TOKENS。开启后也只处理健康状态上传后的同批纯预算延期；执行、覆盖故障和未知用量不自动扩大支出。tokens 是轮间停止线，不是人民币单轮硬费用上限。
+
+方向背景来源与中文术语位于`taxonomy/direction_channels.json`，继承既有技术覆盖地图并保留独立版本。默认每进程免费Feed/岗位各读一次，arXiv最多8个实际匹配主题、每主题最多300条元数据、每次附加阶段45秒；仅完整队列可比较增减。它们约束提供方请求，不截断技术深挖名单。工作流已映射同名Variable，留空按默认true，不必新建配置；无需猎聘/BOSS Cookie或个人授权Token。国内招聘官方授权路径及未启用原因见[信源验收](FREE_DIRECTION_SOURCES.md)。
 
 同窗续跑保持选定计划。正常跨周运行归档旧未交付研究计划，待投递 outbox 仍优先恢复。v5 的交付成功不要求 pending 清零或全部已尝试；未建 outbox 的 v3/v4 计划保留原窗口和任务升级，历史冻结 outbox 保留原契约。无须重置数据库或更改模型/API Key。
 

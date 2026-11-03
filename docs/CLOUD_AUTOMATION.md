@@ -63,6 +63,10 @@ Settings → Secrets and variables → Actions：
 
 ## 研究与交付
 
+`PARADIGM_DIRECTION_SIGNALS_ENABLED`已映射为可选Variable、默认true。增强阶段共享免费方向背景，公开Feed/岗位不带认证信息，arXiv延续正常限速与熔断；网络/解析/上限中断记未知，不变成技术否定或全局失败。候选JSON保留来源状态、原点版本绑定、截止日与样本ID；不保存简历/求职者信息、完整新闻或岗位描述。报告仅允许当前来源绑定的背景URL，旧续投保留当时as_of日期。SMTP/调度/研究完成凭据不变，不需要清库。离线发布门显式关闭该联网增强；真实信源检查用`scripts/check_direction_signals.py`单独执行，不调用模型或邮件。详见[免费方向信源](FREE_DIRECTION_SOURCES.md)。
+
+`PARADIGM_RESEARCH_FOCUS_ENABLED`也显式映射、默认true。同次便宜SUB资格请求补收益对照，工作查询在有界取材范围内前移，与深挖共享来源/窗口/配置绑定的缓存，不新增选材模型或重复购买成功查询；既有Tavily额度保护不变。无信号留观察，选材异常另记pending/failed，不作技术否定或深挖完成。审计`research_focus`记录research/watch/pending，旧待办记录`candidate_focus_watch_count`及`candidate_focus_failure_count`；单条CAS冲突不得扣住其他交付、不得覆盖新快照，真实存储故障仍停止。发布门基线关闭新策略，组合回归显式同时开启选材及免费背景，并通过MockTransport验证实际HTTP路径和恢复；不调用真实网络。没有新增Key、调度或邮件必需项。
+
 传播与发布者名气为软约束：技术合格路线不因没有知名作者、KOL 转发或二次讨论而被否决。当前 Rubric 只用技术题决定资格；普通分享/互动、独立复现/采用分别留档。即使全部补充传播查询失败，也允许基于可用一手材料继续技术研究，回执仍为失败/未知，不伪造零讨论。
 
 历史更新不再总限 4 条：PARADIGM_RESEARCH_REFRESH_LIMIT=4 只约束无当前事件的后台轮询，0 仅关闭轮询。当前传播事件匹配的旧路线另行召回，旧 pending 以独立深挖任务加入新周；未形成路线的旧原点可再次初筛。7 天约束事件日期，不约束技术年龄；同窗续跑保持冻结范围。无需新增配置、清库或轮换 Key。

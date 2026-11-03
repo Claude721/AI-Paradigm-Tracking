@@ -2043,10 +2043,21 @@ def _deep_checkpoint_input_signature(candidate: ParadigmCandidate) -> str:
     for relative in (
         "skills/paradigm_synthesis/SKILL.md",
         "skills/technical-mental-model/SKILL.md",
+        "skills/paper-mental-model/references/radar-brief.md",
+        "skills/direction-momentum/SKILL.md",
         "rubrics/paradigm_rubric.json",
         "paradigms/evidence_association.py",
+        "paradigms/evidence_validation.py",
+        "sources/secondary_page_source.py",
+        "sources/direction_signal_source.py",
+        "sources/work_evidence_cache.py",
+        "sources/paradigm_evidence_source.py",
+        "paradigms/search_receipts.py",
+        "taxonomy/direction_channels.json",
+        "taxonomy/frontier_landscape.json",
         "paradigms/propagation.py",
         "paradigms/scoring.py",
+        "paradigms/research_focus.py",
         "paradigms/rubric.py",
         "sources/researcher_profile_source.py",
     ):
@@ -2054,6 +2065,8 @@ def _deep_checkpoint_input_signature(candidate: ParadigmCandidate) -> str:
         policy.update((root / relative).read_bytes())
     payload = {
         "policy_version": DEEP_SYNTHESIS_CHECKPOINT_VERSION,
+        "direction_signals_enabled": config.PARADIGM_DIRECTION_SIGNALS_ENABLED,
+        "research_focus_enabled": config.PARADIGM_RESEARCH_FOCUS_ENABLED,
         "evidence_association_version": 2,
         "policy_content_signature": policy.hexdigest(),
         "key": candidate.key,

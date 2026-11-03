@@ -31,6 +31,8 @@ from paradigms.models import (
 from paradigms.researcher_identity import same_verified_researcher
 from paradigms.evidence_association import countable_evidence, profile_references_origin
 from paradigms.authorship import candidate_authorship
+from paradigms.momentum import editorial_priority, momentum_assessment, momentum_evidence
+from sources.direction_signal_source import context_for_report
 from paradigms.completion import require_completed_research, partial_report_violations
 from run_audit import run_audit
 from runtime_clock import scheduled_date
@@ -99,7 +101,8 @@ class ParadigmReportGenerator:
         path = self.output_dir / f"paradigm_radar_{date}.md"
         stats = pipeline_stats or {}
         require_completed_research(stats, candidates=candidates)
-        ordered = sorted(candidates, key=lambda item: item.total_score, reverse=True)
+        # Reading priority is not admission: every publishable route survives.
+        ordered = sorted(candidates, key=editorial_priority)
         if stats.get("delivery_contract_version") == 5:
             # v5 freezes the publication subset after route-local writing.
             # Rendering is deterministic: overview/model/budget failures cannot
@@ -272,15 +275,18 @@ class ParadigmReportGenerator:
                        "## 接下来真正值得盯的信号\n\n"
                        "继续核验机制、独立承接与发布时间；本轮处理事实和具体故障保留在运行审计中。")
         else:
+            states = [momentum_assessment(item, record_limit=0)["state"] for item in candidates]
+            action_count = states.count("external_action")
+            attention_count = states.count("observed_attention")
+            early_count = states.count("early_signal")
             frame = (f"# AI 技术范式雷达\n\n> {date}\n\n## 本期研究 Memo\n\n"
-                     f"本次交付 {len(candidates)} 条已通过技术、时效和原文核验的路线，传播与独立承接的证据及边界分别说明。"
-                     "下文分别解释机制改变了什么、证据支持到哪里，以及仍需观察什么。"
-                     "数量由可核验的结果决定，不把单项实验直接等同于成熟范式。"
-                     "取材和处理边界见文末，未形成判断的对象不参与结论。\n\n"
+                     f"本期 {len(candidates)} 条技术进展：{action_count} 条已有外部行动证据，"
+                     f"{attention_count} 条已有可核验传播，{early_count} 条仍属早期机制信号。"
+                     "按此顺序阅读，每条只解释关键改动、证据边界与讨论势能。"
+                     "外部行动可能是分析、复现或采用，不等于好评或整个方向已成热潮。\n\n"
                      "## 接下来真正值得盯的信号\n\n"
-                     "重点观察各路线的独立复现、跨团队采用和反事实验证，"
-                     "以新增证据判断能力边界是否真正扩展，不用发布热度替代机制证据。")
-            content = _assemble_editorial_frame(frame, drafts)
+                     "关注新的具名投入、外部适配与实际使用；各路线的判断升级条件见势能短段。")
+            content = _assemble_editorial_frame(frame, _group_route_drafts(candidates, drafts))
             content = _attach_primary_source_index(_attach_researcher_index(content, candidates), candidates)
         return _attach_coverage_boundary(content, stats)
 
@@ -319,7 +325,7 @@ class ParadigmReportGenerator:
             stage="weekly_memo_frame",
             subject=f"{date} / {len(candidates)} routes",
             temperature=0.2,
-            max_tokens=2200,
+            max_tokens=1100,
         )
         violations = _editorial_frame_violations(frame)
         if violations:
@@ -333,12 +339,12 @@ class ParadigmReportGenerator:
                 stage="weekly_memo_frame_revision",
                 subject=f"{date} / {'; '.join(violations)}",
                 temperature=0.1,
-                max_tokens=2200,
+                max_tokens=1100,
             )
             violations = _editorial_frame_violations(frame)
         if violations:
             raise ValueError("周报开篇框架未通过质量闸门：" + "；".join(violations))
-        return _assemble_editorial_frame(frame, route_drafts)
+        return _assemble_editorial_frame(frame, _group_route_drafts(candidates, route_drafts))
 
     async def _request_markdown(
         self,
@@ -478,7 +484,8 @@ class ParadigmReportGenerator:
             route_index=index,
             route_total=total,
             route_dossier=json.dumps(dossier, ensure_ascii=False),
-            mental_model_method=self.skill_loader.load("technical-mental-model"),
+            mental_model_method=self.skill_loader.mental_model_method(),
+            momentum_method=self.skill_loader.load("direction-momentum"),
         )
         last_violations: list[str] = []
         for attempt in range(2):
@@ -494,7 +501,7 @@ class ParadigmReportGenerator:
                 stage="weekly_route_draft",
                 subject=f"{date} / route-{index} / {candidate.name}",
                 temperature=0.2,
-                max_tokens=2800,
+                max_tokens=1600,
             )
             last_violations = _route_draft_violations(content, candidate)
             if not last_violations:
@@ -564,6 +571,8 @@ def _candidate_dossier(item: ParadigmCandidate) -> dict:
     return {
         "current_work_contribution": item.contribution_review,
         "propagation_assessment": item.propagation_assessment,
+        "momentum_assessment": momentum_assessment(item),
+        "direction_context": context_for_report(item),
         "name": item.name,
         "route_family": item.route_family,
         "report_kind": item.report_kind,
@@ -626,7 +635,10 @@ def _route_fragment_key(item: ParadigmCandidate) -> str:
     contract_material = (
         contract.load("weekly_route_draft")
         + "\n"
-        + contract.load("technical-mental-model")
+        + contract.mental_model_method()
+        + "\n" + contract.load("direction-momentum")
+        + "\n" + Path(__file__).read_text(encoding="utf-8")
+        + "\n" + (Path(__file__).resolve().parents[1] / "paradigms/momentum.py").read_text(encoding="utf-8")
     )
     contract_signature = hashlib.sha256(
         contract_material.encode("utf-8")
@@ -668,6 +680,8 @@ def _compact_route_dossier(item: ParadigmCandidate) -> dict:
     return {
         "current_work_contribution": item.contribution_review,
         "propagation_assessment": item.propagation_assessment,
+        "momentum_assessment": momentum_assessment(item),
+        "direction_context": context_for_report(item),
         "name": item.name,
         "route_family": item.route_family,
         "report_kind": item.report_kind,
@@ -785,7 +799,8 @@ def _editorial_frame_payload(
             "thesis": candidate.thesis[:700],
             "problem_shift": candidate.problem_shift[:500],
             "why_now": candidate.why_now[:400],
-            "trend_interpretation": candidate.trend_interpretation[:500],
+            "trend_interpretation": _audited_momentum_text(candidate, _momentum_evidence(candidate))[2][:500],
+            "momentum_assessment": momentum_assessment(candidate, record_limit=3),
             "primary_source_urls": [
                 primary_material_url(source)
                 for source in _primary_sources(candidate)[:4]
@@ -827,9 +842,9 @@ def _editorial_frame_violations(content: str) -> list[str]:
         violations.append("缺少本期研究 Memo")
     if "## 接下来真正值得盯的信号" not in value:
         violations.append("缺少后续观察信号")
-    if not 250 <= memo_chinese <= 1000:
+    if not 100 <= memo_chinese <= 500:
         violations.append(
-            f"开篇 Memo 中文长度为 {memo_chinese}，交付范围为 250–1000"
+            f"开篇 Memo 中文长度为 {memo_chinese}，交付范围为 100–500"
         )
     if re.search(r"(?m)^###\s+", value):
         violations.append("开篇框架越权生成路线正文")
@@ -859,6 +874,16 @@ def _assemble_editorial_frame(frame: str, route_drafts: list[str]) -> str:
     )
 
 
+def _group_route_drafts(candidates, drafts):
+    """Show low-evidence items briefly after action-backed work, not discard."""
+    groups = OrderedDict((state, []) for state in ("external_action", "observed_attention", "early_signal"))
+    for item, draft in zip(candidates, drafts, strict=True):
+        groups[momentum_assessment(item, record_limit=0)["state"]].append(draft)
+    titles = {"external_action": "已有外部行动的进展", "observed_attention": "开始被看见的进展", "early_signal": "早期机制观察"}
+    return ["## " + titles[state] + "\n\n" + "\n\n".join(values)
+            for state, values in groups.items() if values]
+
+
 def _route_draft_violations(
     content: str, candidate: ParadigmCandidate
 ) -> list[str]:
@@ -867,9 +892,9 @@ def _route_draft_violations(
     value = content.strip()
     chinese_characters = len(re.findall(r"[\u4e00-\u9fff]", value))
     violations = []
-    if not 300 <= chinese_characters <= 1800:
+    if not 180 <= chinese_characters <= 900:
         violations.append(
-            f"路线正文中文长度为 {chinese_characters}，交付范围为 300–1800"
+            f"路线正文中文长度为 {chinese_characters}，交付范围为 180–900"
         )
     if not re.search(r"(?m)^###\s+\S", value):
         violations.append("缺少三级路线标题")
@@ -1063,17 +1088,17 @@ def _editorial_violations(
     )
     researcher_coverage = _covers_researchers(content, candidates or [])
     violations = []
-    if len(content.strip()) < 800 and not weekly:
+    if len(content.strip()) < 400 and not weekly:
         violations.append("正文过短")
     if "## 本期研究 Memo" not in content:
         violations.append("缺少本期研究 Memo")
     if "## 接下来真正值得盯的信号" not in content:
         violations.append("缺少后续观察信号")
-    # 450–650 字是编辑目标；这里保留更宽但仍有意义的交付边界。
+    # 150–250 字是编辑目标；这里只拦截显著偏离，不为小偏差重写。
     # 轻微偏离只写入审计，不消耗全文重写，也不会销毁整轮研究结果。
-    if not weekly and not 250 <= memo_chinese_characters <= 1000:
+    if not weekly and not 100 <= memo_chinese_characters <= 500:
         violations.append(
-            f"开篇 Memo 中文长度为 {memo_chinese_characters}，交付范围为 250–1000"
+            f"开篇 Memo 中文长度为 {memo_chinese_characters}，交付范围为 100–500"
         )
     if not researcher_coverage:
         violations.append("关键人物覆盖不足")
@@ -1108,9 +1133,9 @@ def _editorial_advisories(content: str) -> list[str]:
     editorial_body = _editorial_body(content)
     inline_emphasis = len(re.findall(r"\*\*[^*\n]+\*\*", editorial_body))
     advisories = []
-    if memo_match and not 450 <= memo_chinese_characters <= 650:
+    if memo_match and not 150 <= memo_chinese_characters <= 250:
         advisories.append(
-            f"开篇 Memo 中文长度为 {memo_chinese_characters}，编辑目标为 450–650"
+            f"开篇 Memo 中文长度为 {memo_chinese_characters}，编辑目标为 150–250"
         )
     if inline_emphasis < 2:
         advisories.append(
@@ -1146,52 +1171,8 @@ def _primary_sources(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
 
 
 def _momentum_evidence(candidate: ParadigmCandidate) -> list[TechnicalEvidence]:
-    """只向总编辑暴露能参与扩散判断的证据，保留低声量和反证。"""
-
-    evidence_types = {
-        EvidenceType.PEER_REVIEW,
-        EvidenceType.INDEPENDENT_REPLICATION,
-        EvidenceType.IMPLEMENTATION,
-        EvidenceType.CITATION,
-        EvidenceType.COMMUNITY_DISCUSSION,
-        EvidenceType.SECONDARY_INTERPRETATION,
-        EvidenceType.PRODUCT_ADOPTION,
-    }
-    selected = []
-    from paradigms.evidence_association import countable_evidence
-    from paradigms.propagation import verified_diffusion
-    for value in candidate.evidence:
-        if not countable_evidence(candidate, value):
-            continue
-        if value.evidence_type not in evidence_types:
-            continue
-        if value.raw.get("indexed_discovery_only"):
-            continue
-        if value.raw.get("relationship") == "author_self_release" and not verified_diffusion(candidate, value):
-            continue
-        if value.evidence_type in {
-            EvidenceType.COMMUNITY_DISCUSSION,
-            EvidenceType.SECONDARY_INTERPRETATION,
-        } and not is_verified_substantive_discussion(
-            value, route_key=candidate.key
-        ) and not verified_diffusion(candidate, value):
-            continue
-        if value.evidence_type in {
-            EvidenceType.INDEPENDENT_REPLICATION,
-            EvidenceType.PRODUCT_ADOPTION,
-        } and value.raw.get("independence") != "independent":
-            continue
-        if (
-            value.evidence_type == EvidenceType.IMPLEMENTATION
-            and value.raw.get("independence")
-            not in {"independent", "official", "publisher"}
-        ):
-            continue
-        selected.append(value)
-    # 不在语义过滤之后再做静默 Top-K。路线写作的上下文上限由
-    # `_bounded_route_evidence` 负责，并把未展开部分写进 overflow 账本；
-    # 这样既控制请求体，也不会把“没有进入 prompt”伪装成“没有证据”。
-    return selected
+    """Compatibility entrypoint for the shared, source-checked ledger."""
+    return momentum_evidence(candidate)
 
 
 def _audited_momentum_text(
@@ -1213,10 +1194,16 @@ def _audited_momentum_text(
         for value in evidence
     )
     if independent:
+        # The ledger, not an old model's free-form popularity prose, provides
+        # the quantitative input to editing and overview. One valid analysis
+        # must not unlock unrelated claims such as capital/field-wide growth.
+        assessment = momentum_assessment(candidate)
         return (
-            candidate.objective_momentum_signals,
-            candidate.secondary_discussion_summary,
-            candidate.trend_interpretation,
+            [f"{record['kind']}：{record['url']}；主体 {', '.join(record['actors']) or '见原始来源'}；"
+             f"日期 {record['published_at'] or '未核验'}；指标 {json.dumps(record['metrics'], ensure_ascii=False)}"
+             for record in assessment["records"]],
+            "已核验具体的外部行动，详情及正反结果见势能证据；不能由一次行动推断整个方向火热。",
+            assessment["label"] + "；方向规模、资本和人才变化须有另行可核验依据。",
         )
     signals = []
     from paradigms.propagation import verified_diffusion
@@ -1227,14 +1214,14 @@ def _audited_momentum_text(
         if value.evidence_type == EvidenceType.IMPLEMENTATION and value.raw.get(
             "independence"
         ) in {"official", "publisher"}:
-            stars = int(nonnegative_number(value.metrics.get("stars", 0)))
-            forks = int(nonnegative_number(value.metrics.get("forks", 0)))
+            stars = int(nonnegative_number(value.metrics["stars"])) if "stars" in value.metrics else "未核验"
+            forks = int(nonnegative_number(value.metrics["forks"])) if "forks" in value.metrics else "未核验"
             signals.append(
                 f"官方实现 {value.url}；stars={stars}，forks={forks}，"
                 "仅说明采用势能，不构成独立复现"
             )
         elif value.evidence_type == EvidenceType.CITATION:
-            citations = int(nonnegative_number(value.metrics.get("citations", 0)))
+            citations = int(nonnegative_number(value.metrics["citations"])) if "citations" in value.metrics else "未核验"
             signals.append(
                 f"引用索引 {value.url}；citations={citations}，"
                 "仅为引用数量，不能据此推断引用内容"
@@ -1639,6 +1626,12 @@ def _ungrounded_url_violations(
 def _grounded_http_urls(candidates: list[ParadigmCandidate]) -> set[str]:
     urls: set[str] = set()
     for candidate in candidates:
+        context = context_for_report(candidate)
+        for topic in context.get("topics", []):
+            for record in [*topic.get("media", []), *topic.get("jobs", []), topic.get("paper_activity", {})]:
+                target = str(record.get("url", ""))
+                if target and safe_public_contact_target("source", target):
+                    urls.add(_normalized_url(target))
         for evidence in candidate.evidence:
             for value in (evidence.url, primary_material_url(evidence)):
                 safe = safe_public_contact_target("source", str(value))

@@ -1460,7 +1460,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             dossier["researchers"][0]["public_contacts"]["orcid"],
             "https://orcid.org/0000-0000-0000-0001",
         )
-        memo = "本期从旧方法的能力边界出发，解释技术团队如何把朴素思想落实到训练和推理。" * 16
+        memo = "本期从旧方法的能力边界出发，解释技术团队如何把朴素思想落实到训练和推理。" * 6
         body = "这条路线的技术机制、验证证据和潜在价值需要放在同一个问题背景中理解。" * 24
         route = (
             "### **技术路线**正在形成新的能力边界\n\n"
@@ -1813,7 +1813,7 @@ class ParadigmPipelineTests(unittest.TestCase):
     def test_editorial_gate_rejects_scores_and_tables(self) -> None:
         item = candidate()
         item.researchers = [verified_researcher()]
-        memo = "本期技术路线从旧方法的边界出发，解释设计思想如何落到训练与推理。" * 18
+        memo = "本期技术路线从旧方法的边界出发，解释设计思想如何落到训练与推理。" * 6
         body = "技术部分继续分析问题、机制、证据和应用价值。" * 25
         report = (
             "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
@@ -1862,7 +1862,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         ))
     def test_report_gate_parses_memo_before_level_three_route_heading(self) -> None:
         item = candidate()
-        memo = "本期从旧系统的运行边界出发，解释新机制改变了什么关键接口以及为什么值得继续观察。" * 14
+        memo = "本期从旧系统的运行边界出发，解释新机制改变了什么关键接口以及为什么值得继续观察。" * 6
         body = "这条路线继续说明训练信号、推理路径、客观证据与应用边界。" * 28
         report = (
             "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
@@ -1884,7 +1884,7 @@ class ParadigmPipelineTests(unittest.TestCase):
         second.key = "second-route"
         second.name = "Second route"
         second.route_family = "A second technical route"
-        memo = "本期技术路线从旧方法边界出发，解释新设计如何改变训练与推理接口。" * 16
+        memo = "本期技术路线从旧方法边界出发，解释新设计如何改变训练与推理接口。" * 6
         body = "技术部分继续分析问题、机制、证据和应用价值。" * 28
         draft = (
             "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
@@ -2002,7 +2002,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             ]
         )
         item.researchers = [verified_researcher()]
-        memo = "本期从旧系统的能力边界出发，解释技术设计如何改变训练与推理。" * 18
+        memo = "本期从旧系统的能力边界出发，解释技术设计如何改变训练与推理。" * 6
         body = "这条路线的背景、机制、客观证据与应用边界需要放在一起理解。" * 26
         editorial = (
             "# AI 技术范式雷达\n\n## 本期研究 Memo\n\n"
@@ -2182,6 +2182,8 @@ class ParadigmPipelineTests(unittest.TestCase):
             screening_rubric="{}",
             rubric_definition="{}",
             mental_model_method="先建立低分辨率运行图，再逐层提高分辨率。",
+            momentum_method="核验具体主体的行动。",
+            direction_context="{}",
             lineage_parent="video prediction",
             evidence="[]",
             evidence_index_contract="{}",
@@ -2205,7 +2207,7 @@ class ParadigmPipelineTests(unittest.TestCase):
             candidate_dossiers="[]",
             mental_model_method="先建立低分辨率运行图，再逐层提高分辨率。",
         )
-        self.assertIn("约 450 到 650 个中文字", editorial)
+        self.assertIn("约150到250个中文字", editorial)
         self.assertIn("不展示总分", editorial)
         self.assertIn("最小实例", editorial)
         self.assertIn("训练过程与推理过程必须分开", editorial)

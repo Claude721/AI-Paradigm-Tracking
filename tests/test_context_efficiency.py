@@ -34,7 +34,7 @@ class ContextLayoutTests(unittest.TestCase):
                 template = loader.load(name)
                 keys = {key for _, key, _, _ in string.Formatter().parse(template) if key}
                 def values(suffix):
-                    return {key: ("fixed policy" if key in {"rubric_definition", "mental_model_method"}
+                    return {key: ("fixed policy" if key in {"rubric_definition", "mental_model_method", "momentum_method"}
                                   else key + suffix + ' {"原文":"不得丢失"}') for key in keys}
                 one, two = loader.render(name, **values("ONE")), loader.render(name, **values("TWO"))
                 prefix = os.path.commonprefix([one, two])
@@ -42,7 +42,7 @@ class ContextLayoutTests(unittest.TestCase):
                 self.assertIn("只返回" if name == "technical_report_index" else "输出", prefix)
                 for key, value in values("ONE").items():
                     self.assertIn(value, one)
-                    if key not in {"rubric_definition", "mental_model_method"}:
+                    if key not in {"rubric_definition", "mental_model_method", "momentum_method"}:
                         self.assertEqual(one.count(value), 1)
 
     def test_scoping_keeps_identical_questions_and_all_legal_type_names(self):

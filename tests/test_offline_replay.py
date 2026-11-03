@@ -137,7 +137,8 @@ class OfflineReplayTests(unittest.IsolatedAsyncioTestCase):
             key="route", name="Route", thesis="", problem_shift="",
             mechanism="", evidence=[primary, implementation],
         )
-        enricher = EvidenceEnricher.__new__(EvidenceEnricher)
+        enricher = EvidenceEnricher(concurrency=1)
+        enricher.secondary_pages = SimpleNamespace(read=AsyncMock())
         enricher.concurrency = 1
         enricher.community = SimpleNamespace(
             search=AsyncMock(return_value=[newer]), coverage=lambda: {},
@@ -181,7 +182,8 @@ class OfflineReplayTests(unittest.IsolatedAsyncioTestCase):
             key="route", name="Route", thesis="", problem_shift="",
             mechanism="", evidence=[_origin(1)],
         )
-        enricher = EvidenceEnricher.__new__(EvidenceEnricher)
+        enricher = EvidenceEnricher(concurrency=1)
+        enricher.secondary_pages = SimpleNamespace(read=AsyncMock())
         enricher.concurrency = 1
         enricher.community = SimpleNamespace(
             search=AsyncMock(return_value=[lead]),
@@ -235,7 +237,8 @@ class OfflineReplayTests(unittest.IsolatedAsyncioTestCase):
             key="route", name="Route", thesis="", problem_shift="",
             mechanism="", evidence=[primary, verified],
         )
-        enricher = EvidenceEnricher.__new__(EvidenceEnricher)
+        enricher = EvidenceEnricher(concurrency=1)
+        enricher.secondary_pages = SimpleNamespace(read=AsyncMock())
         enricher.concurrency = 1
         enricher.community = SimpleNamespace(
             search=AsyncMock(return_value=[repeated]), coverage=lambda: {},
@@ -265,7 +268,8 @@ class OfflineReplayTests(unittest.IsolatedAsyncioTestCase):
         next_week.metrics["stars"] = 20
         third_week = copy.deepcopy(implementation)
         third_week.metrics["stars"] = 37
-        enricher = EvidenceEnricher.__new__(EvidenceEnricher)
+        enricher = EvidenceEnricher(concurrency=1)
+        enricher.secondary_pages = SimpleNamespace(read=AsyncMock())
         enricher.concurrency = 1
         enricher.community = SimpleNamespace(
             search=AsyncMock(side_effect=[[next_week], [third_week]]),
@@ -367,7 +371,8 @@ class OfflineReplayTests(unittest.IsolatedAsyncioTestCase):
         )
         bigger = copy.deepcopy(lead)
         bigger.metrics["score"] = 200
-        enricher = EvidenceEnricher.__new__(EvidenceEnricher)
+        enricher = EvidenceEnricher(concurrency=1)
+        enricher.secondary_pages = SimpleNamespace(read=AsyncMock())
         enricher.concurrency = 1
         enricher.community = SimpleNamespace(
             search=AsyncMock(side_effect=[[lead], [bigger]]),

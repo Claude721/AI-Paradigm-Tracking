@@ -609,6 +609,7 @@ EPHEMERAL_PERSISTABLE_RAW_KEYS = frozenset({
     "historical", "content_scrubbed", "metric_delta", "metric_baseline",
     "metric_delta_observed_at",
     "diffusion_receipt",
+    "secondary_read_status",
 })
 _EPHEMERAL_METRIC_DELTA_KEYS = frozenset({
     "citations", "influential_citations", "stars", "forks", "likes",
@@ -968,6 +969,8 @@ class ParadigmCandidate:
     secondary_discussion_summary: str = ""
     objective_momentum_signals: list[str] = field(default_factory=list)
     community_coverage: dict[str, str] = field(default_factory=dict)
+    # Advisory, source-bound direction context; never technical/freshness evidence.
+    direction_context: dict[str, Any] = field(default_factory=dict)
     community_search_receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
     publisher_tier: str = "unknown"
     publisher_evidence: list[str] = field(default_factory=list)
@@ -1152,7 +1155,7 @@ def candidate_from_dict(payload: dict[str, Any]) -> ParadigmCandidate:
             "researchers",
         },
         mappings={
-            "mental_model", "community_coverage", "community_search_receipts", "screening_rubric",
+            "mental_model", "community_coverage", "community_search_receipts", "screening_rubric", "direction_context",
             "rubric_assessment", "freshness_assessment",
             "deep_checkpoint_synthesis_rubric", "mechanism_origin_support",
         },

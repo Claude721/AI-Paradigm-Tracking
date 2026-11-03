@@ -89,7 +89,7 @@ def search_signature(candidate, provider):
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def reusable_search(candidate, provider, signature):
+def reusable_search(candidate, provider, signature, *, allow_scrubbed=False):
     receipt = candidate.community_search_receipts.get(provider, {})
     if receipt.get("status") != "completed" or receipt.get("input_signature") != signature:
         return False
@@ -97,6 +97,6 @@ def reusable_search(candidate, provider, signature):
     if not isinstance(fingerprints, list) or len(fingerprints) != receipt.get("result_count"):
         return False
     evidence = {item.fingerprint: item for item in candidate.evidence}
-    return all(key in evidence and (not evidence[key].raw.get("content_scrubbed")
+    return all(key in evidence and (allow_scrubbed or not evidence[key].raw.get("content_scrubbed")
                                    or evidence[key].raw.get("indexed_discovery_only") is True)
                for key in fingerprints)

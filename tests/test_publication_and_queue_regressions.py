@@ -170,7 +170,7 @@ class QueueBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_discovery_survives_failure_before_review_scope_is_frozen(self):
         process = self.process(accepted=True)
         process.delivery_contract_version = 5
-        async def interrupt(*args):
+        async def interrupt(*args, **kwargs):
             saved = self.store.campaigns.get(process.campaign.campaign_id)
             self.assertEqual(len(saved.discovery.origins), 1)
             raise RuntimeError("qualification interrupted")

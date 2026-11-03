@@ -467,7 +467,7 @@ class ParadigmOrchestrator:
                 # an empty receipt or a second full fetch.
                 if getattr(self, "delivery_contract_version", None) == 5:
                     self.store.campaigns.save_discovery(self.campaign.campaign_id, batch)
-                selected = await self._select_origin_scope(batch.origins, deep_deadline, stats)
+                selected = await self._select_origin_scope(batch.origins, deep_deadline, stats, supporting=batch.supporting)
                 # Resolve original dates before binding the source revision.
                 # Never "repair" a date inside a paid deep stage/CAS envelope.
                 if isinstance(self.discovery, ParadigmDiscovery):
@@ -739,11 +739,15 @@ class ParadigmOrchestrator:
         budget_deferred_candidates = service["budget_deferred_candidates"]
         execution_deferred_candidates = service["execution_deferred_candidates"]
         input_deferred_candidates = service["input_deferred_candidates"]
+        focus_deferred_candidates = service.get("focus_deferred_candidates", [])
+        stats["candidate_focus_watch_count"] = len(focus_deferred_candidates)
+        stats["candidate_focus_failure_count"] = service.get("focus_failure_count", 0)
         deferred_candidates = [
             *safety_deferred_candidates,
             *budget_deferred_candidates,
             *execution_deferred_candidates,
             *input_deferred_candidates,
+            *focus_deferred_candidates,
         ]
         for candidate in input_deferred_candidates:
             _record_deferred_candidate(
@@ -775,11 +779,9 @@ class ParadigmOrchestrator:
         stats["candidate_budget_deferred_count"] = len(
             budget_deferred_candidates
         )
-        stats["candidate_execution_deferred_count"] = len(
-            execution_deferred_candidates
-        )
+        stats["candidate_execution_deferred_count"] = len(execution_deferred_candidates) + stats["candidate_focus_failure_count"]
         stats["candidate_input_deferred_count"] = len(input_deferred_candidates)
-        stats["candidate_deferred_count"] = len(deferred_candidates)
+        stats["candidate_deferred_count"] = len(deferred_candidates) + stats["candidate_focus_failure_count"]
         run_audit.checkpoint(stats)
         if budget_deferred_candidates:
             run_audit.event(
@@ -1240,7 +1242,7 @@ class ParadigmOrchestrator:
                     summary["campaign_pending_count"])
         return stats
 
-    async def _select_origin_scope(self, origins, deadline, stats):
+    async def _select_origin_scope(self, origins, deadline, stats, *, supporting=()):
         """Cheap qualification precedes the expensive-review quota.
 
         Inspect at most four diverse acquisition pages per review slot. Unknown
@@ -1252,11 +1254,16 @@ class ParadigmOrchestrator:
         limit = config.PARADIGM_RESEARCH_ORIGIN_LIMIT
         pool = bounded_origins(origins, limit=limit * 4, reference_time=research_now(),
             days=self.high_signal_discovery_lookback_days, ordinary_days=self.ordinary_discovery_lookback_days)
+        # A current event may concern a much older origin. It must reach the
+        # pre-research selector even outside the ordinary acquisition window.
+        pool = list({item.fingerprint: item for item in
+            [*(item for item in origins if item.raw.get("event_recall_key")), *pool]}.values())
         decisions = {}
         prefetch = getattr(self.analyzer, "prefetch_origin_eligibility", None)
         can_screen = getattr(self.analyzer, "enable_batch_prefilter", False) and callable(prefetch)
         screening_deadline = time.monotonic() + min(120, max(_remaining_seconds(deadline) / 10, 0))
-        ordinary = [copy.deepcopy(item) for item in pool if _should_prefilter_origin(item)]
+        ordinary = [copy.deepcopy(item) for item in pool if _should_prefilter_origin(item)
+                    or config.PARADIGM_RESEARCH_FOCUS_ENABLED]
         for item in ordinary:
             # Same source signature as persistence; do not write speculative
             # cache identities onto discovery records or bypass CAS protection.
@@ -1270,7 +1277,10 @@ class ParadigmOrchestrator:
                 try:
                     rows = await asyncio.wait_for(prefetch(ordinary[offset:offset + size]), timeout=remaining)
                     decisions.update(rows)
-                except SampleBudgetError:
+                except asyncio.TimeoutError:
+                    run_audit.event("origin_scope_qualification", "deferred", "廉价资格预筛超时；未返回对象保留未知")
+                    break
+                except (sqlite3.DatabaseError, OSError, SampleBudgetError):
                     raise
                 except Exception as exc:
                     run_audit.event("origin_scope_qualification", "deferred", type(exc).__name__)
@@ -1287,12 +1297,78 @@ class ParadigmOrchestrator:
             ordinary_days=self.ordinary_discovery_lookback_days)
         if can_screen and len(regular) < limit:
             regular.extend(unknown[:limit - len(regular)])
-        event_origins = [item for item in origins if item.raw.get("event_recall_key")]
+        event_origins = [item for item in eligible if item.raw.get("event_recall_key")]
         selected = list({item.fingerprint: item for item in [*event_origins, *regular]}.values())[:limit]
+        if config.PARADIGM_RESEARCH_FOCUS_ENABLED:
+            from paradigms.research_focus import select
+            # Query the existing bounded acquisition scope, not all 4x cheap
+            # qualification inputs. Do not multiply paid requests by breadth.
+            selected = await select(selected, supporting, enricher=self.enricher,
+                analyzer=self.analyzer, deadline=deadline, stats=stats)
         stats["origin_scope_qualification"] = {"pool": len(pool), "answered": len(decisions),
             "screened_out": sum(value[0] == "screen_out" for value in decisions.values()),
             "unknown": len(ordinary) - len(decisions), "enabled": bool(can_screen)}
         return selected
+
+    async def _focus_before_deep(self, candidates, supporting, deadline, stats, *, persist=True):
+        """Also cover historical pending/refresh work, not only new discovery.
+
+        Park an opportunity without forging a final Rubric, execution failure,
+        budget receipt or completed deep study. A later event can wake it.
+        """
+        if not config.PARADIGM_RESEARCH_FOCUS_ENABLED or not candidates:
+            return candidates, [], []
+        from paradigms.research_focus import assess_candidates, admitted, receipt_current
+        origins = {item.fingerprint: copy.deepcopy(item) for candidate in candidates
+            for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES
+            and (not receipt_current(item) or item.raw["research_focus"].get("decision") != "research")}
+        if origins:
+            prefetch = getattr(self.analyzer, "prefetch_origin_eligibility", None)
+            if callable(prefetch) and _remaining_seconds(deadline) > 0:
+                try:
+                    await asyncio.wait_for(prefetch(list(origins.values())),
+                        timeout=min(30, _remaining_seconds(deadline)))
+                except asyncio.TimeoutError:
+                    run_audit.event("research_focus", "unknown", "旧对象廉价资格预筛超时，仍使用有效证据和查询回执")
+                except (sqlite3.DatabaseError, OSError, SampleBudgetError):
+                    raise
+                except Exception as exc:
+                    run_audit.event("research_focus", "unknown", "旧对象轻量预筛未闭合：" + type(exc).__name__)
+            focus_stats = {}
+            # Preserve the real route, its positive association receipts and
+            # all retained evidence. A title-only proxy loses that identity.
+            progress = copy.deepcopy(candidates)
+            outcomes = await assess_candidates(progress, supporting, enricher=self.enricher,
+                analyzer=self.analyzer, deadline=deadline, stats=focus_stats)
+            stats.setdefault("research_focus_rechecks", []).append(focus_stats["research_focus"])
+        else:
+            return candidates, [], []
+        kept, watched, failed = [], [], []
+        for candidate, updated, outcome in zip(candidates, progress, outcomes, strict=True):
+            try:
+                if outcome == "pending":
+                    failed.append(candidate)
+                    continue
+                saver = getattr(getattr(self, "store", None), "save_enrichment_checkpoint", None)
+                if persist and saver is not None and updated.to_dict() != candidate.to_dict():
+                    updated = saver(candidate, updated)
+                if not persist:
+                    # Refresh owns this in-memory copy. Preserve its updates
+                    # for unchanged/watch snapshots without touching history.
+                    candidate.evidence = updated.evidence
+                    candidate.community_search_receipts = updated.community_search_receipts
+                    candidate.community_coverage = updated.community_coverage
+                    candidate.direction_context = updated.direction_context
+                    updated = candidate
+                (kept if admitted(updated) else watched).append(updated)
+            except (sqlite3.DatabaseError, OSError, SampleBudgetError):
+                raise
+            except Exception as exc:
+                # Do not save a stale/foreign snapshot after a CAS conflict.
+                # The already durable candidate remains retryable as-is.
+                failed.append(candidate)
+                run_audit.event("research_focus_checkpoint", "failed", candidate.key + ": " + type(exc).__name__)
+        return kept, watched, failed
 
     async def _service_research_lanes(
         self, origins: list, supporting: list, deadline: float,
@@ -1406,6 +1482,8 @@ class ParadigmOrchestrator:
         analyzed = failed = partial = 0
         hydration = _empty_hydration_stats()
         completed_deep, deep_budget, deep_failed, deep_blocked = {}, {}, {}, {}
+        focus_watched = {}
+        focus_failures = set()
         dependency_seen = {item.fingerprint for item in origins}
         dependency_origins = set()
         refreshed, unchanged, refresh_failed = {}, {}, {}
@@ -1640,9 +1718,17 @@ class ParadigmOrchestrator:
                         # durable snapshot and final safety ledger retain it.
                         deep_lanes.pop(key, None)
                         continue
-                    visited_deep_keys.add(key)
                     group.append(deep_tasks.pop(key))
                     deep_lanes.pop(key, None)
+                if group:
+                    group, watched, focus_failed = await self._focus_before_deep(group, supporting, visit_deadline, stats)
+                    focus_watched.update((item.key, item) for item in watched)
+                    focus_failures.update(item.key for item in focus_failed)
+                    # Failure receipts are durable; the conflicted candidate
+                    # itself is NOT written back over a newer snapshot.
+                    attempts = start_attempts("deep", focus_failed) if focus_failed else {}
+                    finish_attempts(attempts, [], [], focus_failed, kind="deep")
+                    visited_deep_keys.update(item.key for item in group)
                 if group:
                     _mark_refresh_attempted(self, [item for item in group if item.key in historical_pending_keys])
                     attempts = start_attempts("deep", group)
@@ -1797,6 +1883,8 @@ class ParadigmOrchestrator:
             "budget_deferred_candidates": list(deep_budget.values()),
             "execution_deferred_candidates": list(deep_failed.values()),
             "input_deferred_candidates": list(deep_blocked.values()),
+            "focus_deferred_candidates": list(focus_watched.values()),
+            "focus_failure_count": len(focus_failures),
             "refresh_result": (list(refreshed.values()), list(unchanged.values()),
                                [item for item in refresh_budget if item.key not in deep_plan],
                                list(refresh_failed.values()), refresh_attempted),
@@ -2490,6 +2578,12 @@ class ParadigmOrchestrator:
                 blocked = lambda item: blocking_searches(item, allow_partial=getattr(self, "delivery_contract_version", None) in {2, 3, 4, 5})
                 search_failed = [item for item in candidate_batch if blocked(item)]
                 values = [item for item in values if not blocked(item)]
+                if values:
+                    values, watched, focus_failed = await self._focus_before_deep(values, supporting, deadline, {}, persist=False)
+                    search_failed.extend(focus_failed)
+                    if watched:
+                        run_audit.event("research_focus_refresh", "watch",
+                            f"{len(watched)} 条旧路线本期无足够选材信号；未调用MAIN，不改变历史技术结论")
                 if values:
                     changed_inputs = [
                         candidate

@@ -54,6 +54,12 @@ def score_candidate(candidate: ParadigmCandidate) -> ParadigmCandidate:
 
 
 def is_reportable(candidate: ParadigmCandidate) -> bool:
+    if config.PARADIGM_RESEARCH_FOCUS_ENABLED:
+        from .research_focus import receipt_current
+        receipts = [item.raw["research_focus"] for item in candidate.evidence
+                    if item.evidence_type in ORIGIN_EVIDENCE_TYPES and receipt_current(item)]
+        if receipts and not any(value.get("decision") == "research" for value in receipts):
+            return False  # Editorial watch does not rewrite the technical verdict.
     return (
         not candidate.rejection_reason
         and candidate.rubric_assessment.get("decision") == "report"

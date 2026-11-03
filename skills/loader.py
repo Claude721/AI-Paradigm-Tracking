@@ -61,6 +61,20 @@ class SkillLoader:
         else:
             self._cache.clear()
 
+    def mental_model_method(self) -> str:
+        """Load the user's concise paper method first; preserve legacy scaffolding.
+
+        The full imported skill/examples remain available for manual deep reads.
+        Production needs its radar adaptation, not its long-form/dialogue modes.
+        """
+        primary = (self.directory / "paper-mental-model" / "references" / "radar-brief.md").read_text(encoding="utf-8")
+        legacy = self.load("technical-mental-model")
+        supplements = re.findall(
+            r"(?ms)^## (?:选择一个主导观察坐标|允许假说，强制纠偏|内部脚手架)\n.*?(?=^## |\Z)", legacy)
+        return (primary.strip() + "\n\n# 技术心智模型：补充核验\n\n"
+                "以下旧方法仅补充内部脚手架，不要求在短正文全部展开：\n\n"
+                + "\n\n".join(part.strip() for part in supplements))
+
     def list_skills(self) -> list[str]:
         """列出所有可用的 Skill 名称"""
         return sorted(

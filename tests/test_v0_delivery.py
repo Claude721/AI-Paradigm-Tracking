@@ -93,6 +93,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         value.analyzer = SimpleNamespace(run=analyze)
         value.enricher.run = enrich
+        value.enricher.preflight_community = AsyncMock(return_value=[])
         value.enricher.hydrate_priority_origins = AsyncMock(return_value={})
         value.enricher.refresh = AsyncMock(return_value=[])
         value.synthesizer.run = synthesize
@@ -235,7 +236,7 @@ class V0DeliveryTests(unittest.IsolatedAsyncioTestCase):
                  "这条路线解释训练信号、推理接口与能力边界之间的因果关系。" * 30 +
                  f"\n\nA. Researcher 在推动这条路线。[论文原文]({url})。\n\n" +
                  "**讨论势能判断：** 当前主要是已核验发布方提出的机制，尚无独立复现；Tavily 本轮不可用，不据此推断没有讨论。")
-        memo = "本期技术路线从旧方法的边界出发，解释设计思想如何落到训练与推理。" * 18
+        memo = "本期技术路线从旧方法的边界出发，解释设计思想如何落到训练与推理。" * 6
         frame = f"## 本期研究 Memo\n\n{memo}\n\n## 接下来真正值得盯的信号\n\n观察独立复现。"
         def response(text):
             return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=text))])

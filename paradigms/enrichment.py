@@ -14,6 +14,9 @@ from sources.paradigm_evidence_source import CommunityEvidenceClient
 from sources.semantic_scholar_source import SemanticScholarClient
 from sources.researcher_profile_source import ResearcherProfileClient
 from sources.arxiv_document_source import ArxivDocumentClient
+from sources.secondary_page_source import SecondaryPageReader
+from sources.direction_signal_source import DirectionSignalClient
+from sources.work_evidence_cache import WorkEvidenceCache
 from runtime_clock import observation_now
 
 from .models import (
@@ -42,6 +45,17 @@ class EvidenceEnricher:
         self.community = CommunityEvidenceClient(budget_store=budget_store)
         self.researchers = ResearcherProfileClient()
         self.documents = ArxivDocumentClient()
+        self.secondary_pages = SecondaryPageReader()
+        self.direction_signals = DirectionSignalClient()
+        self.work_evidence = WorkEvidenceCache()
+
+    async def preflight_community(self, candidate, deadline=float("inf")):
+        """Same work-bound query path before selection and during deep work."""
+        if not hasattr(self, "work_evidence"):
+            self.work_evidence = WorkEvidenceCache()
+        await self.work_evidence.attach(candidate, self.community,
+            pages=self.secondary_pages, deadline=deadline)
+        return []  # Results/receipts are already attached, including partials.
 
     async def run(
         self,
@@ -56,7 +70,10 @@ class EvidenceEnricher:
                 await self._external_enrichment(candidate)
                 return candidate
 
-        return await gather_scoped(*(enrich_one(candidate) for candidate in candidates))
+        result = await gather_scoped(*(enrich_one(candidate) for candidate in candidates))
+        if config.PARADIGM_DIRECTION_SIGNALS_ENABLED:
+            await self.direction_signals.attach(result)
+        return result
 
     async def hydrate_priority_origins(
         self, evidence: list[TechnicalEvidence]
@@ -110,7 +127,10 @@ class EvidenceEnricher:
                 }
                 self._attach_support(candidate, supporting)
                 try:
-                    candidate.evidence.extend(await self.community.search(candidate))
+                    if config.PARADIGM_RESEARCH_FOCUS_ENABLED:
+                        await self.preflight_community(candidate)
+                    else:
+                        candidate.evidence.extend(await self.community.search(candidate))
                     candidate.community_coverage = {
                         **self.community.coverage(),
                         **candidate.community_coverage,
@@ -129,6 +149,7 @@ class EvidenceEnricher:
                 candidate.evidence = _dedupe_evidence(
                     candidate.evidence, route_key=candidate.key
                 )
+                await self.secondary_pages.read(candidate)
                 certify_diffusion(candidate)
                 if blocking_searches(candidate, allow_partial=getattr(self, "allow_partial_sources", False)):
                     # Return the incomplete object, not None (which means a
@@ -146,6 +167,13 @@ class EvidenceEnricher:
                         if (_new_evidence_requires_synthesis(item) or verified_diffusion(candidate, item)
                                 or item.raw.get("indexed_discovery_only") and work_reference(candidate, item)):
                             changed = True
+                        continue
+                    if (item.source == "read-web-article"
+                            and prior.raw.get("indexed_discovery_only")
+                            and not item.raw.get("indexed_discovery_only")):
+                        # Reading an old index lead is genuinely new research
+                        # material even when search counters have not changed.
+                        changed = True
                         continue
                     if item.raw.get("indexed_discovery_only") and not is_verified_substantive_discussion(prior, route_key=candidate.key):
                         continue
@@ -183,7 +211,10 @@ class EvidenceEnricher:
                 return candidate
 
         refreshed = await gather_scoped(*(refresh_one(item) for item in candidates))
-        return [item for item in refreshed if item is not None]
+        result = [item for item in refreshed if item is not None]
+        if config.PARADIGM_DIRECTION_SIGNALS_ENABLED:
+            await self.direction_signals.attach(result)
+        return result
 
     async def _external_enrichment(self, candidate: ParadigmCandidate) -> None:
         candidate.excluded_evidence.extend(item for item in candidate.evidence if not countable_evidence(candidate, item))
@@ -223,7 +254,7 @@ class EvidenceEnricher:
 
         results = await asyncio.gather(
             scholarly_enrichment(),
-            self.community.search(candidate),
+            self.preflight_community(candidate) if config.PARADIGM_RESEARCH_FOCUS_ENABLED else self.community.search(candidate),
             return_exceptions=True,
         )
         scholarly, community = results
@@ -253,6 +284,7 @@ class EvidenceEnricher:
         candidate.evidence = _dedupe_evidence(
             [item for item in candidate.evidence if countable_evidence(candidate, item)], route_key=candidate.key
         )
+        await self.secondary_pages.read(candidate)
         certify_diffusion(candidate)
         if blocking_searches(candidate, allow_partial=getattr(self, "allow_partial_sources", False)):
             return  # Never pay for downstream judgments on incomplete inputs.
