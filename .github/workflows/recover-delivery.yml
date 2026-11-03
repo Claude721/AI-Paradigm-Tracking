@@ -1,0 +1,136 @@
+name: 仅恢复失败交付状态（无模型、无邮件）
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: 已批准的失败运行ID；必须仍是最新V0状态制品
+        required: true
+        type: string
+      delivery_key:
+        description: 可选，完整失败交付Key；未填时必须能唯一确定
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: paradigm-radar-delivery
+  cancel-in-progress: false
+
+jobs:
+  recover-state-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AI_RADAR_SKIP_DOTENV: "true"
+      RESEARCH_ARCHIVE_ENABLED: "false"
+      EMAIL_PUSH_ENABLED: "false"
+      EMAIL_PUSH_REQUIRED: "false"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+      - name: 完整离线发布门
+        run: python scripts/offline_checks.py
+      - name: 核对并下载指定最新状态（只读GitHub）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || { echo '运行ID必须为数字'; exit 1; }
+          mkdir -p .private/recovery-before
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --jq '.artifacts[] | select(.expired == false and (.name | startswith("paradigm-radar-v0-state-"))) | [.id, .name, .created_at, .digest] | @tsv' > .private/recovery-before/artifacts.tsv
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          rows = []
+          for line in Path('.private/recovery-before/artifacts.tsv').read_text().splitlines():
+              if not line.strip(): continue
+              identifier, name, created_at, digest = line.split('\t')
+              rows.append(dict(id=int(identifier), name=name, created_at=created_at, digest=digest))
+          if not rows:
+              raise SystemExit('没有可恢复状态，拒绝从空状态重建')
+          latest = max(rows, key=lambda row: (row['created_at'], row['id']))
+          if latest['name'] != 'paradigm-radar-v0-state-' + os.environ['SOURCE_RUN_ID']:
+              raise SystemExit('已有更新状态，停止，不能覆盖新运行')
+          digest = latest.get('digest', '')
+          if not digest.startswith('sha256:'):
+              raise SystemExit('GitHub制品没有可确认摘要，停止')
+          Path('.private/recovery-before/source.json').write_text(json.dumps({k:latest[k] for k in ('id','name','digest','created_at')}, indent=2))
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('RECOVERY_ARTIFACT_ID=' + str(int(latest['id'])) + '\n')
+              output.write('RECOVERY_SOURCE_DIGEST=' + digest.removeprefix('sha256:') + '\n')
+          PY
+          artifact_id="$(python -c 'import json; print(int(json.load(open(".private/recovery-before/source.json"))["id"]))')"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > .private/recovery-before/source-state.zip
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha' > .private/recovery-before/source-commit.txt
+          # GITHUB_ENV becomes visible in the NEXT step; verify the archive now
+          # from the local, already checked metadata, not that deferred variable.
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          root=Path('.private/recovery-before')
+          expected=json.loads((root/'source.json').read_text())['digest'].removeprefix('sha256:')
+          if hashlib.sha256((root/'source-state.zip').read_bytes()).hexdigest()!=expected:
+              raise SystemExit('下载摘要不一致，不进行备份后的恢复')
+          PY
+      - name: 保存修复前原始状态备份
+        uses: actions/upload-artifact@v7
+        with:
+          name: delivery-recovery-backup-${{ github.run_id }}
+          path: |
+            .private/recovery-before/source-state.zip
+            .private/recovery-before/source.json
+            .private/recovery-before/source-commit.txt
+          include-hidden-files: true
+          retention-days: 90
+          if-no-files-found: error
+      - name: 隔离恢复精确冻结交付（不研究、不发信）
+        env:
+          DELIVERY_KEY: ${{ inputs.delivery_key }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit="$(tr -d '\r\n' < .private/recovery-before/source-commit.txt)"
+          python scripts/recover_delivery.py \
+            --state-zip .private/recovery-before/source-state.zip \
+            --expected-sha256 "$RECOVERY_SOURCE_DIGEST" \
+            --expected-source-commit "$source_commit" \
+            --delivery-key "$DELIVERY_KEY" \
+            --output-dir .private/recovery-after --apply
+      - name: 保存恢复后待投递状态
+        uses: actions/upload-artifact@v7
+        with:
+          name: paradigm-radar-v0-state-${{ github.run_id }}
+          path: |
+            .private/recovery-after/paradigm_radar.db
+            .private/recovery-after/state-meta.json
+          include-hidden-files: true
+          retention-days: 90
+          if-no-files-found: error
+      - name: 保存恢复诊断
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: delivery-recovery-audit-${{ github.run_id }}
+          path: |
+            .private/recovery-after/recovery_summary.json
+            logs/offline_checks.json
+            logs/offline_checks.log
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: warn

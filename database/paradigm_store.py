@@ -738,6 +738,9 @@ class ParadigmStore:
                 for candidate in candidates
             ),
         }
+        if stats.get("publication_recovery_parent"):
+            # A recovery must not erase the original quarantined failure row.
+            identity["publication_recovery_parent"] = stats["publication_recovery_parent"]
         # 完整空报告同样是一项研究结果；不同完整召回结果使用不同幂等键。
         if not candidates:
             identity["empty_result_basis"] = {
@@ -1001,19 +1004,18 @@ class ParadigmStore:
         failure_kind: str,
         requeue_candidates: bool = True,
     ) -> None:
-        """Isolate an unrecoverable snapshot and atomically requeue its research.
+        """Isolate an unrecoverable delivery, preserving v5 research and prose.
 
         A quarantined outbox item remains available for audit, but no longer
-        blocks newer delivery work.  Its candidates return to ``pending_deep``
-        in the same SQLite transaction, so a later research run can rebuild the
-        missing person/source contract instead of silently dropping the route.
+        blocks newer delivery work. Only historical pre-v5 contracts requeue
+        research; current publication failures never own candidate state.
         """
 
         now = datetime.now(timezone.utc).isoformat()
         safe_error = _safe_error_text(error)
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT candidate_payload_json FROM report_outbox "
+                "SELECT candidate_payload_json, stats_json FROM report_outbox "
                 "WHERE delivery_key=?",
                 (delivery_key,),
             ).fetchone()
@@ -1023,6 +1025,11 @@ class ParadigmStore:
                 _persistable_candidate(candidate_from_dict(value))
                 for value in json.loads(row[0])
             ]
+            weekly = json.loads(row[1]).get("delivery_contract_version") == 5
+            # Publication is not research. Legacy contracts retain their old
+            # migration semantics, but a v5 render defect owns no research row.
+            if weekly:
+                candidates = []
             for candidate in candidates:
                 current = conn.execute("SELECT payload_json FROM paradigms WHERE paradigm_key=?", (candidate.key,)).fetchone()
                 if not requeue_candidates and current is not None:
@@ -1084,13 +1091,55 @@ class ParadigmStore:
                 (safe_error, failure_kind, now, now, delivery_key),
             )
             conn.execute(
-                "UPDATE research_campaigns SET status='researching', delivery_key='', updated_at=? WHERE delivery_key=? AND status != 'delivered'",
-                (now, delivery_key),
+                "UPDATE research_campaigns SET status=?, delivery_key='', updated_at=? WHERE delivery_key=? AND status != 'delivered'",
+                ("superseded" if weekly else "researching", now, delivery_key),
             )
-            conn.execute(
-                "DELETE FROM report_render_fragments WHERE delivery_key=?",
-                (delivery_key,),
-            )
+            if not weekly:
+                conn.execute("DELETE FROM report_render_fragments WHERE delivery_key=?", (delivery_key,))
+
+    def replace_weekly_publication(self, job, candidates, stats, fragments):
+        """Save the smaller checked delivery before retiring its old outbox.
+
+        This is a publication-only transaction: no candidate, evidence, review,
+        execution receipt or last-reported signature is rewritten.
+        """
+        if job.stats.get("delivery_contract_version") != 5:
+            raise ValueError("只允许重封本周发表子集")
+        allowed = {item.key: item.to_dict() for item in job.candidates}
+        if any(allowed.get(item.key) != item.to_dict() for item in candidates):
+            raise ValueError("替换交付不得引入或改写冻结研究")
+        require_completed_research(stats, candidates=candidates)
+        with self.transaction():
+            previous = self.get_report_job(job.delivery_key)
+            if previous is None or previous.status == "delivered":
+                raise ValueError("交付任务已变更，不覆盖已投递结果")
+            if previous.candidates != job.candidates or previous.stats != job.stats:
+                raise ValueError("冻结交付快照已变化，不覆盖新快照")
+            if any(not self.candidate_inputs_current(item) for item in candidates):
+                raise ValueError("交付来源已换版，不覆盖新快照")
+            campaign_id = stats["research_campaign"]["campaign_id"]
+            if campaign_id != job.stats["research_campaign"]["campaign_id"]:
+                raise ValueError("替代交付不属于原研究批次")
+            if self.campaigns.snapshot(campaign_id) != stats["research_campaign"]:
+                raise ValueError("研究执行账本已变化，不覆盖新快照")
+            replacement = self._enqueue_completed_report(candidates, stats, report_date=job.report_date)
+            if replacement.status != "delivered":
+                for fragment_key, content in fragments.items():
+                    self.save_report_fragment(replacement.delivery_key, fragment_key, content)
+            # All downstream state exists now. Retire only the old publication.
+            if replacement.delivery_key != job.delivery_key and previous.status != "quarantined":
+                with self._connect() as conn:
+                    conn.execute("UPDATE report_outbox SET status='quarantined', failure_kind='publication_superseded', "
+                                 "last_error='已保存逐条复核后的替代交付', quarantined_at=?, updated_at=? "
+                                 "WHERE delivery_key=? AND status != 'delivered'",
+                                 (datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job.delivery_key))
+            self.campaigns.save_stats(campaign_id, stats, ready=True)
+            # The original completed research proof was checked above; there
+            # is no reason to re-run MAIN or rewrite candidate status here.
+            with self._connect() as conn:
+                conn.execute("UPDATE research_campaigns SET delivery_key=?, status=? WHERE campaign_id=?",
+                             (replacement.delivery_key, "delivered" if replacement.status == "delivered" else "waiting_delivery", campaign_id))
+        return replacement
 
     def mark_delivery_delivered(
         self, delivery_key: str, report_path: Path

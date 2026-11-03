@@ -108,7 +108,7 @@ class ParadigmReportGenerator:
             # Rendering is deterministic: overview/model/budget failures cannot
             # suppress already checked prose or trigger another paid request.
             drafts = [str((route_fragments or {}).get(_route_fragment_key(item), "")) for item in ordered]
-            if any(_route_draft_violations(draft, item) for item, draft in zip(ordered, drafts)):
+            if any(_publication_route_violations(draft, item) for item, draft in zip(ordered, drafts)):
                 raise ReportInputContractError(["周报快照缺少已通过核验的路线正文"])
             content = self._weekly_content(date, stats, ordered, drafts)
             violations = _editorial_violations(content, ordered, weekly=True) if ordered else []
@@ -223,15 +223,23 @@ class ParadigmReportGenerator:
                 issues = _route_draft_violations(value, item)
                 if issues:
                     raise ReportQualityContractError(issues)
-                result = save_fragment(key, value)
-                if inspect.isawaitable(result):
-                    await result
-                fragments[key] = value
-                successful.add(item.key)
+                # The writer's prose is not the final artifact: deterministic
+                # byline/contact/source sections may introduce their own bugs.
+                issues = _publication_route_violations(value, item)
+                if issues:
+                    raise ReportQualityContractError(issues)
             except Exception as exc:
                 # No raw provider response or prompt in the public receipt.
                 failures[item.key] = type(exc).__name__
                 run_audit.event("weekly_publication", "route_excluded", f"{item.key}: {type(exc).__name__}")
+                return
+            # Persistence is outside the route/model failure boundary. A
+            # disconnected model is local; a failed durable write is not.
+            result = save_fragment(key, value)
+            if inspect.isawaitable(result):
+                await result
+            fragments[key] = value
+            successful.add(item.key)
 
         tasks = [asyncio.create_task(prepare(item, index)) for index, item in enumerate(candidates, 1)]
         try:
@@ -239,7 +247,10 @@ class ParadigmReportGenerator:
                 _, pending = await asyncio.wait(tasks, timeout=config.PARADIGM_REPORT_TIMEOUT_SECONDS)
                 for task in pending:
                     task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        raise result
         finally:
             for task in tasks:
                 if not task.done():
@@ -953,6 +964,20 @@ def _route_draft_violations(
     return violations
 
 
+def _publication_route_violations(content, candidate):
+    """Validate the exact route plus its generated indexes before freezing it.
+
+    A metadata/editorial defect belongs to this publication, not to every
+    healthy peer and not to the already completed technical judgment.
+    """
+    frame = ("## 本期研究 Memo\n\n" + content.strip()
+             + "\n\n## 接下来真正值得盯的信号\n\n继续核验已有证据边界。")
+    artifact = _attach_primary_source_index(
+        _attach_researcher_index(frame, [candidate]), [candidate])
+    return _route_draft_violations(content, candidate) + _editorial_violations(
+        artifact, [candidate], weekly=True)
+
+
 def _evidence_dossier(item: TechnicalEvidence) -> dict:
     from sources.arxiv_document_source import _distributed_text_excerpt
     durable_url = (
@@ -1466,11 +1491,21 @@ def _attach_researcher_index(
                 ]
                 if notes:
                     lookup_text = "；检索记录：" + "、".join(notes)
-            lines.append(
+            entry = (
                 f"- **{_markdown_label(profile.name)}**（{_markdown_label(affiliation)}）："
                 f"{_markdown_label(background)}；公开联系：{contact_text}"
                 f"{lookup_text}。"
             )
+            # Biography/contact prose is optional enrichment, not an authority
+            # to publish extra URLs or leak internal output. Keep the original
+            # profile intact; omit only its unsafe public-facing enrichment.
+            if (_ungrounded_url_violations(entry, candidates)
+                    or _has_internal_evidence_labels(entry)
+                    or _contains_absolute_paradigm_claim(entry)
+                    or partial_report_violations(entry)):
+                entry = (f"- **{_markdown_label(profile.name)}**：人物补充材料未通过发表核验，"
+                         "本次不展示履历和联系入口；原文署名独立保留，不影响技术判断。")
+            lines.append(entry)
         for boundary in dict.fromkeys(boundaries[route]):
             if boundary.startswith("未能"):
                 lines.append("- " + boundary)
@@ -1661,12 +1696,19 @@ def _grounded_http_urls(candidates: list[ParadigmCandidate]) -> set[str]:
 
 def _all_http_urls(content: str) -> set[str]:
     urls = set(_markdown_link_targets(content))
+    # Explicit Markdown targets are exact URL values, including any Unicode
+    # punctuation inside them. Do not normalize a genuinely different target
+    # into an allowed one. Mask only those targets before scanning bare prose;
+    # link labels may themselves contain an extra, ungrounded URL.
+    bare = re.sub(
+        r"(?<=\]\()\s*(?:<https?://[^>]+>|https?://[^)\s]+)\s*(?=\))",
+        lambda match: " " * len(match.group()), content, flags=re.I)
     # Markdown closers and Chinese prose punctuation are not part of a URL.
     # A broad ``\S+`` pattern would swallow ``)，并可[下一链接](`` and then
     # falsely reject an otherwise evidence-grounded report.
     for match in re.finditer(
-        r"https?://[^\s<>()\[\]\"'，。；：！？]+",
-        content,
+        r"https?://[^\s<>()\[\]\"'`，。；：！？（）【】《》「」『』“”‘’]+",
+        bare,
         re.IGNORECASE,
     ):
         value = match.group(0).rstrip(".,;:!?)]}，。；：！？")

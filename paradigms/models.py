@@ -786,9 +786,11 @@ def key_researcher_profiles(
     这只影响人物核验与报告篇幅，不会改变完整作者名单或技术 Rubric。
     """
 
-    named = [
-        profile for profile in profiles if plausible_researcher_name(profile.name)
-    ]
+    # Old snapshots can contain a collective byline that passed the syntactic
+    # name check. Apply the same entity boundary as new source bylines, without
+    # deleting the original profile from the durable research dossier.
+    from .authorship import individual_name
+    named = [profile for profile in profiles if individual_name(profile.name)]
     if not named:
         return []
     target = max(int(limit or 0), 1)
@@ -1108,7 +1110,8 @@ def verified_organization_attribution(
              for name in evidence.authors] + [profile.name for profile in candidate.researchers]
     organizations = {normalize_paradigm_name(evidence.organization) for evidence in candidate.evidence
                      if evidence.organization}
-    has_named_person = any(plausible_researcher_name(name)
+    from .authorship import individual_name
+    has_named_person = any(individual_name(name)
         and normalize_paradigm_name(name) not in organizations
         and not re.search(r"(?:\bteam\b|\bconsortium\b|\bcollaboration\b|研究团队|课题组)$", name.strip(), re.I)
         for name in names)

@@ -12,6 +12,23 @@ from reports.paradigm_generator import _route_fragment_key
 from run_audit import run_audit
 
 
+def publication_stats(stats, selected, excluded, ledger):
+    """Reseal publication only; never reinterpret a research failure/verdict."""
+    stats = {**stats, "research_campaign": ledger,
+             "result_kind": weekly_result_kind(selected), "delivery_ready": True,
+             "publication_excluded": excluded, "publication_excluded_count": len(excluded),
+             "published_route_count": len(selected),
+             "new_paradigms": sum(item.report_kind != "update" for item in selected),
+             "updated_paradigms": sum(item.report_kind == "update" for item in selected)}
+    stats["delivery_scope"] = delivery_proof(stats, selected, ledger,
+        minimum_sources=stats["delivery_scope"]["minimum_primary_sources"])
+    stats["research_health"] = ("interrupted" if stats.get("research_stage_interrupted") else
+        "with_gaps" if excluded or ledger["pending_total_count"] or stats.get("coverage_incomplete")
+        or stats.get("run_budget_exhausted") or len(stats["delivery_scope"]["usable_primary_sources"]) < stats["delivery_scope"]["minimum_primary_sources"]
+        else "healthy")
+    return stats
+
+
 async def prepare_weekly_delivery(store, generator, candidates, stats, *, report_date):
     if stats.get("delivery_contract_version") != 5:
         return candidates, stats, {}
@@ -51,18 +68,8 @@ async def prepare_weekly_delivery(store, generator, candidates, stats, *, report
             if item.key not in closed:
                 excluded[item.key] = "PublicationCheckpointChanged"
         selected = [item for item in selected if item.key in closed]
-        stats = {**stats, **run_audit.token_totals(), "research_campaign": ledger,
-                 "result_kind": weekly_result_kind(selected), "delivery_ready": True,
-                 "publication_excluded": excluded, "publication_excluded_count": len(excluded),
-                 "published_route_count": len(selected),
-                 "new_paradigms": sum(item.report_kind != "update" for item in selected),
-                 "updated_paradigms": sum(item.report_kind == "update" for item in selected)}
-        stats["delivery_scope"] = delivery_proof(stats, selected, ledger,
-            minimum_sources=stats["delivery_scope"]["minimum_primary_sources"])
-        stats["research_health"] = ("interrupted" if stats.get("research_stage_interrupted") else
-            "with_gaps" if excluded or ledger["pending_total_count"] or stats.get("coverage_incomplete")
-            or stats.get("run_budget_exhausted") or len(stats["delivery_scope"]["usable_primary_sources"]) < stats["delivery_scope"]["minimum_primary_sources"]
-            else "healthy")
+        stats = publication_stats({**stats, **run_audit.token_totals()}, selected, excluded, ledger)
+        stats["publication_draft_keys"] = {item.key: _route_fragment_key(item) for item in selected}
         store.campaigns.save_stats(campaign_id, stats, ready=True)
     run_audit.event("weekly_publication", "snapshot_sealed",
                     f"发表 {len(selected)} 条；单条发表问题 {len(excluded)} 条；研究待办 {ledger['pending_total_count']} 条")

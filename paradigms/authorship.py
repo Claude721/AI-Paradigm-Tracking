@@ -27,7 +27,14 @@ def individual_name(value: str) -> str:
     if not plausible_researcher_name(value) or collective:
         return ""
     from .reputation import resolve_organization
-    return "" if resolve_organization(value) is not None else value
+    from research_watchlist import OFFICIAL_GITHUB_ORGANIZATIONS
+    # A verified organization's public login can be a collective byline even
+    # when the lab-name directory intentionally does not equate the entire
+    # corporation with a particular research lab. Do not broaden reputation
+    # aliases merely to distinguish an organization from a natural person.
+    organization_logins = {item["login"].casefold() for item in OFFICIAL_GITHUB_ORGANIZATIONS}
+    return "" if (resolve_organization(value) is not None
+                  or value.casefold() in organization_logins) else value
 
 
 def _names(evidence):

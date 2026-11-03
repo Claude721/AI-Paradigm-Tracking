@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import json
 import logging
+import sqlite3
 import sys
 from contextlib import contextmanager
 from logging.handlers import TimedRotatingFileHandler
@@ -187,7 +188,91 @@ def _print_model_banner() -> None:
         logger.info(f"  (子Agent 与 主Agent 使用同一模型: {sub.label})")
 
 
-async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> dict:
+def _weekly_fragments(store, job):
+    from reports.paradigm_generator import _route_fragment_key
+    fragments = store.load_report_fragments(job.delivery_key)
+    frozen_keys = job.stats.get("publication_draft_keys") or {}
+    keys = list(dict.fromkeys([_route_fragment_key(item) for item in job.candidates]
+                             + list(frozen_keys.values())))
+    restored = store.campaigns.cache_get_many("weekly_publication_draft", keys)
+    fragments = {**{key: value.get("content", "") for key, value in restored.items()
+                   if isinstance(value, dict)}, **fragments}
+    for item in job.candidates:
+        frozen = frozen_keys.get(item.key, "")
+        if frozen and frozen in fragments:
+            fragments.setdefault(_route_fragment_key(item), fragments[frozen])
+    return fragments
+
+
+def _repair_weekly_publication(store, job, route_fragments, *, recovery_parent=False):
+    """Recheck frozen prose and assemble a smaller delivery, without a model.
+
+    Even an assembly-wide defect produces a truthful receipt, not an invented
+    technical conclusion or a rollback into the research queue.
+    """
+    from reports.paradigm_generator import (
+        ParadigmReportGenerator, _publication_route_violations,
+        _route_fragment_key, _editorial_violations,
+    )
+    from paradigms.weekly_delivery import publication_stats
+    from run_audit import run_audit
+
+    selected, drafts, fragments = [], [], {}
+    excluded = dict(job.stats.get("publication_excluded") or {})
+    frozen_keys = job.stats.get("publication_draft_keys") or {}
+    # Reconcile is a research operation: it may reopen work when model/policy
+    # configuration changes. Delivery only reads the committed ledger.
+    ledger = store.campaigns.snapshot(job.stats["research_campaign"]["campaign_id"])
+    closed = {row["key"] for row in ledger["execution_receipts"]
+              if row["kind"] in {"deep", "refresh"} and row["outcome"] == "completed"}
+    for item in job.candidates:
+        key = _route_fragment_key(item)
+        # Persisted old-policy keys are associated with this frozen input,
+        # never recovered by a loose route-name search through global cache.
+        draft = route_fragments.get(key) or route_fragments.get(frozen_keys.get(item.key, ""), "")
+        try:
+            issues = _publication_route_violations(draft, item)
+            if issues or item.key not in closed or not store.candidate_inputs_current(item):
+                excluded[item.key] = "PublicationArtifactNotReady"
+                continue
+        except (sqlite3.Error, OSError):
+            raise
+        except Exception:
+            excluded[item.key] = "PublicationArtifactInvalid"
+            continue
+        selected.append(item)
+        drafts.append(draft)
+        fragments[key] = draft
+    stats = publication_stats(job.stats, selected, excluded, ledger)
+    try:
+        content = ParadigmReportGenerator._weekly_content(job.report_date, stats, selected, drafts)
+        assembly_failed = bool(selected and _editorial_violations(content, selected, weekly=True))
+    except (sqlite3.Error, OSError):
+        raise
+    except Exception:
+        if not selected:
+            raise
+        assembly_failed = True
+    if assembly_failed:
+        # A frame/index interaction is not attributable to a technical verdict.
+        excluded.update({item.key: "PublicationAssemblyContract" for item in selected})
+        selected, fragments = [], {}
+        stats = publication_stats(job.stats, selected, excluded, ledger)
+        content = ParadigmReportGenerator._weekly_content(job.report_date, stats, [], [])
+    stats["publication_draft_keys"] = {item.key: _route_fragment_key(item) for item in selected}
+    stats["publication_repaired"] = True
+    if recovery_parent:
+        stats["publication_recovery_parent"] = job.delivery_key
+    with store.transaction():
+        replacement = store.replace_weekly_publication(job, selected, stats, fragments)
+        store.save_rendered_report(replacement.delivery_key, content.strip() + "\n")
+    run_audit.event("weekly_publication", "artifact_repaired",
+                    f"最终成稿逐条复核后交付 {len(selected)} 条；未发表 {len(excluded)} 条；研究判断保持不变")
+    return store.get_report_job(replacement.delivery_key)
+
+
+async def _deliver_paradigm_job(store, generator, job, *, recovered: bool,
+                                _publication_repair_allowed: bool = True) -> dict:
     """渲染并投递一个持久化 outbox 任务，不重新执行研究。"""
 
     from notifications.email_notifier import send_report_email
@@ -227,6 +312,11 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
 
     report_path = generator.output_dir / job.report_name
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    if (stats.get("delivery_contract_version") == 5 and _publication_repair_allowed
+            and any(not store.candidate_inputs_current(item) for item in job.candidates)):
+        repaired = _repair_weekly_publication(store, job, _weekly_fragments(store, job))
+        return await _deliver_paradigm_job(store, generator, repaired, recovered=recovered,
+                                          _publication_repair_allowed=False)
     rendered = bool(job.report_content)
     if rendered:
         from reports.paradigm_generator import _editorial_violations
@@ -268,11 +358,7 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
             stats["delivery_render_attempt"] = render_attempt
             route_fragments = store.load_report_fragments(job.delivery_key)
             if stats.get("delivery_contract_version") == 5:
-                from reports.paradigm_generator import _route_fragment_key
-                restored = store.campaigns.cache_get_many("weekly_publication_draft",
-                    [_route_fragment_key(item) for item in job.candidates])
-                route_fragments = {**{key: value.get("content", "") for key, value in restored.items()
-                                      if isinstance(value, dict)}, **route_fragments}
+                route_fragments = _weekly_fragments(store, job)
             if route_fragments:
                 run_audit.event(
                     "report_outbox",
@@ -301,6 +387,10 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
             )
             rendered = True
         except Exception as exc:
+            if isinstance(exc, sqlite3.Error) or isinstance(exc, OSError) and not isinstance(exc, TimeoutError):
+                # A genuine filesystem/SQLite failure is not a bad route or
+                # a reason to modify/reseal publication and pretend success.
+                raise
             from reports.paradigm_generator import (
                 ReportInputContractError,
                 ReportQualityContractError,
@@ -315,6 +405,11 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
                 and stats.get("delivery_render_attempt", 0)
                 >= config.PARADIGM_REPORT_MAX_RENDER_ATTEMPTS
             )
+            if stats.get("delivery_contract_version") == 5 and _publication_repair_allowed:
+                repaired = _repair_weekly_publication(store, job, route_fragments)
+                return await _deliver_paradigm_job(
+                    store, generator, repaired, recovered=recovered,
+                    _publication_repair_allowed=False)
             if permanent_contract_failure or retry_exhausted:
                 failure_kind = (
                     "report_input_contract"
@@ -341,7 +436,9 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
                     "report_outbox",
                     "quarantined",
                     f"报告任务 {job.delivery_key[:12]} 已隔离（{failure_kind}）；"
-                    "冻结候选已原子退回 pending_deep，不再阻塞后续研究",
+                    + ("研究判断与路线草稿保持不变，不再阻塞后续交付"
+                     if stats.get("delivery_contract_version") == 5 else
+                     "冻结候选已原子退回 pending_deep，不再阻塞后续研究"),
                 )
                 audit_summary = run_audit.write(
                     stats,
@@ -418,6 +515,8 @@ async def _deliver_paradigm_job(store, generator, job, *, recovered: bool) -> di
             rendered=rendered,
             failure_kind="smtp_unconfirmed",
         )
+        if config.EMAIL_PUSH_REQUIRED:
+            raise RuntimeError("SMTP 未确认发送，必需邮件交付失败；报告保持待投递，研究判断未回滚")
     return stats
 
 
@@ -531,8 +630,8 @@ async def _run_pipeline_once(*, resume_only: bool = False, expected_campaign_id:
         )
         if delivery_result.get("delivery_quarantined"):
             raise RuntimeError(
-                "本轮新报告未通过交付契约，任务已隔离并把候选退回 "
-                "pending_deep；状态已保存，但本轮没有完成报告/邮件交付"
+                "本轮新报告未通过交付契约，任务已隔离；状态已保存，"
+                "研究判断不因交付失败回滚；本轮没有完成报告/邮件交付"
             )
         return delivery_result
 
