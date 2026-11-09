@@ -349,6 +349,19 @@ jobs:
           printf '{"schema_version":%s,"landscape_version":"%s","commit_sha":"%s","run_id":"%s"}\n' "$state_schema" "$landscape_version" "$GITHUB_SHA" "$GITHUB_RUN_ID" > database/state-meta.json
           echo "available=true" >> "$GITHUB_OUTPUT"
 
+      - name: 将周报写入受力分析项目后台
+        id: force_handoff
+        if: ${{ always() && steps.prepare_state.outputs.available == 'true' }}
+        continue-on-error: true
+        env:
+          FORCE_SITE_URL: ${{ vars.FORCE_SITE_URL }}
+          FORCE_SITE_INGEST_TOKEN: ${{ secrets.FORCE_SITE_INGEST_TOKEN }}
+        run: python scripts/force_handoff.py
+
+      - name: 标记受力分析后台接收失败
+        if: ${{ always() && steps.force_handoff.outcome == 'failure' }}
+        run: echo "::warning::受力分析后台接收未完成；独立云端补收任务会按原交付身份重试。"
+
       - name: 保存跨周去重状态
         id: upload_state
         if: ${{ always() && steps.prepare_state.outputs.available == 'true' }}

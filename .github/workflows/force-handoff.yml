@@ -1,0 +1,36 @@
+name: 受力分析后台周报接收
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * 1"
+      timezone: "Asia/Shanghai"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: force-project-handoff
+  cancel-in-progress: false
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      FORCE_SITE_URL: ${{ vars.FORCE_SITE_URL }}
+      FORCE_SITE_INGEST_TOKEN: ${{ secrets.FORCE_SITE_INGEST_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: 读取既有周报并写入受力分析后台
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python scripts/force_handoff.py --fetch-latest
+          else
+            python scripts/force_handoff.py --fetch-all
+          fi
