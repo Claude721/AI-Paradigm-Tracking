@@ -14,7 +14,7 @@ from paradigms.models import (
     EvidenceType, ParadigmCandidate, ResearcherProfile, TechnicalEvidence,
     delivery_researcher_profiles, key_researcher_profiles,
 )
-from paradigms.researcher_identity import merge_researcher_profiles
+from paradigms.researcher_identity import merge_researcher_profiles, verify_contact
 from reports.paradigm_generator import _attach_researcher_index
 from sources.researcher_profile_source import ResearcherProfileClient, _seed_profiles
 
@@ -137,6 +137,9 @@ class ResearcherIdentityTests(unittest.TestCase):
                 current_affiliation=f"Lab {index}",
                 identifiers={"orcid": f"0000-000{index}"},
                 profile_urls={"orcid": f"https://orcid.org/0000-000{index}"},
+                # Both same-name people need their own work association;
+                # merely sharing a byline name cannot authorize publication.
+                representative_works=[{"title": "paper", "url": origin("paper").url}],
             )
             for index in (1, 2)
         ]
@@ -207,6 +210,7 @@ class ResearcherActiveLookupTests(unittest.IsolatedAsyncioTestCase):
         client = ResearcherProfileClient()
 
         async def verify(_http, profile, _evidence):
+            verify_contact(profile, "openalex", profile.identifiers["openalex"], _evidence.url, "academic_identity")
             profile.contact_search_notes.append(
                 "当前论文题目与 OpenAlex 作者实体交叉核验通过"
             )

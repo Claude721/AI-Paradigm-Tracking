@@ -159,10 +159,17 @@ def has_independent_origins(origins):
 
 def profile_references_origin(candidate, profile):
     """A verified person is not automatically an author of this mechanism."""
+    from .researcher_identity import normalized_person_name
+    if profile.identity_policy_version:
+        from .researcher_identity import profile_bound_to_work
+        return any(profile_bound_to_work(profile, origin) for origin in candidate.evidence
+                   if origin.evidence_type in ORIGIN_EVIDENCE_TYPES and countable_evidence(candidate, origin))
+    name = normalized_person_name(profile.name)
+    ambiguous = sum(normalized_person_name(person.name) == name for person in candidate.researchers) > 1
     for origin in candidate.evidence:
         if origin.evidence_type not in ORIGIN_EVIDENCE_TYPES or not countable_evidence(candidate, origin):
             continue
-        if any(_normal(profile.name) == _normal(name) for name in origin.authors):
+        if name and not ambiguous and any(name == normalized_person_name(author) for author in origin.authors):
             return True
         for work in profile.representative_works:
             if origin.url and work.get("url") == origin.url:

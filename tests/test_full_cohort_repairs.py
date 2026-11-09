@@ -156,8 +156,8 @@ class InterfaceRepairTests(unittest.IsolatedAsyncioTestCase):
     async def test_homepage_biography_without_meta_is_read_as_professional_background(self):
         profile = ResearcherProfile(name="Ada Researcher", profile_urls={"homepage": "https://ada.example"})
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200,
-            text="<nav>Unrelated</nav><p>I am a doctoral student researching robot learning and world models at Example Lab.</p>"))) as client:
-            await ResearcherProfileClient()._homepage_contacts(client, profile)
+            text="<nav>Unrelated</nav><h1>Ada Researcher</h1><p>I am a doctoral student researching robot learning and world models at Example Lab.</p>"))) as client:
+            await ResearcherProfileClient(host_validator=AsyncMock())._homepage_contacts(client, profile)
         self.assertIn("doctoral student", profile.public_bio_excerpt)
         self.assertEqual(profile.contact_search_status, "completed")
 

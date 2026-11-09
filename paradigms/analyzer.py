@@ -1192,9 +1192,22 @@ class ResearcherTrajectoryAnalyzer:
         self, candidate: ParadigmCandidate, profile: ResearcherProfile
     ) -> None:
         authored_facts = candidate_authorship(candidate, limit=None)
+        from .researcher_identity import profile_bound_to_work
+        from .evidence_association import countable_evidence
+        origins = [item for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES and countable_evidence(candidate, item)]
+        if profile.identity_policy_version:
+            origins = [item for item in origins if profile_bound_to_work(profile, item)]
+        elif sum(person.name == profile.name for person in candidate.researchers) > 1:
+            # Legacy namesakes retain raw dossiers, but cannot inherit each
+            # other's current-work byline or prompt merely through a name.
+            origins = [item for item in origins if any(work.get("url") == item.url for work in profile.representative_works)]
+        if profile.identity_policy_version and not origins:
+            profile.attribution_analysis_status = "insufficient_material"
+            profile.research_trajectory = "当前原文与人物档案的版本关联未闭合，未借用其他工作的署名或履历。"
+            return
         if not profile.representative_works and not profile.public_bio_excerpt:
-            public_origins = [item for item in candidate.evidence
-                if item.evidence_type in ORIGIN_EVIDENCE_TYPES and
+            public_origins = [item for item in origins
+                if
                 (item.summary.strip() or item.authors or item.raw.get("document_excerpt"))]
             if not public_origins:
                 profile.attribution_analysis_status = "insufficient_material"
@@ -1210,6 +1223,12 @@ class ResearcherTrajectoryAnalyzer:
             works=profile.representative_works,
             contacts=profile.public_contacts,
             search_notes=profile.contact_search_notes,
+            identity_evidence={"policy_version": profile.identity_policy_version,
+                "work_bindings": profile.identity_bindings,
+                "contact_sources": profile.contact_provenance,
+                "lookup_outcomes": [{"provider": v.get("provider"), "status": v.get("status"), "reason": v.get("reason")}
+                                    for v in profile.identity_observations[-20:]],
+                "affiliation_claims": profile.affiliation_observations[:8]},
             public_bio=profile.public_bio_excerpt,
             prior_affiliations=profile.prior_affiliations,
             current_work_context=[{"title": item.title, "url": item.url,
@@ -1217,7 +1236,7 @@ class ResearcherTrajectoryAnalyzer:
                 "source_authorship": [fact.to_dict() for fact in authored_facts
                                       if fact.source_fingerprint == item.fingerprint and fact.name == profile.name],
                 "name_is_public_byline": any(fact.source_fingerprint == item.fingerprint and fact.name == profile.name for fact in authored_facts)}
-                for item in candidate.evidence if item.evidence_type in ORIGIN_EVIDENCE_TYPES],
+                for item in origins],
         )
         response = None
         response_recorded = False

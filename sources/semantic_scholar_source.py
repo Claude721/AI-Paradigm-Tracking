@@ -11,6 +11,10 @@ import httpx
 
 import config
 from paradigms.models import EvidenceType, ResearcherProfile, TechnicalEvidence
+from paradigms.researcher_identity import (bind_current_work, normalized_person_name,
+                                          record_identity_observation, verify_contact)
+from runtime_clock import observation_now
+from sources.professional_identity import profile_label
 
 logger = logging.getLogger(__name__)
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
@@ -59,7 +63,38 @@ class SemanticScholarClient:
             paper = _best_title_match(evidence.title, matches)
             if not paper:
                 return None, []
-            profiles = await self._author_profiles(client, paper.get("authors", [])[:2])
+            authors = paper.get("authors") or []
+            if not isinstance(authors, list) or any(not isinstance(author, dict) for author in authors):
+                raise ValueError("Invalid Semantic Scholar authors")
+            profiles = []
+            if _identity_paper_match(evidence, paper, matches):
+                for author in authors[:2]:
+                    name = str(author.get("name") or "")
+                    normalized = normalized_person_name(name)
+                    if (not normalized or normalized not in {normalized_person_name(n) for n in evidence.authors}
+                            or sum(normalized_person_name(a.get("name", "")) == normalized for a in authors) != 1):
+                        continue
+                    # Author API faults are local: keep healthy peers and the
+                    # citation result rather than losing the whole response.
+                    try:
+                        people = await self._author_profiles(client, [author])
+                    except Exception as exc:
+                        person = ResearcherProfile(name=name, identity_search_status="failed", contact_search_status="failed")
+                        bind_current_work(person, evidence)
+                        record_identity_observation(person, "semantic_scholar", "failed", url=paper.get("url", ""), reason=type(exc).__name__)
+                        profiles.append(person)
+                        continue
+                    for person in people:
+                        bind_current_work(person, evidence)
+                        person.role = "原文署名作者（学术图谱对齐）"
+                        for label, url in list(person.profile_urls.items()):
+                            kind = profile_label(url, label)
+                            if kind:
+                                verify_contact(person, kind, url, person.profile_urls.get("semantic_scholar") or evidence.url, "academic_identity")
+                        person.identity_search_status = "completed"
+                        person.contact_search_status = "completed" if person.public_contacts else "not_found"
+                        record_identity_observation(person, "semantic_scholar", "completed", url=paper.get("url", ""), reason="CurrentWorkAligned")
+                        profiles.append(person)
 
         external = paper.get("externalIds") or {}
         citation_evidence = TechnicalEvidence(
@@ -115,6 +150,7 @@ class SemanticScholarClient:
             payload = papers_response.json()
             if (not isinstance(details, dict) or not isinstance(details.get("name"), str)
                     or str(details.get("authorId", "")) != str(author_id)
+                    or normalized_person_name(details.get("name", "")) != normalized_person_name(author.get("name", ""))
                     or not isinstance(payload, dict) or not isinstance(payload.get("data"), list)
                     or any(not isinstance(item, dict) for item in payload["data"])):
                 raise ValueError("Invalid Semantic Scholar author response")
@@ -130,8 +166,10 @@ class SemanticScholarClient:
                 ResearcherProfile(
                     name=details.get("name") or author.get("name", ""),
                     role="第一作者" if index == 0 else "共同作者",
-                    current_affiliation=(details.get("affiliations") or [""])[0],
-                    prior_affiliations=(details.get("affiliations") or [])[1:],
+                    affiliation_observations=[{"organization": organization,
+                        "source_url": details.get("url", ""), "kind": "undated_graph_affiliation",
+                        "observed_at": observation_now().isoformat()}
+                        for organization in details.get("affiliations", []) or [] if isinstance(organization, str) and organization],
                     representative_works=[
                         {
                             "title": paper.get("title", ""),
@@ -180,3 +218,21 @@ def _best_title_match(title: str, papers: list[dict]) -> dict | None:
         return None
     score, paper = max(scored, key=lambda item: item[0])
     return paper if score >= 0.82 else None
+
+
+def _identity_paper_match(evidence, paper, matches):
+    """Citation fuzzy recall is not permission to attach a person's identity."""
+    external = paper.get("externalIds") or {}
+    if not isinstance(external, dict):
+        return False
+    overlaps = []
+    for key, remote in (("doi", "DOI"), ("arxiv", "ArXiv")):
+        local, returned = str(evidence.identifiers.get(key) or ""), str(external.get(remote) or "")
+        if local and returned:
+            normalize = lambda value: value.casefold().removeprefix("https://doi.org/").removeprefix("http://doi.org/")
+            overlaps.append(normalize(local) == normalize(returned))
+    if overlaps:
+        return all(overlaps)
+    title = normalized_person_name(evidence.title)
+    return bool(title and title == normalized_person_name(paper.get("title", ""))
+                and sum(normalized_person_name(item.get("title", "")) == title for item in matches) == 1)

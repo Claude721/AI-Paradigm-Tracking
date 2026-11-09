@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 import config
 from sources.paradigm_evidence_source import CommunityEvidenceClient
 from sources.semantic_scholar_source import SemanticScholarClient
-from sources.researcher_profile_source import ResearcherProfileClient
+from sources.researcher_profile_source import ResearcherProfileClient, _seed_profiles
 from sources.arxiv_document_source import ArxivDocumentClient
 from sources.secondary_page_source import SecondaryPageReader
 from sources.direction_signal_source import DirectionSignalClient
@@ -29,7 +29,7 @@ from .models import (
     scrub_ephemeral_evidence,
     is_verified_substantive_discussion,
 )
-from .researcher_identity import merge_researcher_profiles
+from .researcher_identity import merge_researcher_profiles, record_identity_observation, profile_bound_to_work
 from .async_utils import gather_scoped
 from .search_receipts import blocking_searches, record_search
 from .evidence_association import references_origin, countable_evidence, VERSION as ASSOCIATION_VERSION
@@ -293,20 +293,36 @@ class EvidenceEnricher:
     async def enrich_people(self, candidates):
         """Optional identity I/O runs AFTER the technical checkpoint is saved."""
         async def enrich_one(candidate):
-            primary = next((item for item in candidate.evidence
+            origins = [item for item in candidate.evidence
                             if item.evidence_type in ORIGIN_EVIDENCE_TYPES
-                            and countable_evidence(candidate, item)), None)
-            if primary is None:
+                            and countable_evidence(candidate, item)]
+            if not origins:
                 return
-            try:
-                candidate.researchers = await self.researchers.enrich(primary, candidate.researchers)
-            except Exception as exc:
-                for profile in candidate.researchers:
-                    profile.identity_search_status = "failed"
-                    profile.contact_search_status = "failed"
-                    profile.contact_search_notes.append("人物检索未取得可靠结果：" + type(exc).__name__)
-                candidate.community_coverage["researcher_attribution"] = "人物补充检索未成功：" + type(exc).__name__
-                logger.warning("人物补充未完成 [%s]: %s", candidate.name, type(exc).__name__)
+            # Share the existing key-person allowance across source works,
+            # rather than always spending it on the first co-cluster member.
+            for primary in origins[:config.PARADIGM_KEY_RESEARCHER_LIMIT]:
+                try:
+                    if len(origins) == 1:
+                        candidate.researchers = await self.researchers.enrich(primary, candidate.researchers)
+                    else:
+                        candidate.researchers = await self.researchers.enrich(primary, candidate.researchers, limit=1)
+                except Exception as exc:
+                    try:
+                        seeds = _seed_profiles(primary, [], 1)
+                    except Exception as seed_error:
+                        seeds = []
+                        candidate.community_coverage["researcher_seed"] = "本原点身份种子结构异常：" + type(seed_error).__name__
+                    for seed in seeds:
+                        profile = next((p for p in candidate.researchers
+                                        if p.name == seed.name and profile_bound_to_work(p, primary)), None)
+                        if profile is None:
+                            profile = seed
+                            candidate.researchers.append(profile)
+                        record_identity_observation(profile, "identity_runtime", "failed", url=primary.url, reason=type(exc).__name__)
+                        profile.identity_search_status = "partial" if profile.public_contacts else "failed"
+                        profile.contact_search_status = "partial" if profile.public_contacts else "failed"
+                    candidate.community_coverage["researcher_attribution"] = "人物补充检索未成功：" + type(exc).__name__
+                    logger.warning("人物补充未完成 [%s]: %s", candidate.name, type(exc).__name__)
             _attach_social_profiles(candidate)
         await gather_scoped(*(enrich_one(candidate) for candidate in candidates))
         return candidates
@@ -562,6 +578,12 @@ def _attach_social_profiles(candidate: ParadigmCandidate) -> None:
             continue
         for profile in candidate.researchers:
             if not _same_person_name(profile.name, social_name):
+                continue
+            if profile_url not in profile.public_contacts.values():
+                lead = {"url": profile_url, "source_url": evidence.url, "status": "unverified",
+                        "reason": "MatchingDisplayNameIsNotIdentity"}
+                if lead not in profile.profile_leads:
+                    profile.profile_leads.append(lead)
                 continue
             platform = str(evidence.raw.get("social_platform") or "x")
             profile_key = "xiaohongshu" if platform == "xiaohongshu" else "x"

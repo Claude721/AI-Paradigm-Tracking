@@ -1020,6 +1020,13 @@ def _researcher_dossier(profile: ResearcherProfile) -> dict:
         "representative_works": profile.representative_works[:6],
         "public_contacts": profile.public_contacts,
         "contact_search_notes": profile.contact_search_notes,
+        "identity_policy_version": profile.identity_policy_version,
+        "identity_bindings": profile.identity_bindings,
+        "contact_relations": {label: row.get("relation") for label, row in profile.contact_provenance.items()
+                              if label in profile.public_contacts},
+        "identity_lookup_summary": [{"provider": row.get("provider"), "status": row.get("status"),
+                                     "reason": row.get("reason")} for row in profile.identity_observations[-20:]],
+        "affiliation_observations": profile.affiliation_observations[:8],
     }
 
 

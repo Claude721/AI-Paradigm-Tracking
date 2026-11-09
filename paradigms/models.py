@@ -707,6 +707,13 @@ class ResearcherProfile:
     contact_search_status: str = ""
     # Optional enrichment outcome, never a technical admission requirement.
     attribution_analysis_status: str = ""
+    # Additive provenance; empty policy preserves historical dossiers verbatim.
+    identity_policy_version: str = ""
+    identity_bindings: list[dict[str, Any]] = field(default_factory=list)
+    identity_observations: list[dict[str, Any]] = field(default_factory=list)
+    contact_provenance: dict[str, dict[str, Any]] = field(default_factory=dict)
+    profile_leads: list[dict[str, Any]] = field(default_factory=list)
+    affiliation_observations: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def public_contacts(self) -> dict[str, str]:
@@ -720,6 +727,13 @@ class ResearcherProfile:
             email = safe_public_contact_target("email", self.public_email)
             if email:
                 contacts["email"] = email
+        if self.identity_policy_version:
+            contacts = {label: value for label, value in contacts.items()
+                        if (claim := self.contact_provenance.get(label))
+                        and claim.get("target") == value
+                        and claim.get("policy_version") == self.identity_policy_version
+                        and claim.get("relation") in {"work_author_link", "curated_author", "academic_identity", "person_page_link", "person_page_email", "historical_identity"}
+                        and safe_public_contact_target("homepage", claim.get("source_url", ""))}
         return contacts
 
     @property
@@ -870,6 +884,8 @@ def delivery_researcher_profiles(
         "semantic_scholar",
         "linkedin",
         "github",
+        "huggingface",
+        "gitee",
     }
     ready: list[ResearcherProfile] = []
     for profile in key_researcher_profiles(profiles, limit):
@@ -1253,16 +1269,23 @@ def _researcher_profile_from_dict(payload: dict[str, Any]) -> ResearcherProfile:
             "public_email", "public_email_source", "background_summary",
             "public_bio_excerpt", "key_person_reason",
             "identity_search_status", "contact_search_status", "attribution_analysis_status",
+            "identity_policy_version",
         },
         lists={
             "prior_affiliations", "representative_works", "contact_search_notes",
+            "identity_bindings", "identity_observations", "profile_leads", "affiliation_observations",
         },
-        mappings={"profile_urls", "identifiers"},
+        mappings={"profile_urls", "identifiers", "contact_provenance"},
         numbers={"trajectory_consistency"},
     )
     for field_name in ("identity_search_status", "contact_search_status"):
-        if payload.get(field_name, "") not in {"", "completed", "failed", "not_configured"}:
+        if payload.get(field_name, "") not in {"", "completed", "failed", "not_configured", "partial", "not_found", "not_executed", "blocked", "unverified", "invalid"}:
             raise ValueError("人物检索状态无效")
+    for field_name in ("identity_bindings", "identity_observations", "profile_leads", "affiliation_observations"):
+        if any(not isinstance(row, dict) for row in payload.get(field_name, [])):
+            raise ValueError("人物身份回执必须为object数组")
+    if any(not isinstance(row, dict) for row in payload.get("contact_provenance", {}).values()):
+        raise ValueError("人物联系来源必须为object映射")
     if payload.get("attribution_analysis_status", "") not in {"", "completed", "failed", "insufficient_material", "not_executed"}:
         raise ValueError("人物辅助归因状态无效")
     return ResearcherProfile(
