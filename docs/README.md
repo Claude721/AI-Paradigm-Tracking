@@ -11,6 +11,7 @@
 | [研究设计](PARADIGM_RADAR_DESIGN.md) | 机制、去重、承接、逐路线质量门及 v5 交付 |
 | [配置清单](CONFIGURATION_CHECKLIST.md) | 双层模型、信源、窗口、费用与云端映射 |
 | [云端运行](CLOUD_AUTOMATION.md) | Workflow、状态恢复、邮件、制品与诊断 |
+| [受力分析后台交付](FORCE_PROJECT_HANDOFF.md) | 原周报与结构记录发送、专用凭据、独立云端补收及读回验收 |
 | [工程状态](PROJECT_HEALTH_REPORT.md) | 当前修复证据、已知缺口与下一步真实验收 |
 | [V0 验收计划](V0_REBUILD_PLAN.md) | 尚需的样本、整周、恢复与跨周验收 |
 | [信源说明](../信源说明.md) | 各类输入的角色、访问限制和内容清理 |

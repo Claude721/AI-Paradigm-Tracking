@@ -138,6 +138,8 @@ TRIAGE_THRESHOLD: int = _env_int("TRIAGE_THRESHOLD", 5)
 
 # ── 外部 API Token ───────────────────────────────────────
 GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
+FORCE_SITE_URL: str = os.getenv("FORCE_SITE_URL", "")
+FORCE_SITE_INGEST_TOKEN: str = os.getenv("FORCE_SITE_INGEST_TOKEN", "")
 PRODUCTHUNT_TOKEN: str = os.getenv("PRODUCTHUNT_TOKEN", "")
 TWITTER_BEARER_TOKEN: str = os.getenv("TWITTER_BEARER_TOKEN", "")
 TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")

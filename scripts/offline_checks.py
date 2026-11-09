@@ -37,6 +37,7 @@ def _safe_environment() -> dict[str, str]:
     # Production Variables/Secrets must never alter release-test semantics.
     configuration_prefixes = (
         "LLM_",
+        "FORCE_",
         "SUB_AGENT_",
         "MAIN_AGENT_",
         "PARADIGM_",
